@@ -11,11 +11,10 @@ use std::sync::Arc;
 use crate::storage::MemoryStorage;
 
 pub mod handlers;
-pub mod types;
 
 use handlers::{
-    AddObservationsParams, CreateEntityParams, CreateRelationParams, MemoryHandler, SearchParams,
-    SemanticSearchParams,
+    AddObservationsParams, CreateEntityParams, CreateRelationParams, DeleteEntityParams,
+    DeleteRelationParams, MemoryHandler, SearchParams, SemanticSearchParams,
 };
 
 #[derive(Clone)]
@@ -77,6 +76,22 @@ impl MemoryMcpServer {
     #[tool(description = "Read the full knowledge graph")]
     async fn read_graph(&self) -> Result<CallToolResult, McpError> {
         self.handler.get_graph().await
+    }
+
+    #[tool(description = "Delete an entity and its relations")]
+    async fn delete_entity(
+        &self,
+        Parameters(params): Parameters<DeleteEntityParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.handler.delete_entity(params).await
+    }
+
+    #[tool(description = "Delete a relation between entities")]
+    async fn delete_relation(
+        &self,
+        Parameters(params): Parameters<DeleteRelationParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.handler.delete_relation(params).await
     }
 
     #[tool(description = "Find semantically similar entities using embeddings")]

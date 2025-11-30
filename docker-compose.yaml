@@ -1,0 +1,25 @@
+# Docker Compose configuration for SurrealDB
+# Use with surreal-memory-server in server mode:
+#   SURREAL_MODE=server SURREAL_ENDPOINT=ws://localhost:8000 ./target/release/surreal-memory-server
+
+services:
+  surrealdb:
+    image: surrealdb/surrealdb:v2.4.0
+    container_name: surrealdb
+    restart: unless-stopped
+    user: root
+    command:
+      - start
+      - --log=info
+      - --user=root
+      - --pass=root
+      - --bind=0.0.0.0:8000
+      - surrealkv:/data/database.db
+    ports:
+      - "8000:8000"
+    volumes:
+      - surrealdb_data:/data
+
+volumes:
+  surrealdb_data:
+    driver: local

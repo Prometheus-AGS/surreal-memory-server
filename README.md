@@ -87,3 +87,13 @@ COHERE_EMBEDDING_MODEL=embed-english-v3.0
 | Local (bge-base) | ⚡⚡ | ⭐⭐⭐⭐ | Free | ✅ |
 | OpenAI | ⚡⚡ | ⭐⭐⭐⭐⭐ | $$ | ❌ |
 | Cohere | ⚡⚡ | ⭐⭐⭐⭐ | $ | ❌ |
+
+## Coding Standards & Quality Gate
+- Follow `docs/coding-standards/README.md` for all Rust patterns and documentation conventions.
+- Builds and tests must be warning-free. Run the quality gate before pushing changes:
+  ```bash
+  # Features default to embedded,metal; override with FEATURE_FLAGS if needed
+  FEATURE_FLAGS=embedded,metal ./scripts/quality-check.sh
+  ```
+- The gate runs `cargo fmt --all --check`, `cargo clippy --all-targets --no-default-features --features "$FEATURE_FLAGS" -- -D warnings`, and `cargo test --all-targets --no-default-features --features "$FEATURE_FLAGS"` with `RUSTFLAGS` forcing `-Dwarnings`.
+- `build.sh` reuses the same feature set and warnings-as-errors policy for release builds.

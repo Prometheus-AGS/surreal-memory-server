@@ -5,11 +5,11 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use chrono::Utc;
 use std::{cmp::Ordering, sync::Arc};
 use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
 use surrealdb::opt::auth::Root;
+use surrealdb::sql::Datetime;
 
 pub struct SurrealStorage {
     db: Surreal<Any>,
@@ -68,14 +68,17 @@ impl SurrealStorage {
 
     async fn init_schema(db: &Surreal<Any>) -> Result<()> {
         // Define entity table
+        // Use array<string> and array<float> for proper array typing in SCHEMAFULL mode
         db.query(
             "DEFINE TABLE entity SCHEMAFULL;
              DEFINE FIELD name ON entity TYPE string;
              DEFINE FIELD entity_type ON entity TYPE string;
-             DEFINE FIELD observations ON entity TYPE array;
+             DEFINE FIELD observations ON entity TYPE array<string>;
+             DEFINE FIELD observations.* ON entity TYPE string;
              DEFINE FIELD created_at ON entity TYPE datetime;
              DEFINE FIELD updated_at ON entity TYPE datetime;
-             DEFINE FIELD embedding ON entity TYPE option<array>;
+             DEFINE FIELD embedding ON entity TYPE option<array<float>>;
+             DEFINE FIELD embedding.* ON entity TYPE float;
              DEFINE INDEX entity_name ON entity FIELDS name UNIQUE;",
         )
         .await?;
@@ -100,19 +103,34 @@ impl SurrealStorage {
             sections.extend(entity.observations.iter().cloned());
         }
         let text = sections.join("\n");
-        let embedding = self
-            .embedding_service
-            .embed(&text)
-            .await
-            .context("Failed to generate embedding")?;
+        tracing::debug!(
+            "Computing embedding for entity '{}' with text length {}",
+            entity.name,
+            text.len()
+        );
+        let embedding = self.embedding_service.embed(&text).await.with_context(|| {
+            format!(
+                "Failed to generate embedding for entity '{}': text was '{}'",
+                entity.name,
+                &text[..text.len().min(100)]
+            )
+        })?;
+        tracing::debug!(
+            "Successfully computed embedding for '{}' with {} dimensions",
+            entity.name,
+            embedding.len()
+        );
         Ok(embedding)
     }
 
     async fn embed_query(&self, query: &str) -> Result<Vec<f32>> {
-        self.embedding_service
-            .embed(query)
-            .await
-            .context("Failed to embed query")
+        tracing::debug!("Embedding query: {}...", &query[..query.len().min(50)]);
+        self.embedding_service.embed(query).await.with_context(|| {
+            format!(
+                "Failed to embed query: '{}'",
+                &query[..query.len().min(100)]
+            )
+        })
     }
 
     fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -130,7 +148,7 @@ impl SurrealStorage {
 #[async_trait]
 impl MemoryStorage for SurrealStorage {
     async fn create_entity(&self, mut entity: Entity) -> Result<Entity> {
-        let now = Utc::now().to_rfc3339();
+        let now = Datetime::default();
         entity.created_at = now.clone();
         entity.updated_at = now;
         entity.embedding = Some(self.compute_embedding(&entity).await?);
@@ -158,7 +176,7 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn update_entity(&self, mut entity: Entity) -> Result<Entity> {
-        entity.updated_at = Utc::now().to_rfc3339();
+        entity.updated_at = Datetime::default();
         entity.embedding = Some(self.compute_embedding(&entity).await?);
 
         let updated: Option<Entity> = self
@@ -168,7 +186,7 @@ impl MemoryStorage for SurrealStorage {
             .bind(("type", entity.entity_type.clone()))
             .bind(("obs", entity.observations.clone()))
             .bind(("embedding", entity.embedding.clone()))
-            .bind(("updated", entity.updated_at.clone()))
+            .bind(("updated", entity.updated_at))
             .await?
             .take(0)?;
 
@@ -197,7 +215,7 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn create_relation(&self, mut relation: Relation) -> Result<Relation> {
-        relation.created_at = Utc::now().to_rfc3339();
+        relation.created_at = Datetime::default();
 
         let created: Option<Relation> = self
             .db

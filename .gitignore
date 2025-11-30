@@ -1,1 +1,40 @@
-/target
+# Build artifacts
+/target/
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+
+# SurrealDB data
+/data/
+*.db
+
+# Downloaded models
+/models/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Rust specific
+**/*.rs.bk
+Cargo.lock.bak
