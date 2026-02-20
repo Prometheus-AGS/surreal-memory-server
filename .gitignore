@@ -38,3 +38,9 @@ logs/
 # Rust specific
 **/*.rs.bk
 Cargo.lock.bak
+# Local AI tooling directories
+.evolver/
+.agent/
+.roo/
+.zed/
+docs/assessments/

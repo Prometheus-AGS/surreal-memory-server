@@ -1,0 +1,195 @@
+//! Mindmap — structured visual knowledge representation for persona modeling and ideation.
+//!
+//! Supports 5 map types derived from established cognitive frameworks:
+//! - `Radial` (Tony Buzan, 1974) — association radiating from a central concept
+//! - `Concept` (Novak, 1972) — labeled propositional links between concepts
+//! - `Argument` — claim/evidence/rebuttal sensemaking maps
+//! - `Tree` — hierarchical decomposition (org charts, capability trees)
+//! - `Temporal` — concept evolution across time periods
+
+use serde::{Deserialize, Serialize};
+use surrealdb::types::{Datetime, RecordId};
+use surrealdb_types::SurrealValue;
+
+/// The structural type of a mindmap — determines rendering and semantics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SurrealValue, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum MapType {
+    /// Tony Buzan radial — central node + radiating branches.
+    #[default]
+    Radial,
+    /// Novak concept map — labeled directed edges (e.g. "leads to", "requires").
+    Concept,
+    /// Argument / deliberation map — claim, evidence, rebuttal nodes.
+    Argument,
+    /// Hierarchical tree decomposition (non-radial parent→children).
+    Tree,
+    /// Temporal / timeline — branches represent time periods.
+    Temporal,
+}
+
+/// A node within a mindmap.
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue, Default)]
+pub struct MindMapNode {
+    /// Unique ID within this mindmap (not a SurrealDB record ID).
+    pub id: String,
+    /// Display label for the node.
+    pub label: String,
+    /// Parent node ID (None = root).
+    pub parent_id: Option<String>,
+    /// Node type for argument maps: `claim | evidence | rebuttal | idea`.
+    pub node_type: Option<String>,
+    /// Optional hex color (e.g. `"#4a90e2"`).
+    pub color: Option<String>,
+    /// Arbitrary JSON metadata.
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// A directed or undirected edge between two nodes.
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue, Default)]
+pub struct MindMapEdge {
+    pub from_id: String,
+    pub to_id: String,
+    /// Optional relationship label (e.g. `"supports"`, `"contradicts"`, `"leads to"`).
+    pub label: Option<String>,
+    /// True for concept maps and argument maps.
+    pub directed: bool,
+}
+
+/// A mindmap entity — the top-level container persisted in SurrealDB.
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
+pub struct MindMap {
+    pub id: Option<RecordId>,
+    pub name: String,
+    pub description: Option<String>,
+    pub map_type: MapType,
+    /// Agent that owns/created this mindmap.
+    pub agent_id: Option<String>,
+    /// User this mindmap belongs to (for persona maps).
+    pub user_id: Option<String>,
+    /// Optional TaskStream association.
+    pub task_stream_id: Option<RecordId>,
+    /// Taxonomy tags for discovery.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// All nodes in this mindmap.
+    #[serde(default)]
+    pub nodes: Vec<MindMapNode>,
+    /// All edges in this mindmap.
+    #[serde(default)]
+    pub edges: Vec<MindMapEdge>,
+    pub created_at: Datetime,
+    pub updated_at: Datetime,
+}
+
+impl MindMap {
+    /// Create a new mindmap with a root node.
+    pub fn new(
+        name: impl Into<String>,
+        map_type: MapType,
+        root_label: impl Into<String>,
+        description: Option<String>,
+        agent_id: Option<String>,
+        user_id: Option<String>,
+    ) -> Self {
+        let now = Datetime::default();
+        let root_label = root_label.into();
+        let root_node = MindMapNode {
+            id: "root".to_string(),
+            label: root_label,
+            parent_id: None,
+            node_type: None,
+            color: Some("#4a90e2".to_string()),
+            metadata: None,
+        };
+        Self {
+            id: None,
+            name: name.into(),
+            map_type,
+            description,
+            agent_id,
+            user_id,
+            task_stream_id: None,
+            tags: vec![],
+            nodes: vec![root_node],
+            edges: vec![],
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+}
+
+/// Export format for `export_mindmap`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExportFormat {
+    Json,
+    Mermaid,
+    Markdown,
+}
+
+impl MindMap {
+    /// Export this mindmap to the specified format.
+    pub fn export(&self, format: &ExportFormat) -> String {
+        match format {
+            ExportFormat::Json => serde_json::to_string_pretty(self).unwrap_or_default(),
+            ExportFormat::Mermaid => self.to_mermaid(),
+            ExportFormat::Markdown => self.to_markdown(),
+        }
+    }
+
+    fn to_mermaid(&self) -> String {
+        let mut out = String::from("graph TD\n");
+        for node in &self.nodes {
+            let safe_id = node.id.replace([':', '-', '.', ' '], "_");
+            out.push_str(&format!("    {}[\"{}\"]\n", safe_id, node.label));
+        }
+        for edge in &self.edges {
+            let from = edge.from_id.replace([':', '-', '.', ' '], "_");
+            let to = edge.to_id.replace([':', '-', '.', ' '], "_");
+            if let Some(label) = &edge.label {
+                out.push_str(&format!("    {} -->|{}| {}\n", from, label, to));
+            } else {
+                out.push_str(&format!("    {} --> {}\n", from, to));
+            }
+        }
+        // Also add parent→child edges from node.parent_id
+        for node in &self.nodes {
+            if let Some(parent_id) = &node.parent_id {
+                let parent = parent_id.replace([':', '-', '.', ' '], "_");
+                let child = node.id.replace([':', '-', '.', ' '], "_");
+                out.push_str(&format!("    {} --> {}\n", parent, child));
+            }
+        }
+        out
+    }
+
+    fn to_markdown(&self) -> String {
+        let mut out = format!("# {}\n\n", self.name);
+        if let Some(desc) = &self.description {
+            out.push_str(&format!("{}\n\n", desc));
+        }
+        out.push_str(&format!("**Type:** {:?}\n\n", self.map_type));
+        out.push_str("## Nodes\n\n");
+        for node in &self.nodes {
+            let indent = if node.parent_id.is_some() {
+                "  - "
+            } else {
+                "- "
+            };
+            out.push_str(&format!("{}`{}` — {}\n", indent, node.id, node.label));
+        }
+        if !self.edges.is_empty() {
+            out.push_str("\n## Edges\n\n");
+            for edge in &self.edges {
+                let arrow = if edge.directed { "→" } else { "—" };
+                let label = edge.label.as_deref().unwrap_or("");
+                out.push_str(&format!(
+                    "- `{}` {} `{}` {}\n",
+                    edge.from_id, arrow, edge.to_id, label
+                ));
+            }
+        }
+        out
+    }
+}

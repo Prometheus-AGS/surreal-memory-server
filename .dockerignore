@@ -1,0 +1,38 @@
+# Docker build context exclusions for surreal-memory-server
+
+# Build artifacts
+target/
+
+# Data and secrets
+data/
+models/
+.env
+.env.*
+*.db
+
+# Git history
+.git/
+.gitignore
+
+# Dev tooling / AI agents
+.agent/
+.agents/
+.evolver/
+.roo/
+.zed/
+
+# Documentation (not needed in image)
+docs/
+
+# Test fixtures
+tests/*.db
+tests/*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# macOS
+.DS_Store
+._*

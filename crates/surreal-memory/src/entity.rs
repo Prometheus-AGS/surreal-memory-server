@@ -1,6 +1,13 @@
-use serde::{Deserialize, Serialize};
-use surrealdb::types::{Datetime, RecordId, SurrealValue};
+//! Knowledge graph entity and relation types.
+//!
+//! Mirrors the original `models.rs` Entity/Relation schema but lives here
+//! as the canonical definition for both the library and the binary server.
 
+use serde::{Deserialize, Serialize};
+use surrealdb::types::{Datetime, RecordId};
+use surrealdb_types::SurrealValue;
+
+/// A node in the knowledge graph (person, project, concept, etc.)
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 pub struct Entity {
     pub id: Option<RecordId>,
@@ -28,6 +35,7 @@ impl Entity {
     }
 }
 
+/// A directed edge in the knowledge graph.
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 pub struct Relation {
     pub id: Option<RecordId>,
@@ -49,12 +57,14 @@ impl Relation {
     }
 }
 
+/// The complete knowledge graph snapshot.
 #[derive(Debug, Serialize, Deserialize, SurrealValue)]
 pub struct KnowledgeGraph {
     pub entities: Vec<Entity>,
     pub relations: Vec<Relation>,
 }
 
+/// An entity ranked by embedding similarity.
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 pub struct SemanticSearchResult {
     pub entity: Entity,

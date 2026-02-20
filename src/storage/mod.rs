@@ -1,33 +1,46 @@
+//! Storage module for surreal-memory-server binary.
+//!
+//! Re-exports the `MemoryStorage` trait and all types from the `surreal-memory`
+//! library crate. The binary's `SurrealStorage` wraps the library's impl and
+//! bridges the server's `Config` to the library's `SurrealConfig`.
+
+// Re-export the trait and all types from the library for use in MCP handlers.
+// Allow unused_imports: these are intentional public re-exports for the full API surface.
+#[allow(unused_imports)]
+pub use surreal_memory::storage::MemoryStorage;
+#[allow(unused_imports)]
+pub use surreal_memory::storage::surreal::{SurrealConfig, SurrealMode};
+#[allow(unused_imports)]
+pub use surreal_memory::{
+    ContextWindow, Entity, KnowledgeGraph, Memory, MemoryHistory, MemoryScope, MemoryType,
+    Relation, SemanticSearchResult, SurrealStorage, TaskStream, TaskStreamStatus,
+};
+
+// Bridge: create SurrealStorage from the server's Config
+use crate::{
+    config::{Config, SurrealMode as ServerMode},
+    embeddings::EmbeddingService,
+};
 use anyhow::Result;
-use async_trait::async_trait;
+use std::sync::Arc;
 
-pub mod models;
-pub mod surreal;
+pub async fn create_storage(
+    config: &Config,
+    embedding_service: Arc<dyn EmbeddingService>,
+) -> Result<Arc<dyn MemoryStorage>> {
+    let surreal_config = SurrealConfig {
+        mode: match config.surreal_mode {
+            ServerMode::Embedded => SurrealMode::Embedded,
+            ServerMode::Server => SurrealMode::Server,
+        },
+        endpoint: config.surreal_endpoint.clone(),
+        embedded_path: config.embedded_path.clone(),
+        username: config.surreal_username.clone(),
+        password: config.surreal_password.clone(),
+        namespace: config.surreal_namespace.clone(),
+        database: config.surreal_database.clone(),
+    };
 
-use models::{Entity, KnowledgeGraph, Relation, SemanticSearchResult};
-
-#[async_trait]
-pub trait MemoryStorage: Send + Sync {
-    async fn create_entity(&self, entity: Entity) -> Result<Entity>;
-    async fn get_entity(&self, name: &str) -> Result<Option<Entity>>;
-    async fn update_entity(&self, entity: Entity) -> Result<Entity>;
-    async fn delete_entity(&self, name: &str) -> Result<()>;
-    async fn search_entities(&self, query: &str) -> Result<Vec<Entity>>;
-
-    async fn create_relation(&self, relation: Relation) -> Result<Relation>;
-    async fn get_relations(&self, entity_name: &str) -> Result<Vec<Relation>>;
-    async fn delete_relation(&self, from: &str, to: &str, relation_type: &str) -> Result<()>;
-
-    async fn get_graph(&self) -> Result<KnowledgeGraph>;
-    async fn add_observations(
-        &self,
-        entity_name: &str,
-        observations: Vec<String>,
-    ) -> Result<Entity>;
-    async fn semantic_search(
-        &self,
-        query: &str,
-        limit: usize,
-        threshold: f32,
-    ) -> Result<Vec<SemanticSearchResult>>;
+    let storage = SurrealStorage::new(&surreal_config, embedding_service).await?;
+    Ok(Arc::new(storage))
 }
