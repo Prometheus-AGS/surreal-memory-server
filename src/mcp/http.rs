@@ -1,41 +1,150 @@
-//! HTTP/SSE MCP transport — wraps `MemoryMcpServer` in rmcp's `StreamableHttpService`
-//! and exposes it as an Axum route at `POST/GET/DELETE /mcp`.
-//!
-//! This enables any HTTP client (e.g., remote agents, web apps) to speak the
-//! MCP Streamable HTTP transport specification in addition to the stdio transport.
-
-use std::sync::Arc;
-
-use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+use axum::{
+    Json, Router,
+    extract::{Query, State},
+    http::HeaderMap,
+    response::{Sse, sse::Event},
+    routing::{get, post},
 };
+use dashmap::DashMap;
+use rmcp::{
+    model::ClientJsonRpcMessage,
+    serve_server,
+    service::{RoleServer, RxJsonRpcMessage, TxJsonRpcMessage},
+    transport::{Transport, TransportAdapterIdentity},
+};
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::{Stream, StreamExt};
+use uuid::Uuid;
 
 use crate::{mcp::MemoryMcpServer, storage::MemoryStorage};
 
-/// Build an `axum::Router` that handles the streamable-http MCP transport at `prefix`.
-pub fn mcp_http_router(storage: Arc<dyn MemoryStorage>, prefix: &str) -> axum::Router {
-    let storage = Arc::clone(&storage);
+type SessionMap = Arc<DashMap<String, mpsc::Sender<RxJsonRpcMessage<RoleServer>>>>;
 
-    // Session manager — tracks open SSE connections keyed by Mcp-Session-Id header.
-    let session_manager = Arc::new(LocalSessionManager::default());
+#[derive(Clone)]
+struct HttpAppState {
+    storage: Arc<dyn MemoryStorage>,
+    sessions: SessionMap,
+}
 
-    // Use the Default config — keeps all fields populated correctly regardless
-    // of which patch of rmcp we compile against.
-    let config = StreamableHttpServerConfig {
-        stateful_mode: true,
-        ..StreamableHttpServerConfig::default()
+pub fn mcp_http_router(storage: Arc<dyn MemoryStorage>, prefix: &str) -> Router {
+    let state = HttpAppState {
+        storage,
+        sessions: Arc::new(DashMap::new()),
     };
 
-    // Service factory — invoked once per new client initialize request.
-    let http_service = StreamableHttpService::new(
-        move || -> Result<MemoryMcpServer, std::io::Error> {
-            Ok(MemoryMcpServer::new(Arc::clone(&storage)))
-        },
-        Arc::clone(&session_manager),
-        config,
-    );
+    let routes = Router::new()
+        .route("/sse", get(sse_handler))
+        .route("/messages", post(messages_handler))
+        .with_state(state);
 
-    // `StreamableHttpService` implements `tower::Service`, so Axum can route to it
-    // directly via `route_service`. It handles GET (SSE), POST, and DELETE on one path.
-    axum::Router::new().route_service(prefix, http_service)
+    Router::new().nest(prefix, routes)
+}
+
+pub struct MuxTransport {
+    pub tx: mpsc::Sender<TxJsonRpcMessage<RoleServer>>,
+    pub rx: mpsc::Receiver<RxJsonRpcMessage<RoleServer>>,
+}
+
+impl Transport<RoleServer> for MuxTransport {
+    type Error = std::io::Error;
+
+    fn send(
+        &mut self,
+        item: TxJsonRpcMessage<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let tx = self.tx.clone();
+        async move {
+            tx.send(item)
+                .await
+                .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "send error"))
+        }
+    }
+
+    async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleServer>> {
+        self.rx.recv().await
+    }
+
+    async fn close(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+async fn sse_handler(
+    headers: HeaderMap,
+    State(state): State<HttpAppState>,
+) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
+    let session_id = Uuid::new_v4().to_string();
+
+    let (client_tx, server_rx) = mpsc::channel::<RxJsonRpcMessage<RoleServer>>(100);
+    let (server_tx, client_rx) = mpsc::channel::<TxJsonRpcMessage<RoleServer>>(100);
+
+    state.sessions.insert(session_id.clone(), client_tx);
+
+    let transport = MuxTransport {
+        tx: server_tx,
+        rx: server_rx,
+    };
+
+    let server = MemoryMcpServer::new(state.storage.clone());
+
+    let session_id_clone = session_id.clone();
+    let sessions_clone = state.sessions.clone();
+    tokio::spawn(async move {
+        let res = serve_server::<MemoryMcpServer, MuxTransport, _, TransportAdapterIdentity>(
+            server, transport,
+        )
+        .await;
+
+        match res {
+            Ok(service) => {
+                let _ = service.waiting().await;
+            }
+            Err(e) => {
+                tracing::error!("Serve server error: {}", e);
+            }
+        }
+
+        sessions_clone.remove(&session_id_clone);
+        tracing::info!("MCP session {} closed", session_id_clone);
+    });
+
+    let stream = ReceiverStream::new(client_rx).map(|msg| {
+        let json_str = serde_json::to_string(&msg).unwrap_or_default();
+        Ok(Event::default().event("message").data(json_str))
+    });
+
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("localhost:23001");
+
+    let endpoint_uri = format!("http://{}/mcp/messages?sessionId={}", host, session_id);
+    let initial_stream =
+        tokio_stream::once(Ok(Event::default().event("endpoint").data(endpoint_uri)));
+
+    let combined_stream = initial_stream.chain(stream);
+
+    Sse::new(combined_stream).keep_alive(axum::response::sse::KeepAlive::new())
+}
+
+#[derive(serde::Deserialize)]
+struct MessagesQuery {
+    #[serde(rename = "sessionId")]
+    session_id: String,
+}
+
+async fn messages_handler(
+    State(state): State<HttpAppState>,
+    Query(query): Query<MessagesQuery>,
+    Json(payload): Json<ClientJsonRpcMessage>,
+) -> axum::response::Result<impl axum::response::IntoResponse, axum::http::StatusCode> {
+    if let Some(tx) = state.sessions.get(&query.session_id) {
+        if tx.send(payload).await.is_ok() {
+            return Ok(axum::http::StatusCode::ACCEPTED);
+        }
+    }
+
+    Err(axum::http::StatusCode::NOT_FOUND)
 }

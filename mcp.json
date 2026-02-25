@@ -1,0 +1,7 @@
+{
+    "mcpServers": {
+        "surreal-memory": {
+            "url": "http://localhost:23001/mcp/sse"
+        }
+    }
+}

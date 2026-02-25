@@ -173,6 +173,18 @@ pub struct CreateRelationParams {
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct EntityNameParams {
+    #[schemars(description = "Exact name of the entity")]
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TimeParams {
+    #[schemars(description = "RFC-3339 formatted timestamp (e.g., '2025-01-01T00:00:00Z')")]
+    pub before_rfc3339: String,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SearchParams {
     #[schemars(
         description = "Text to match against entity names and types (exact substring match)"
@@ -286,6 +298,24 @@ impl CreateRelationParams {
             return Err(MemoryHandler::invalid_params(
                 "Source and target entities must be different",
             ));
+        }
+        Ok(())
+    }
+}
+
+impl EntityNameParams {
+    fn validate(&self) -> Result<(), McpError> {
+        if self.name.trim().is_empty() {
+            return Err(MemoryHandler::invalid_params("Entity name cannot be empty"));
+        }
+        Ok(())
+    }
+}
+
+impl TimeParams {
+    fn validate(&self) -> Result<(), McpError> {
+        if self.before_rfc3339.trim().is_empty() {
+            return Err(MemoryHandler::invalid_params("Timestamp cannot be empty"));
         }
         Ok(())
     }
@@ -413,6 +443,76 @@ impl MemoryHandler {
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&created)
                 .unwrap_or_else(|_| "Relation created".to_string()),
+        )]))
+    }
+
+    pub async fn get_entity(&self, params: EntityNameParams) -> Result<CallToolResult, McpError> {
+        params.validate()?;
+        let entity = self
+            .storage
+            .get_entity(&params.name)
+            .await
+            .map_err(Self::internal_error)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&entity).unwrap_or_else(|_| "null".to_string()),
+        )]))
+    }
+
+    pub async fn update_entity(
+        &self,
+        params: CreateEntityParams,
+    ) -> Result<CallToolResult, McpError> {
+        params.validate()?;
+        let entity = Entity::new(params.name, params.entity_type, params.observations);
+        let updated = self
+            .storage
+            .update_entity(entity)
+            .await
+            .map_err(Self::internal_error)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&updated).unwrap_or_else(|_| "Entity updated".to_string()),
+        )]))
+    }
+
+    pub async fn get_relations(
+        &self,
+        params: EntityNameParams,
+    ) -> Result<CallToolResult, McpError> {
+        params.validate()?;
+        let relations = self
+            .storage
+            .get_relations(&params.name)
+            .await
+            .map_err(Self::internal_error)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&relations).unwrap_or_else(|_| "[]".to_string()),
+        )]))
+    }
+
+    pub async fn get_entity_history(
+        &self,
+        params: EntityNameParams,
+    ) -> Result<CallToolResult, McpError> {
+        params.validate()?;
+        let history = self
+            .storage
+            .get_entity_history(&params.name)
+            .await
+            .map_err(Self::internal_error)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&history).unwrap_or_else(|_| "[]".to_string()),
+        )]))
+    }
+
+    pub async fn get_graph_at_time(&self, params: TimeParams) -> Result<CallToolResult, McpError> {
+        params.validate()?;
+        let graph = self
+            .storage
+            .get_graph_at_time(&params.before_rfc3339)
+            .await
+            .map_err(Self::internal_error)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&graph).unwrap_or_else(|_| "{}".to_string()),
         )]))
     }
 

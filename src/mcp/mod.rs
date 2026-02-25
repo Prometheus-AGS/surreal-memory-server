@@ -18,11 +18,12 @@ use handlers::{
     AddToTaskStreamParams, AutoSummarizeTaskStreamParams, CompressMemoriesParams,
     ConversationParams, CreateEntitiesParams, CreateEntityParams, CreateMindmapParams,
     CreateRelationParams, CreateRelationsParams, CreateTaskStreamParams, DeleteEntityParams,
-    DeleteMindmapNodeParams, DeleteRelationParams, ExpandNeighborsParams, ExportMindmapParams,
-    FindPathParams, GenerateIdeationMindmapParams, GeneratePersonaMindmapParams, GetContextParams,
-    GetRelatedParams, HybridSearchParams, ListMindmapsParams, MemoryHandler, MemoryIdParams,
-    MindmapNameParams, ScopeFilterParams, SearchMemoriesParams, SearchParams, SemanticSearchParams,
-    TaskStreamNameParams, UpdateMemoryParams,
+    DeleteMindmapNodeParams, DeleteRelationParams, EntityNameParams, ExpandNeighborsParams,
+    ExportMindmapParams, FindPathParams, GenerateIdeationMindmapParams,
+    GeneratePersonaMindmapParams, GetContextParams, GetRelatedParams, HybridSearchParams,
+    ListMindmapsParams, MemoryHandler, MemoryIdParams, MindmapNameParams, ScopeFilterParams,
+    SearchMemoriesParams, SearchParams, SemanticSearchParams, TaskStreamNameParams, TimeParams,
+    UpdateMemoryParams,
 };
 
 #[derive(Clone)]
@@ -94,6 +95,50 @@ impl MemoryMcpServer {
     )]
     async fn read_graph(&self) -> Result<CallToolResult, McpError> {
         self.handler.get_graph().await
+    }
+
+    #[tool(description = "Retrieve a single entity by exact name.")]
+    async fn get_entity(
+        &self,
+        Parameters(params): Parameters<EntityNameParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.handler.get_entity(params).await
+    }
+
+    #[tool(
+        description = "Update an existing entity exactly. Replaces entity type and observations."
+    )]
+    async fn update_entity(
+        &self,
+        Parameters(params): Parameters<CreateEntityParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.handler.update_entity(params).await
+    }
+
+    #[tool(description = "Retrieve all relations (incoming and outgoing) for an entity.")]
+    async fn get_relations(
+        &self,
+        Parameters(params): Parameters<EntityNameParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.handler.get_relations(params).await
+    }
+
+    #[tool(description = "Retrieve the temporal audit log of an entity's changes.")]
+    async fn get_entity_history(
+        &self,
+        Parameters(params): Parameters<EntityNameParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.handler.get_entity_history(params).await
+    }
+
+    #[tool(
+        description = "Retrieve the full knowledge graph as it existed at a past RFC-3339 timestamp."
+    )]
+    async fn get_graph_at_time(
+        &self,
+        Parameters(params): Parameters<TimeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.handler.get_graph_at_time(params).await
     }
 
     #[tool(

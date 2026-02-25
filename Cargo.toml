@@ -61,6 +61,11 @@ axum = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
 
+# HTTP SSE Transport
+dashmap = "6.1.0"
+tokio-stream = "0.1"
+uuid = { version = "1.11.0", features = ["v4", "fast-rng"] }
+
 # Binary-only
 dotenvy = "0.15"
 dirs = "6"
