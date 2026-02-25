@@ -17,10 +17,10 @@ pub fn router() -> Router<AppState> {
         .route("/", post(add_memory))
         .route("/", get(get_all_memories))
         .route("/", delete(delete_all_memories))
-        .route("/:id", get(get_memory))
-        .route("/:id", put(update_memory))
-        .route("/:id", delete(delete_memory))
-        .route("/:id/history", get(get_memory_history))
+        .route("/{id}", get(get_memory))
+        .route("/{id}", put(update_memory))
+        .route("/{id}", delete(delete_memory))
+        .route("/{id}/history", get(get_memory_history))
 }
 
 #[derive(Deserialize)]

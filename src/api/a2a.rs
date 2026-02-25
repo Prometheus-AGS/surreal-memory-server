@@ -18,7 +18,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/agent.json", get(agent_card))
         .route("/a2a/tasks/send", post(send_task))
-        .route("/a2a/tasks/:id", get(get_task))
+        .route("/a2a/tasks/{id}", get(get_task))
 }
 
 /// A2A Agent Card — describes capabilities per the A2A spec.

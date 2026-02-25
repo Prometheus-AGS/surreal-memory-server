@@ -59,7 +59,19 @@ async fn main() -> Result<()> {
     let api_handle = tokio::spawn(async move { run_api_server(api_storage, api_port).await });
 
     // ── MCP stdio ─────────────────────────────────────────────────────────────
-    let mcp_handle = tokio::spawn(async move { run_mcp_server(storage).await });
+    let enable_stdio_mcp = std::env::var("MCP_STDIO")
+        .unwrap_or_else(|_| "true".to_string())
+        .to_lowercase()
+        != "false";
+
+    let mcp_handle = tokio::spawn(async move {
+        if enable_stdio_mcp {
+            run_mcp_server(storage).await
+        } else {
+            // Keep the future pending forever so tokio::select! doesn't exit
+            std::future::pending().await
+        }
+    });
 
     tokio::select! {
         result = api_handle => {
@@ -70,10 +82,12 @@ async fn main() -> Result<()> {
             }
         }
         result = mcp_handle => {
-            match result {
-                Ok(Ok(())) => tracing::info!("MCP server stopped"),
-                Ok(Err(e)) => tracing::error!("MCP server error: {}", e),
-                Err(e) => tracing::error!("MCP task panic: {}", e),
+            if enable_stdio_mcp {
+                match result {
+                    Ok(Ok(())) => tracing::info!("MCP server stopped"),
+                    Ok(Err(e)) => tracing::error!("MCP server error: {}", e),
+                    Err(e) => tracing::error!("MCP task panic: {}", e),
+                }
             }
         }
         result = ttl_handle => {

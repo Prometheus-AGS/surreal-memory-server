@@ -16,12 +16,12 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", post(create_mindmap))
         .route("/", get(list_mindmaps))
-        .route("/:name", get(get_mindmap))
-        .route("/:name", delete(delete_mindmap))
-        .route("/:name/nodes", post(add_node))
-        .route("/:name/nodes/:node_id", delete(delete_node))
-        .route("/:name/edges", post(add_edge))
-        .route("/:name/export", get(export_mindmap))
+        .route("/{name}", get(get_mindmap))
+        .route("/{name}", delete(delete_mindmap))
+        .route("/{name}/nodes", post(add_node))
+        .route("/{name}/nodes/{node_id}", delete(delete_node))
+        .route("/{name}/edges", post(add_edge))
+        .route("/{name}/export", get(export_mindmap))
 }
 
 #[derive(Deserialize)]

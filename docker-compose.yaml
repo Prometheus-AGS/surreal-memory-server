@@ -4,7 +4,7 @@
 
 services:
   surrealdb:
-    image: surrealdb/surrealdb:v2.4.0
+    image: surrealdb/surrealdb:v3.0.0
     container_name: surrealdb
     restart: unless-stopped
     user: root
@@ -14,11 +14,34 @@ services:
       - --user=root
       - --pass=root
       - --bind=0.0.0.0:8000
-      - surrealkv:/data/database.db
+      - rocksdb:/data/database.db
     ports:
-      - "8000:8000"
+      - "28000:8000"
     volumes:
       - surrealdb_data:/data
+
+  surreal-memory-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    container_name: surreal-memory-server
+    restart: unless-stopped
+    ports:
+      - "23001:3001"
+    environment:
+      - SURREAL_MODE=server
+      - SURREAL_ENDPOINT=ws://surrealdb:8000
+      - SURREAL_USERNAME=root
+      - SURREAL_PASSWORD=root
+      - SURREAL_NAMESPACE=memory
+      - SURREAL_DATABASE=main
+      - EMBEDDING_PROVIDER=openai
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - MCP_STDIO=false
+    depends_on:
+      - surrealdb
 
 volumes:
   surrealdb_data:

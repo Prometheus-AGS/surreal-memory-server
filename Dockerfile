@@ -1,6 +1,14 @@
 # syntax=docker/dockerfile:1.4
 # ── Stage 1: Build ─────────────────────────────────────────────────────────────
-FROM rust:1.83-slim AS builder
+FROM rust:1.93-slim AS builder
+
+RUN apt-get update && apt-get install -y \
+    clang \
+    libclang-dev \
+    pkg-config \
+    build-essential \
+    cmake \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -14,14 +22,15 @@ RUN mkdir -p src crates/surreal-memory/src \
 
 # Now copy and build the real source
 COPY . .
-RUN touch src/main.rs && cargo build --release --bin surreal-memory-server
+RUN touch src/main.rs crates/surreal-memory/src/lib.rs && cargo build --release --bin surreal-memory-server
 
 # ── Stage 2: Runtime ───────────────────────────────────────────────────────────
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libssl3 \
+    && apt-get install -y --no-install-recommends ca-certificates libssl3 libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
+
 
 COPY --from=builder /app/target/release/surreal-memory-server /usr/local/bin/surreal-memory-server
 
