@@ -186,7 +186,29 @@ RUST_LOG=info
 
 ## MCP Integration (Claude Desktop / Cursor)
 
+`surreal-memory-server` ships with a fully compliant, production-ready MCP implementation, surfacing **42 distinct memory and graph tools** directly to LLM clients.
+
+### HTTP MCP transport (SSE)
+
+The primary and recommended transport is Server-Sent Events (SSE) over HTTP via the custom Axum multiplexer. This requires zero sidecar binaries and allows distributed agentic networks to connect natively.
+
+```
+SSE Endpoint:  http://localhost:23001/mcp/sse
+```
+
+#### Testing with the Official MCP Inspector
+
+You can instantly verify the 42-tool schema payload and test the SSE stability against the strict official test client using `npx`:
+
+```bash
+# Ensure the surreal-memory-server is running (e.g. via docker compose up -d)
+npx -y @modelcontextprotocol/inspector sse http://localhost:23001/mcp/sse
+```
+This will launch the MCP Inspector web UI. Click "Connect" and expand "List Tools" to browse and test all of the endpoints dynamically.
+
 ### stdio transport
+
+For local strict coupling (like Claude Desktop without a network listener), you can still invoke the server directly via `stdio`:
 
 ```json
 {
@@ -204,24 +226,18 @@ RUST_LOG=info
 }
 ```
 
-### HTTP MCP transport (SSE)
+### Available MCP Tools (42)
 
-```
-POST http://localhost:3000/mcp
-```
-
-Standard JSON-RPC 2.0 over HTTP with SSE streaming for long-running tool calls.
-
-### Available MCP Tools (30+)
+The server exposes 42 strictly schema-typed tools, encompassing the entire underlying `surreal-memory` backend array:
 
 | Category | Tools |
 |---|---|
-| **Memory** | `add_memory`, `search_memories`, `get_memory`, `update_memory`, `delete_memory`, `delete_all_memories`, `get_all_memories` |
-| **Entities** | `create_entities`, `create_entity`, `create_relations`, `add_observations`, `get_entity`, `delete_entity`, `delete_relation`, `get_graph` |
-| **Graph-RAG** | `find_path`, `expand_neighbors`, `get_related` |
-| **TaskStreams** | `create_task_stream`, `add_to_task_stream`, `get_context_for_task`, `list_task_streams`, `archive_task_stream`, `auto_summarize_task_stream` |
-| **Mindmaps** | `create_mindmap`, `get_mindmap`, `update_mindmap`, `add_mindmap_node`, `remove_mindmap_node`, `list_mindmaps`, `delete_mindmap`, `export_mindmap`, `generate_persona_mindmap` |
-| **Temporal** | `get_entity_history`, `get_graph_at_time` |
+| **Scoped Memory** (mem0) | `add_memory`, `search_memories`, `hybrid_search_memories`, `get_memory`, `update_memory`, `delete_memory`, `delete_all_memories`, `get_all_memories`, `get_memory_history`, `compress_memories`, `add_memories_from_conversation` |
+| **Knowledge Graph** | `create_entity`, `create_entities`, `get_entity`, `update_entity`, `delete_entity`, `create_relation`, `create_relations`, `get_relations`, `delete_relation`, `add_observations`, `get_graph`, `read_graph` |
+| **Graph-RAG** | `find_path`, `expand_neighbors`, `get_related`, `semantic_search` |
+| **Temporal History** | `get_entity_history`, `get_graph_at_time` |
+| **TaskStreams** | `create_task_stream`, `add_to_task_stream`, `get_context_for_task`, `list_task_streams`, `get_task_stream`, `archive_task_stream`, `auto_summarize_task_stream` |
+| **Mindmaps** | `create_mindmap`, `get_mindmap`, `add_mindmap_node`, `delete_mindmap_node`, `add_mindmap_edge`, `list_mindmaps`, `delete_mindmap`, `export_mindmap`, `generate_persona_mindmap`, `generate_ideation_mindmap` |
 
 ---
 
