@@ -10,7 +10,12 @@ use rmcp::{
     model::ClientJsonRpcMessage,
     serve_server,
     service::{RoleServer, RxJsonRpcMessage, TxJsonRpcMessage},
-    transport::{Transport, TransportAdapterIdentity},
+    transport::{
+        Transport, TransportAdapterIdentity,
+        streamable_http_server::{
+            StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+        },
+    },
 };
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -30,14 +35,27 @@ struct HttpAppState {
 
 pub fn mcp_http_router(storage: Arc<dyn MemoryStorage>, prefix: &str) -> Router {
     let state = HttpAppState {
-        storage,
+        storage: storage.clone(),
         sessions: Arc::new(DashMap::new()),
     };
 
-    let routes = Router::new()
+    // --- Streamable HTTP Endpoint (New Standard) ---
+    let storage_clone = storage.clone();
+    let service = StreamableHttpService::new(
+        move || Ok(MemoryMcpServer::new(storage_clone.clone())),
+        Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig::default(),
+    );
+    let streamable_routes = Router::new().nest_service("/http", service);
+
+    // --- Legacy SSE Endpoints (Backward Compatibility) ---
+    let legacy_routes = Router::new()
         .route("/sse", get(sse_handler))
         .route("/messages", post(messages_handler))
         .with_state(state);
+
+    // Combine both routers
+    let routes = streamable_routes.merge(legacy_routes);
 
     Router::new().nest(prefix, routes)
 }
@@ -118,8 +136,9 @@ async fn sse_handler(
     let host = headers
         .get(axum::http::header::HOST)
         .and_then(|h| h.to_str().ok())
-        .unwrap_or("localhost:23001");
+        .unwrap_or("localhost:3000");
 
+    // Revert host binding behavior correctly for dynamic hosts
     let endpoint_uri = format!("http://{}/mcp/messages?sessionId={}", host, session_id);
     let initial_stream =
         tokio_stream::once(Ok(Event::default().event("endpoint").data(endpoint_uri)));

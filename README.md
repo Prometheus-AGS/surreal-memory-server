@@ -81,7 +81,7 @@ surreal-memory-server/
 │   │   └── search.rs            # /api/v1/search
 │   ├── mcp/
 │   │   ├── handlers.rs          # MCP tool implementations (30+ tools)
-│   │   ├── http.rs              # HTTP MCP transport (SSE)
+│   │   ├── http.rs              # Streamable HTTP MCP transport
 │   │   └── mod.rs               # stdio MCP transport
 │   ├── workers/
 │   │   └── ttl.rs               # Background TTL decay worker
@@ -188,21 +188,22 @@ RUST_LOG=info
 
 `surreal-memory-server` ships with a fully compliant, production-ready MCP implementation, surfacing **42 distinct memory and graph tools** directly to LLM clients.
 
-### HTTP MCP transport (SSE)
+### HTTP MCP transport (Streamable HTTP)
 
-The primary and recommended transport is Server-Sent Events (SSE) over HTTP via the custom Axum multiplexer. This requires zero sidecar binaries and allows distributed agentic networks to connect natively.
+The primary and recommended transport is via Streamable HTTP (`/mcp/http`), using a single unified endpoint for Server-Sent Events (SSE) and message POSTs over HTTP via a custom Axum wrapper around the `rmcp` Tower service. This requires zero sidecar binaries and allows distributed agentic networks to connect natively. Legacy endpoints (`GET /mcp/sse` and `POST /mcp/messages`) are also maintained for backwards compatibility with older clients.
 
 ```
-SSE Endpoint:  http://localhost:23001/mcp/sse
+MCP Streamable Endpoint:  http://localhost:23001/mcp/http
+MCP Legacy SSE Endpoint:  http://localhost:23001/mcp/sse
 ```
 
 #### Testing with the Official MCP Inspector
 
-You can instantly verify the 42-tool schema payload and test the SSE stability against the strict official test client using `npx`:
+You can instantly verify the 42-tool schema payload and test the streamable HTTP stability against the strict official test client using `npx`:
 
 ```bash
 # Ensure the surreal-memory-server is running (e.g. via docker compose up -d)
-npx -y @modelcontextprotocol/inspector sse http://localhost:23001/mcp/sse
+npx -y @modelcontextprotocol/inspector sse http://localhost:23001/mcp/http
 ```
 This will launch the MCP Inspector web UI. Click "Connect" and expand "List Tools" to browse and test all of the endpoints dynamically.
 
