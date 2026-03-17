@@ -48,6 +48,16 @@ static MIGRATIONS: &[Migration] = &[
         name: "mindmap_table_and_fulltext_indexes",
         sql: MIGRATION_V6_SQL,
     },
+    Migration {
+        version: 7,
+        name: "task_stream_auto_summarization_fields",
+        sql: MIGRATION_V7_SQL,
+    },
+    Migration {
+        version: 8,
+        name: "memory_metadata_flexible",
+        sql: MIGRATION_V8_SQL,
+    },
 ];
 
 // ── v1: Baseline ─────────────────────────────────────────────────────────────
@@ -162,6 +172,27 @@ DEFINE FIELD IF NOT EXISTS created_at ON mindmap TYPE datetime;
 DEFINE FIELD IF NOT EXISTS updated_at ON mindmap TYPE datetime;
 DEFINE INDEX IF NOT EXISTS mindmap_name ON mindmap FIELDS name, user_id UNIQUE;
 DEFINE INDEX IF NOT EXISTS mindmap_agent ON mindmap FIELDS agent_id;
+";
+
+// ── v7: TaskStream auto-summarization fields ─────────────────────────────────
+//
+// The TaskStream struct added `auto_summarize`, `summary_count`, and `model_id`
+// for model-aware rolling summarization, but the v3 schema didn't include them.
+
+const MIGRATION_V7_SQL: &str = "
+DEFINE FIELD IF NOT EXISTS auto_summarize ON task_stream TYPE bool DEFAULT true;
+DEFINE FIELD IF NOT EXISTS summary_count ON task_stream TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS model_id ON task_stream TYPE option<string>;
+";
+
+// ── v8: Memory metadata FLEXIBLE ─────────────────────────────────────────────
+//
+// The `metadata` field was `option<object>` which rejects arbitrary nested JSON
+// in SCHEMAFULL mode. Redefine as FLEXIBLE so callers can store structured
+// metadata (rationale, alternatives, file lists, etc.) without schema conflicts.
+
+const MIGRATION_V8_SQL: &str = "
+DEFINE FIELD IF NOT EXISTS metadata ON memory FLEXIBLE TYPE option<object>;
 ";
 
 // ── Runner ────────────────────────────────────────────────────────────────────
