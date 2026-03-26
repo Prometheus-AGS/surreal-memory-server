@@ -21,6 +21,7 @@ chrono = "0.4.44"
 reqwest = { version = "0.13.2", features = ["json"] }
 async-openai = "0.33.0"
 tiktoken-rs = "0.9.1"
+uuid = { version = "1.11.0", features = ["v4", "fast-rng"] }
 axum = { version = "0.8", features = ["macros"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
@@ -64,7 +65,7 @@ tower-http = { workspace = true }
 # HTTP SSE Transport
 dashmap = "6.1.0"
 tokio-stream = "0.1"
-uuid = { version = "1.11.0", features = ["v4", "fast-rng"] }
+uuid = { workspace = true }
 
 # Binary-only
 dotenvy = "0.15"

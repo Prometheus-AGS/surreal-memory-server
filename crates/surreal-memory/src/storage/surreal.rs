@@ -16,6 +16,7 @@ use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
 use surrealdb::opt::auth::Root;
 use surrealdb::types::Datetime;
+use uuid::Uuid;
 
 /// Token budget constants per model family. Extend via config in Phase 3.
 const DEFAULT_CONTEXT_BUDGET: u64 = 100_000;
@@ -548,13 +549,14 @@ impl MemoryStorage for SurrealStorage {
         let now = Datetime::default();
         stream.created_at = now.clone();
         stream.last_active = now;
+        let key = Uuid::new_v4().to_string();
         let created: Option<TaskStream> = self
             .db
-            .create("task_stream")
+            .create(("task_stream", key))
             .content(stream)
             .await
-            .context("Failed to create task stream")?;
-        created.ok_or_else(|| anyhow::anyhow!("No task_stream returned after creation"))
+            .context("DB error inserting task_stream")?;
+        created.ok_or_else(|| anyhow::anyhow!("create_task_stream: DB returned None (schema validation may have rejected the record)"))
     }
 
     async fn get_task_stream(&self, name: &str) -> Result<Option<TaskStream>> {
@@ -895,9 +897,17 @@ impl MemoryStorage for SurrealStorage {
 
     // ── Mindmaps ─────────────────────────────────────────────────────────────
 
-    async fn create_mindmap(&self, mindmap: MindMap) -> Result<MindMap> {
-        let created: Option<MindMap> = self.db.create("mindmap").content(mindmap).await?;
-        created.context("Failed to create mindmap")
+    async fn create_mindmap(&self, mut mindmap: MindMap) -> Result<MindMap> {
+        mindmap.created_at = Datetime::default();
+        mindmap.updated_at = mindmap.created_at.clone();
+        let key = Uuid::new_v4().to_string();
+        let created: Option<MindMap> = self
+            .db
+            .create(("mindmap", key))
+            .content(mindmap)
+            .await
+            .context("DB error inserting mindmap")?;
+        created.ok_or_else(|| anyhow::anyhow!("create_mindmap: DB returned None (check migration v9 was applied — nodes/edges must be FLEXIBLE)"))
     }
 
     async fn get_mindmap(&self, name: &str, user_id: Option<&str>) -> Result<Option<MindMap>> {

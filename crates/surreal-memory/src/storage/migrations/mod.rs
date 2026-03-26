@@ -58,6 +58,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "memory_metadata_flexible",
         sql: MIGRATION_V8_SQL,
     },
+    Migration {
+        version: 9,
+        name: "mindmap_nodes_edges_flexible",
+        sql: MIGRATION_V9_SQL,
+    },
 ];
 
 // ── v1: Baseline ─────────────────────────────────────────────────────────────
@@ -193,6 +198,20 @@ DEFINE FIELD IF NOT EXISTS model_id ON task_stream TYPE option<string>;
 
 const MIGRATION_V8_SQL: &str = "
 DEFINE FIELD IF NOT EXISTS metadata ON memory FLEXIBLE TYPE option<object>;
+";
+
+// ── v9: Mindmap nodes/edges FLEXIBLE ─────────────────────────────────────────
+//
+// The `nodes` and `edges` fields were defined as `array<object>` (strict) which
+// causes SurrealDB SCHEMAFULL validation to reject nested objects containing
+// arbitrary fields (e.g. `metadata: Option<serde_json::Value>` in MindMapNode).
+// Redefine as FLEXIBLE so nested object fields are unconstrained.
+// Also drop and recreate the unique index to use NULLS NOT DISTINCT semantics
+// so two mindmaps with the same name but different (or null) user_ids can coexist.
+
+const MIGRATION_V9_SQL: &str = "
+DEFINE FIELD IF NOT EXISTS nodes ON mindmap FLEXIBLE TYPE array<object> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS edges ON mindmap FLEXIBLE TYPE array<object> DEFAULT [];
 ";
 
 // ── Runner ────────────────────────────────────────────────────────────────────

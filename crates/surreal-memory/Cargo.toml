@@ -53,6 +53,7 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true }
 tiktoken-rs = { workspace = true }
+uuid = { workspace = true }
 
 # Candle local embeddings (optional)
 candle-core = { version = "0.9.2", optional = true }
