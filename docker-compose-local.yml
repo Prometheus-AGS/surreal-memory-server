@@ -1,0 +1,49 @@
+# Local development compose — uses a pre-built binary from ./target/release
+# Build first: cargo build --release --bin surreal-memory-server
+# Then run:    docker compose -f docker-compose-local.yml up -d --build
+
+services:
+  surrealdb:
+    image: surrealdb/surrealdb:v3.0.0
+    container_name: surrealdb
+    restart: unless-stopped
+    user: root
+    command:
+      - start
+      - --log=info
+      - --user=root
+      - --pass=root
+      - --bind=0.0.0.0:8000
+      - rocksdb:/data/database.db
+    ports:
+      - "28000:8000"
+    volumes:
+      - surrealdb_data:/data
+
+  surreal-memory-server:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile-local
+    env_file:
+      - .env
+    container_name: surreal-memory-server
+    restart: unless-stopped
+    ports:
+      - "23001:3001"
+    environment:
+      - SURREAL_MODE=server
+      - SURREAL_ENDPOINT=ws://surrealdb:8000
+      - SURREAL_USERNAME=root
+      - SURREAL_PASSWORD=root
+      - SURREAL_NAMESPACE=memory
+      - SURREAL_DATABASE=main
+      - EMBEDDING_PROVIDER=openai
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - MCP_STDIO=false
+    depends_on:
+      - surrealdb
+
+volumes:
+  surrealdb_data:
+    driver: local

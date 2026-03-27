@@ -1,0 +1,8 @@
+# Dockerfile-local build context — only the pre-built binary is needed
+# Exclude everything by default, then allow only what the COPY step needs
+
+# Exclude everything
+**
+
+# Allow only the pre-built Linux binary
+!target/release/surreal-memory-server

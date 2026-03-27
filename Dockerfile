@@ -5,10 +5,14 @@ FROM rust:1.93-slim AS builder
 RUN apt-get update && apt-get install -y \
     clang \
     libclang-dev \
+    lld \
     pkg-config \
     build-essential \
     cmake \
     && rm -rf /var/lib/apt/lists/*
+
+# Use lld linker — significantly lower peak RAM than GNU ld during link step
+ENV RUSTFLAGS="-C linker=clang -C link-arg=-fuse-ld=lld"
 
 WORKDIR /app
 

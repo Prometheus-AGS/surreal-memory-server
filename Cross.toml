@@ -1,0 +1,8 @@
+[target.x86_64-unknown-linux-gnu]
+# Pass through environment variables into the cross build container
+[target.x86_64-unknown-linux-gnu.env]
+passthrough = [
+    "CARGO_BUILD_JOBS",
+    "CARGO_INCREMENTAL",
+    "RUSTFLAGS",
+]

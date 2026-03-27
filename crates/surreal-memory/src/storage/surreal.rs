@@ -552,7 +552,7 @@ impl MemoryStorage for SurrealStorage {
         let key = Uuid::new_v4().to_string();
         let created: Option<TaskStream> = self
             .db
-            .create(("task_stream", key))
+            .create(("task_stream", key.as_str()))
             .content(stream)
             .await
             .context("DB error inserting task_stream")?;
@@ -903,7 +903,7 @@ impl MemoryStorage for SurrealStorage {
         let key = Uuid::new_v4().to_string();
         let created: Option<MindMap> = self
             .db
-            .create(("mindmap", key))
+            .create(("mindmap", key.as_str()))
             .content(mindmap)
             .await
             .context("DB error inserting mindmap")?;

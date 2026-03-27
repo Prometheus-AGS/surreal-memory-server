@@ -63,6 +63,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "mindmap_nodes_edges_flexible",
         sql: MIGRATION_V9_SQL,
     },
+    Migration {
+        version: 10,
+        name: "mindmap_nodes_edges_flexible_overwrite",
+        sql: MIGRATION_V10_SQL,
+    },
 ];
 
 // ── v1: Baseline ─────────────────────────────────────────────────────────────
@@ -197,7 +202,7 @@ DEFINE FIELD IF NOT EXISTS model_id ON task_stream TYPE option<string>;
 // metadata (rationale, alternatives, file lists, etc.) without schema conflicts.
 
 const MIGRATION_V8_SQL: &str = "
-DEFINE FIELD IF NOT EXISTS metadata ON memory FLEXIBLE TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS metadata ON memory TYPE option<object> FLEXIBLE;
 ";
 
 // ── v9: Mindmap nodes/edges FLEXIBLE ─────────────────────────────────────────
@@ -209,9 +214,22 @@ DEFINE FIELD IF NOT EXISTS metadata ON memory FLEXIBLE TYPE option<object>;
 // Also drop and recreate the unique index to use NULLS NOT DISTINCT semantics
 // so two mindmaps with the same name but different (or null) user_ids can coexist.
 
+// Use OVERWRITE (not IF NOT EXISTS) so we force-update existing strict field
+// definitions that were set in the v6 schema before FLEXIBLE was needed.
 const MIGRATION_V9_SQL: &str = "
-DEFINE FIELD IF NOT EXISTS nodes ON mindmap FLEXIBLE TYPE array<object> DEFAULT [];
-DEFINE FIELD IF NOT EXISTS edges ON mindmap FLEXIBLE TYPE array<object> DEFAULT [];
+DEFINE FIELD OVERWRITE nodes ON mindmap FLEXIBLE TYPE array<object> DEFAULT [];
+DEFINE FIELD OVERWRITE edges ON mindmap FLEXIBLE TYPE array<object> DEFAULT [];
+";
+
+// ── v10: Force overwrite mindmap nodes/edges to FLEXIBLE ─────────────────────
+//
+// v9 used IF NOT EXISTS which silently skips already-defined fields.
+// v10 uses OVERWRITE to guarantee the existing strict array<object> definition
+// is replaced with FLEXIBLE, unblocking MindMapNode.metadata serialization.
+
+const MIGRATION_V10_SQL: &str = "
+DEFINE FIELD OVERWRITE nodes ON mindmap FLEXIBLE TYPE array<object> DEFAULT [];
+DEFINE FIELD OVERWRITE edges ON mindmap FLEXIBLE TYPE array<object> DEFAULT [];
 ";
 
 // ── Runner ────────────────────────────────────────────────────────────────────

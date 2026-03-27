@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1.4
+# ── Local build image — copies pre-built binary from ./target/release ──────────
+# Build the binary first: cargo build --release --bin surreal-memory-server
+# Then: docker compose -f docker-compose-local.yml up -d --build
+FROM debian:trixie-slim AS runtime
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates libssl3 libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY target/release/surreal-memory-server /usr/local/bin/surreal-memory-server
+
+# Non-root user for security
+RUN useradd -m -u 1001 smserver
+USER smserver
+
+WORKDIR /data
+
+ENV RUST_LOG=info \
+    API_PORT=3001 \
+    SURREAL_MODE=embedded \
+    SURREAL_EMBEDDED_PATH=/data/memory.db \
+    SURREAL_NAMESPACE=memory \
+    SURREAL_DATABASE=main
+
+EXPOSE 3001
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:${API_PORT}/health || exit 1
+
+CMD ["surreal-memory-server"]
