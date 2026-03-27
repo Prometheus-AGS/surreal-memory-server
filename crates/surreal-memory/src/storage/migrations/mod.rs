@@ -217,8 +217,8 @@ DEFINE FIELD IF NOT EXISTS metadata ON memory TYPE option<object> FLEXIBLE;
 // Use OVERWRITE (not IF NOT EXISTS) so we force-update existing strict field
 // definitions that were set in the v6 schema before FLEXIBLE was needed.
 const MIGRATION_V9_SQL: &str = "
-DEFINE FIELD OVERWRITE nodes ON mindmap FLEXIBLE TYPE array<object> DEFAULT [];
-DEFINE FIELD OVERWRITE edges ON mindmap FLEXIBLE TYPE array<object> DEFAULT [];
+DEFINE FIELD OVERWRITE nodes ON mindmap TYPE array<object> FLEXIBLE DEFAULT [];
+DEFINE FIELD OVERWRITE edges ON mindmap TYPE array<object> FLEXIBLE DEFAULT [];
 ";
 
 // ── v10: Force overwrite mindmap nodes/edges to FLEXIBLE ─────────────────────
@@ -228,8 +228,8 @@ DEFINE FIELD OVERWRITE edges ON mindmap FLEXIBLE TYPE array<object> DEFAULT [];
 // is replaced with FLEXIBLE, unblocking MindMapNode.metadata serialization.
 
 const MIGRATION_V10_SQL: &str = "
-DEFINE FIELD OVERWRITE nodes ON mindmap FLEXIBLE TYPE array<object> DEFAULT [];
-DEFINE FIELD OVERWRITE edges ON mindmap FLEXIBLE TYPE array<object> DEFAULT [];
+DEFINE FIELD OVERWRITE nodes ON mindmap TYPE array<object> FLEXIBLE DEFAULT [];
+DEFINE FIELD OVERWRITE edges ON mindmap TYPE array<object> FLEXIBLE DEFAULT [];
 ";
 
 // ── Runner ────────────────────────────────────────────────────────────────────
