@@ -68,6 +68,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "mindmap_nodes_edges_flexible_overwrite",
         sql: MIGRATION_V10_SQL,
     },
+    Migration {
+        version: 11,
+        name: "mindmap_nodes_edges_remove_redefine",
+        sql: MIGRATION_V11_SQL,
+    },
 ];
 
 // ── v1: Baseline ─────────────────────────────────────────────────────────────
@@ -230,6 +235,21 @@ DEFINE FIELD OVERWRITE edges ON mindmap TYPE array<object> FLEXIBLE DEFAULT [];
 const MIGRATION_V10_SQL: &str = "
 DEFINE FIELD OVERWRITE nodes ON mindmap TYPE array<object> FLEXIBLE DEFAULT [];
 DEFINE FIELD OVERWRITE edges ON mindmap TYPE array<object> FLEXIBLE DEFAULT [];
+";
+
+// ── v11: Remove and redefine mindmap nodes/edges as FLEXIBLE ─────────────────
+//
+// OVERWRITE alone does not clear existing sub-field constraints in SurrealDB 3.x.
+// The v6 schema defined nodes/edges as strict array<object> which rejects any
+// object field not explicitly known to the schema (e.g. nodes[0].color).
+// Fix: REMOVE the fields entirely to purge sub-field metadata, then redefine
+// them clean as FLEXIBLE so MindMapNode can carry arbitrary fields.
+
+const MIGRATION_V11_SQL: &str = "
+REMOVE FIELD IF EXISTS nodes ON mindmap;
+REMOVE FIELD IF EXISTS edges ON mindmap;
+DEFINE FIELD nodes ON mindmap FLEXIBLE TYPE array DEFAULT [];
+DEFINE FIELD edges ON mindmap FLEXIBLE TYPE array DEFAULT [];
 ";
 
 // ── Runner ────────────────────────────────────────────────────────────────────
