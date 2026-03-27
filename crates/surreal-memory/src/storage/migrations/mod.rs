@@ -248,8 +248,8 @@ DEFINE FIELD OVERWRITE edges ON mindmap TYPE array<object> FLEXIBLE DEFAULT [];
 const MIGRATION_V11_SQL: &str = "
 REMOVE FIELD IF EXISTS nodes ON mindmap;
 REMOVE FIELD IF EXISTS edges ON mindmap;
-DEFINE FIELD nodes ON mindmap FLEXIBLE TYPE array DEFAULT [];
-DEFINE FIELD edges ON mindmap FLEXIBLE TYPE array DEFAULT [];
+DEFINE FIELD nodes ON mindmap TYPE array FLEXIBLE DEFAULT [];
+DEFINE FIELD edges ON mindmap TYPE array FLEXIBLE DEFAULT [];
 ";
 
 // ── Runner ────────────────────────────────────────────────────────────────────
