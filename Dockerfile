@@ -2,6 +2,9 @@
 # ── Stage 1: Build ─────────────────────────────────────────────────────────────
 FROM rust:1.93-slim AS builder
 
+ARG CARGO_BUILD_FLAGS="--no-default-features --features server-only"
+ARG PREBUILD_DEPS="1"
+
 RUN apt-get update && apt-get install -y \
     clang \
     libclang-dev \
@@ -19,20 +22,23 @@ WORKDIR /app
 # Cache dependencies separately from source (layer cache optimization)
 COPY Cargo.toml Cargo.lock ./
 COPY crates/surreal-memory/Cargo.toml crates/surreal-memory/
-RUN mkdir -p src crates/surreal-memory/src \
-    && echo "fn main() {}" > src/main.rs \
-    && echo "" > crates/surreal-memory/src/lib.rs \
-    && cargo build --release --bin surreal-memory-server 2>/dev/null || true
+RUN if [ "${PREBUILD_DEPS}" = "1" ]; then \
+      mkdir -p src crates/surreal-memory/src \
+      && echo "fn main() {}" > src/main.rs \
+      && echo "" > crates/surreal-memory/src/lib.rs \
+      && cargo build --release --bin surreal-memory-server ${CARGO_BUILD_FLAGS} 2>/dev/null || true; \
+    fi
 
 # Now copy and build the real source
 COPY . .
-RUN touch src/main.rs crates/surreal-memory/src/lib.rs && cargo build --release --bin surreal-memory-server
+RUN touch src/main.rs crates/surreal-memory/src/lib.rs \
+    && cargo build --release --bin surreal-memory-server ${CARGO_BUILD_FLAGS}
 
 # ── Stage 2: Runtime ───────────────────────────────────────────────────────────
 FROM debian:trixie-slim AS runtime
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libssl3 libstdc++6 \
+    && apt-get install -y --no-install-recommends ca-certificates curl libssl3 libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
 
@@ -46,8 +52,10 @@ WORKDIR /data
 
 ENV RUST_LOG=info \
     API_PORT=3001 \
-    SURREAL_MODE=embedded \
-    SURREAL_EMBEDDED_PATH=/data/memory.db \
+    SURREAL_MODE=server \
+    SURREAL_ENDPOINT=ws://surrealdb:8000 \
+    SURREAL_USERNAME=root \
+    SURREAL_PASSWORD=root \
     SURREAL_NAMESPACE=memory \
     SURREAL_DATABASE=main
 

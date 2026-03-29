@@ -1,7 +1,10 @@
 # Docker build context exclusions for surreal-memory-server
 
 # Build artifacts
-target/
+target/*
+!target/release/
+target/release/*
+!target/release/surreal-memory-server
 
 # Data and secrets
 data/

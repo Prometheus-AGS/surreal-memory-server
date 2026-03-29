@@ -9,7 +9,7 @@ resolver = "2"
 tokio = { version = "1.50.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-surrealdb = { version = "3.0.2", features = ["kv-rocksdb"] }
+surrealdb = { version = "3.0.2" }
 surrealdb_types = { package = "surrealdb-types", version = "3.0.2" }
 anyhow = "1.0.102"
 thiserror = "2.0.18"
@@ -23,7 +23,7 @@ async-openai = "0.33.0"
 tiktoken-rs = "0.9.1"
 uuid = { version = "1.11.0", features = ["v4", "fast-rng"] }
 axum = { version = "0.8", features = ["macros"] }
-tower = "0.5"
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 [package]
@@ -33,7 +33,7 @@ edition = "2024"
 
 [dependencies]
 # Library crate
-surreal-memory = { path = "crates/surreal-memory", features = ["embedded"] }
+surreal-memory = { path = "crates/surreal-memory", default-features = false }
 
 # MCP SDK
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", features = [
@@ -80,7 +80,7 @@ hf-hub = { version = "0.5.0", features = ["tokio"], optional = true }
 
 [features]
 default = ["embedded"]
-embedded = ["surrealdb/kv-rocksdb", "surreal-memory/embedded"]
+embedded = ["surreal-memory/embedded"]
 server-only = []
 local-embeddings = [
     "candle-core",
@@ -102,3 +102,23 @@ metal = [
     "candle-nn/metal",
     "candle-transformers/metal",
 ]
+
+[profile.dev]
+# Speed up local iterations. Keep release behavior unchanged.
+debug = 0
+incremental = true
+codegen-units = 256
+
+[profile.dev.build-override]
+debug = 0
+codegen-units = 256
+
+[profile.test]
+# Tests currently spend most of their time compiling, not executing.
+debug = 0
+incremental = true
+codegen-units = 256
+
+[profile.test.build-override]
+debug = 0
+codegen-units = 256

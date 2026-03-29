@@ -11,11 +11,13 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use serde::{Serialize, de::DeserializeOwned};
 use std::{cmp::Ordering, sync::Arc};
 use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
 use surrealdb::opt::auth::Root;
 use surrealdb::types::Datetime;
+use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 /// Token budget constants per model family. Extend via config in Phase 3.
@@ -101,6 +103,41 @@ impl SurrealStorage {
 
     async fn embed_text(&self, text: &str) -> Result<Vec<f32>> {
         self.embedding_service.embed(text).await
+    }
+
+    async fn create_record<T>(&self, table: &str, key: &str, value: T, op: &str) -> Result<T>
+    where
+        T: Serialize + DeserializeOwned + SurrealValue,
+    {
+        let mut response = self
+            .db
+            .query("CREATE type::thing($table, $key) CONTENT $value RETURN AFTER")
+            .bind(("table", table.to_string()))
+            .bind(("key", key.to_string()))
+            .bind(("value", value))
+            .await
+            .with_context(|| format!("{op}: SurrealDB create query failed"))?;
+        let created: Option<T> = response
+            .take(0)
+            .with_context(|| format!("{op}: SurrealDB rejected the write"))?;
+        created.with_context(|| format!("{op}: SurrealDB returned no record after write"))
+    }
+
+    async fn replace_record<T>(&self, record_id: &str, value: T, op: &str) -> Result<T>
+    where
+        T: Serialize + DeserializeOwned + SurrealValue,
+    {
+        let mut response = self
+            .db
+            .query("UPDATE $id CONTENT $value RETURN AFTER")
+            .bind(("id", record_id.to_string()))
+            .bind(("value", value))
+            .await
+            .with_context(|| format!("{op}: SurrealDB update query failed"))?;
+        let updated: Option<T> = response
+            .take(0)
+            .with_context(|| format!("{op}: SurrealDB rejected the write"))?;
+        updated.with_context(|| format!("{op}: SurrealDB returned no record after write"))
     }
 
     fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -550,13 +587,8 @@ impl MemoryStorage for SurrealStorage {
         stream.created_at = now.clone();
         stream.last_active = now;
         let key = Uuid::new_v4().to_string();
-        let created: Option<TaskStream> = self
-            .db
-            .create(("task_stream", key.as_str()))
-            .content(stream)
+        self.create_record("task_stream", &key, stream, "create_task_stream")
             .await
-            .context("DB error inserting task_stream")?;
-        created.ok_or_else(|| anyhow::anyhow!("create_task_stream: DB returned None (schema validation may have rejected the record)"))
     }
 
     async fn get_task_stream(&self, name: &str) -> Result<Option<TaskStream>> {
@@ -901,13 +933,8 @@ impl MemoryStorage for SurrealStorage {
         mindmap.created_at = Datetime::default();
         mindmap.updated_at = mindmap.created_at.clone();
         let key = Uuid::new_v4().to_string();
-        let created: Option<MindMap> = self
-            .db
-            .create(("mindmap", key.as_str()))
-            .content(mindmap)
+        self.create_record("mindmap", &key, mindmap, "create_mindmap")
             .await
-            .context("DB error inserting mindmap")?;
-        created.ok_or_else(|| anyhow::anyhow!("create_mindmap: DB returned None (check migration v9 was applied — nodes/edges must be FLEXIBLE)"))
     }
 
     async fn get_mindmap(&self, name: &str, user_id: Option<&str>) -> Result<Option<MindMap>> {
@@ -941,13 +968,10 @@ impl MemoryStorage for SurrealStorage {
         let record_key = mm
             .id
             .as_ref()
-            .map(|id| {
-                let s = Self::record_id_to_string(id);
-                s.split(':').nth(1).unwrap_or(&s).to_string()
-            })
+            .map(Self::record_id_to_string)
             .context("Mindmap missing id")?;
-        let updated: Option<MindMap> = self.db.update(("mindmap", record_key)).content(mm).await?;
-        updated.context("Failed to update mindmap nodes")
+        self.replace_record(&record_key, mm, "add_mindmap_node")
+            .await
     }
 
     async fn add_mindmap_edge(
@@ -965,13 +989,10 @@ impl MemoryStorage for SurrealStorage {
         let record_key = mm
             .id
             .as_ref()
-            .map(|id| {
-                let s = Self::record_id_to_string(id);
-                s.split(':').nth(1).unwrap_or(&s).to_string()
-            })
+            .map(Self::record_id_to_string)
             .context("Mindmap missing id")?;
-        let updated: Option<MindMap> = self.db.update(("mindmap", record_key)).content(mm).await?;
-        updated.context("Failed to update mindmap edges")
+        self.replace_record(&record_key, mm, "add_mindmap_edge")
+            .await
     }
 
     async fn delete_mindmap_node(
@@ -991,13 +1012,10 @@ impl MemoryStorage for SurrealStorage {
         let record_key = mm
             .id
             .as_ref()
-            .map(|id| {
-                let s = Self::record_id_to_string(id);
-                s.split(':').nth(1).unwrap_or(&s).to_string()
-            })
+            .map(Self::record_id_to_string)
             .context("Mindmap missing id")?;
-        let updated: Option<MindMap> = self.db.update(("mindmap", record_key)).content(mm).await?;
-        updated.context("Failed to update mindmap after node deletion")
+        self.replace_record(&record_key, mm, "delete_mindmap_node")
+            .await
     }
 
     async fn list_mindmaps(

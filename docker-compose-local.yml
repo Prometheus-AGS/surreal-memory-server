@@ -1,6 +1,14 @@
-# Local development compose — uses a pre-built binary from ./target/release
-# Build first: cargo build --release --bin surreal-memory-server
-# Then run:    docker compose -f docker-compose-local.yml up -d --build
+# Local development compose — recommended day-to-day path.
+# Requires a Linux binary at ./target/release/surreal-memory-server that matches
+# the image architecture you are about to build. A normal macOS `cargo build`
+# output will not work in this container.
+# On Apple Silicon, prefer a native Linux arm64 binary for local Docker Desktop.
+# Use `LOCAL_DOCKER_PLATFORM=linux/amd64` only when you explicitly want emulated
+# amd64 parity. Build that binary with your preferred cross-compilation flow
+# (for example `./scripts/build-local-linux-binary.sh`) and place or copy the
+# resulting binary at ./target/release/surreal-memory-server.
+# Then run:
+#   docker compose -f docker-compose-local.yml up -d --build
 
 services:
   surrealdb:
@@ -21,7 +29,6 @@ services:
       - surrealdb_data:/data
 
   surreal-memory-server:
-    platform: linux/amd64
     build:
       context: .
       dockerfile: Dockerfile-local

@@ -255,6 +255,24 @@ async fn test_task_stream_lifecycle() {
         .expect("context");
     assert!(!ctx.memories.is_empty());
 
+    let profile = profile_for("default");
+    for idx in 0..4 {
+        let mut mem = memory(&format!("Long step {}", idx + 2), "u1");
+        mem.token_count = Some((profile.summarization_threshold() / 4 + 1) as usize);
+        s.add_to_task_stream("my-task", mem)
+            .await
+            .expect("seed summarization");
+    }
+
+    let summary = s
+        .auto_summarize_task_stream("my-task", Some("u1"), None, "default")
+        .await
+        .expect("auto summarize");
+    assert!(
+        summary.is_some(),
+        "expected a summary once threshold is crossed"
+    );
+
     let archived = s.archive_task_stream("my-task").await.expect("archive");
     assert_eq!(archived.status, TaskStreamStatus::Archived);
 }
@@ -303,13 +321,28 @@ async fn test_mindmap_crud() {
         parent_id: Some("root".to_string()),
         node_type: None,
         color: None,
-        metadata: None,
+        metadata: Some(serde_json::json!({
+            "confidence": 0.92,
+            "source": {
+                "kind": "memory",
+                "id": "memory:abc123"
+            }
+        })),
     };
     let updated = s
         .add_mindmap_node("persona", Some("u1"), node)
         .await
         .expect("add_node");
     assert_eq!(updated.nodes.len(), 2);
+    assert_eq!(
+        updated.nodes[1]
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("source"))
+            .and_then(|source| source.get("kind"))
+            .and_then(serde_json::Value::as_str),
+        Some("memory")
+    );
 
     let list = s.list_mindmaps(Some("u1"), None).await.expect("list");
     assert!(!list.is_empty());

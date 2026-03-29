@@ -1010,6 +1010,8 @@ pub struct AddMindmapNodeParams {
     #[schemars(description = "For argument maps: claim | evidence | rebuttal | idea")]
     pub node_type: Option<String>,
     pub color: Option<String>,
+    #[schemars(description = "Optional arbitrary JSON metadata for the node")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -1178,7 +1180,7 @@ impl MemoryHandler {
             parent_id: params.parent_id,
             node_type: params.node_type,
             color: params.color,
-            metadata: None,
+            metadata: params.metadata,
         };
         match self
             .storage

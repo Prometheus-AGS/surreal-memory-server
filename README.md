@@ -286,11 +286,24 @@ GET    /api/v1/entities/related      Get related entities
 POST   /api/v1/mindmaps              Create mindmap
 GET    /api/v1/mindmaps              List mindmaps
 GET    /api/v1/mindmaps/:name        Get mindmap
-PUT    /api/v1/mindmaps/:name        Update mindmap
 DELETE /api/v1/mindmaps/:name        Delete mindmap
-POST   /api/v1/mindmaps/:name/nodes  Add node
+POST   /api/v1/mindmaps/:name/nodes  Add node (supports optional metadata JSON)
+POST   /api/v1/mindmaps/:name/edges  Add edge
 DELETE /api/v1/mindmaps/:name/nodes/:id  Remove node
 GET    /api/v1/mindmaps/:name/export Export (json|mermaid|markdown)
+```
+
+### TaskStreams  `/api/v1/taskstreams`
+
+```
+POST   /api/v1/taskstreams                   Create task stream
+GET    /api/v1/taskstreams                   List task streams
+GET    /api/v1/taskstreams/:name             Get task stream
+DELETE /api/v1/taskstreams/:name             Archive task stream
+POST   /api/v1/taskstreams/:name/archive     Archive task stream and return updated record
+POST   /api/v1/taskstreams/:name/memories    Add memory to task stream
+GET    /api/v1/taskstreams/:name/context     Get model-budgeted context window
+POST   /api/v1/taskstreams/:name/summarize   Trigger rolling auto-summarization
 ```
 
 ### A2A SSE

@@ -1,11 +1,17 @@
 # syntax=docker/dockerfile:1.4
 # ── Local build image — copies pre-built binary from ./target/release ──────────
-# Build the binary first: cargo build --release --bin surreal-memory-server
+# Build a Linux binary first and place it at ./target/release/surreal-memory-server.
+# A normal macOS cargo build is not sufficient. The binary must match the image
+# architecture used by `docker compose -f docker-compose-local.yml build`.
+# On Apple Silicon, prefer native Linux arm64 for the local Docker Desktop path
+# and reserve linux/amd64 for explicit parity checks. Build that binary with your
+# preferred cross-compilation flow (for example `./scripts/build-local-linux-binary.sh`)
+# and place or copy the resulting binary at ./target/release/surreal-memory-server.
 # Then: docker compose -f docker-compose-local.yml up -d --build
 FROM debian:trixie-slim AS runtime
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libssl3 libstdc++6 \
+    && apt-get install -y --no-install-recommends ca-certificates curl libssl3 libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY target/release/surreal-memory-server /usr/local/bin/surreal-memory-server
@@ -18,8 +24,10 @@ WORKDIR /data
 
 ENV RUST_LOG=info \
     API_PORT=3001 \
-    SURREAL_MODE=embedded \
-    SURREAL_EMBEDDED_PATH=/data/memory.db \
+    SURREAL_MODE=server \
+    SURREAL_ENDPOINT=ws://surrealdb:8000 \
+    SURREAL_USERNAME=root \
+    SURREAL_PASSWORD=root \
     SURREAL_NAMESPACE=memory \
     SURREAL_DATABASE=main
 

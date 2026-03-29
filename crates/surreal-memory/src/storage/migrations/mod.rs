@@ -73,6 +73,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "mindmap_nodes_edges_remove_redefine",
         sql: MIGRATION_V11_SQL,
     },
+    Migration {
+        version: 12,
+        name: "mindmap_node_element_fields_flexible",
+        sql: MIGRATION_V12_SQL,
+    },
 ];
 
 // ── v1: Baseline ─────────────────────────────────────────────────────────────
@@ -252,6 +257,19 @@ DEFINE FIELD nodes ON mindmap TYPE array<object> FLEXIBLE DEFAULT [];
 DEFINE FIELD edges ON mindmap TYPE array<object> FLEXIBLE DEFAULT [];
 ";
 
+// ── v12: Explicitly mark mindmap element objects as FLEXIBLE ──────────────────
+//
+// v11 fixed the top-level `nodes` / `edges` arrays, but server-mode SurrealDB
+// can still retain stricter expectations around the element objects themselves.
+// Define the wildcard element fields explicitly so nested node metadata and edge
+// attributes remain valid under SCHEMAFULL.
+
+const MIGRATION_V12_SQL: &str = "
+DEFINE FIELD IF NOT EXISTS nodes.* ON mindmap TYPE object FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS nodes.*.metadata ON mindmap TYPE option<object> FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS edges.* ON mindmap TYPE object FLEXIBLE;
+";
+
 // ── Runner ────────────────────────────────────────────────────────────────────
 
 pub async fn run_migrations(db: &Surreal<Any>) -> Result<()> {
@@ -312,4 +330,25 @@ async fn apply_migration(db: &Surreal<Any>, migration: &Migration) -> Result<()>
 #[derive(Debug, serde::Deserialize, SurrealValue)]
 struct SchemaVersion {
     pub version: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MIGRATION_V11_SQL, MIGRATION_V12_SQL, MIGRATIONS};
+
+    #[test]
+    fn migration_v12_is_registered() {
+        let last = MIGRATIONS.last().expect("at least one migration");
+        assert_eq!(last.version, 12);
+        assert_eq!(last.name, "mindmap_node_element_fields_flexible");
+        assert_eq!(last.sql, MIGRATION_V12_SQL);
+    }
+
+    #[test]
+    fn migration_v12_covers_nested_mindmap_fields() {
+        assert!(MIGRATION_V11_SQL.contains("DEFINE FIELD nodes ON mindmap"));
+        assert!(MIGRATION_V12_SQL.contains("DEFINE FIELD nodes.* ON mindmap"));
+        assert!(MIGRATION_V12_SQL.contains("DEFINE FIELD edges.* ON mindmap"));
+        assert!(MIGRATION_V12_SQL.contains("FLEXIBLE"));
+    }
 }
