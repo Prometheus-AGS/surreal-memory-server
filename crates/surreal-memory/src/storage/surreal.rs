@@ -12,7 +12,7 @@ use crate::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
-use std::{cmp::Ordering, sync::Arc};
+use std::{cmp::Ordering, sync::Arc, sync::RwLock};
 use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
 use surrealdb::opt::auth::Root;
@@ -24,7 +24,8 @@ use uuid::Uuid;
 const DEFAULT_CONTEXT_BUDGET: u64 = 100_000;
 
 pub struct SurrealStorage {
-    db: Surreal<Any>,
+    connection: Arc<RwLock<ConnectionState>>,
+    connection_info: ConnectionInfo,
     embedding_service: Arc<dyn EmbeddingService>,
 }
 
@@ -132,6 +133,27 @@ impl SurrealStorage {
         config: &SurrealConfig,
         embedding_service: Arc<dyn EmbeddingService>,
     ) -> Result<Self> {
+        let connection_info = ConnectionInfo {
+            config: config.clone(),
+            retry_config: config.retry.clone(),
+        };
+
+        let db = Self::connect_with_config(config).await?;
+
+        // Run migrations on initial connection
+        run_migrations(&db).await?;
+
+        let connection = Arc::new(RwLock::new(ConnectionState::Connected(db)));
+
+        Ok(Self {
+            connection,
+            connection_info,
+            embedding_service,
+        })
+    }
+
+    /// Establish connection without retry logic (called by connect_with_retry).
+    async fn connect_with_config(config: &SurrealConfig) -> Result<Surreal<Any>> {
         let db = match &config.mode {
             SurrealMode::Embedded => {
                 let path = config
@@ -165,12 +187,7 @@ impl SurrealStorage {
             .await
             .context("Failed to use namespace/database")?;
 
-        run_migrations(&db).await?;
-
-        Ok(Self {
-            db,
-            embedding_service,
-        })
+        Ok(db)
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
@@ -1486,12 +1503,29 @@ impl SurrealStorage {
             .unwrap_or_else(|_| "0".to_string());
         let dir = std::env::temp_dir().join(format!("surreal-test-{}", ts));
         std::fs::create_dir_all(&dir)?;
-        let path = format!("rocksdb://{}", dir.display());
-        let db = surrealdb::engine::any::connect(&path).await?;
-        db.use_ns("test").use_db("test").await?;
+        let path = dir.display().to_string();
+
+        let config = SurrealConfig {
+            mode: SurrealMode::Embedded,
+            embedded_path: Some(path),
+            namespace: "test".to_string(),
+            database: "test".to_string(),
+            ..Default::default()
+        };
+
+        let connection_info = ConnectionInfo {
+            config: config.clone(),
+            retry_config: config.retry.clone(),
+        };
+
+        let db = Self::connect_with_config(&config).await?;
         run_migrations(&db).await?;
+
+        let connection = Arc::new(RwLock::new(ConnectionState::Connected(db)));
+
         Ok(Self {
-            db,
+            connection,
+            connection_info,
             embedding_service,
         })
     }
