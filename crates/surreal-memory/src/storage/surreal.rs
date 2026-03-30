@@ -207,7 +207,8 @@ impl SurrealStorage {
         T: Serialize + DeserializeOwned + SurrealValue,
     {
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -232,7 +233,8 @@ impl SurrealStorage {
         T: Serialize + DeserializeOwned + SurrealValue,
     {
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -299,7 +301,8 @@ impl MemoryStorage for SurrealStorage {
 
     async fn create_entity(&self, mut entity: Entity) -> Result<Entity> {
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -330,7 +333,8 @@ impl MemoryStorage for SurrealStorage {
 
     async fn get_entity(&self, name: &str) -> Result<Option<Entity>> {
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -347,7 +351,8 @@ impl MemoryStorage for SurrealStorage {
 
     async fn update_entity(&self, mut entity: Entity) -> Result<Entity> {
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -371,7 +376,8 @@ impl MemoryStorage for SurrealStorage {
 
     async fn delete_entity(&self, name: &str) -> Result<()> {
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -386,7 +392,8 @@ impl MemoryStorage for SurrealStorage {
 
     async fn search_entities(&self, query: &str) -> Result<Vec<Entity>> {
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -403,7 +410,8 @@ impl MemoryStorage for SurrealStorage {
 
     async fn create_relation(&self, mut relation: Relation) -> Result<Relation> {
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -429,7 +437,8 @@ impl MemoryStorage for SurrealStorage {
 
     async fn get_relations(&self, entity_name: &str) -> Result<Vec<Relation>> {
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -446,7 +455,8 @@ impl MemoryStorage for SurrealStorage {
 
     async fn delete_relation(&self, from: &str, to: &str, relation_type: &str) -> Result<()> {
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -463,7 +473,8 @@ impl MemoryStorage for SurrealStorage {
 
     async fn get_graph(&self) -> Result<KnowledgeGraph> {
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -498,7 +509,8 @@ impl MemoryStorage for SurrealStorage {
         threshold: f32,
     ) -> Result<Vec<SemanticSearchResult>> {
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -567,7 +579,8 @@ impl MemoryStorage for SurrealStorage {
         }
 
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -605,7 +618,8 @@ impl MemoryStorage for SurrealStorage {
 
     async fn get_memory(&self, id: &str) -> Result<Option<Memory>> {
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -622,7 +636,8 @@ impl MemoryStorage for SurrealStorage {
 
     async fn update_memory(&self, id: &str, content: String) -> Result<Memory> {
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -670,7 +685,8 @@ impl MemoryStorage for SurrealStorage {
 
     async fn delete_memory(&self, id: &str) -> Result<()> {
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -740,7 +756,8 @@ impl MemoryStorage for SurrealStorage {
         query.push_str(&parts.join(" AND "));
 
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -793,7 +810,8 @@ impl MemoryStorage for SurrealStorage {
 
     async fn get_memory_history(&self, memory_id: &str) -> Result<Vec<MemoryHistory>> {
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -821,7 +839,8 @@ impl MemoryStorage for SurrealStorage {
 
     async fn get_task_stream(&self, name: &str) -> Result<Option<TaskStream>> {
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -855,7 +874,8 @@ impl MemoryStorage for SurrealStorage {
 
         // Update stream token count and last_active
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -883,7 +903,8 @@ impl MemoryStorage for SurrealStorage {
         let budget = max_tokens.unwrap_or_else(|| Self::model_context_budget(model_name));
 
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -950,7 +971,8 @@ impl MemoryStorage for SurrealStorage {
         }
 
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -976,7 +998,8 @@ impl MemoryStorage for SurrealStorage {
 
     async fn archive_task_stream(&self, name: &str) -> Result<TaskStream> {
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -1023,7 +1046,8 @@ impl MemoryStorage for SurrealStorage {
         }
 
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -1101,7 +1125,8 @@ impl MemoryStorage for SurrealStorage {
         }
 
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -1195,7 +1220,8 @@ impl MemoryStorage for SurrealStorage {
 
     async fn expire_stale_memories(&self) -> Result<u64> {
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -1231,7 +1257,8 @@ impl MemoryStorage for SurrealStorage {
 
     async fn get_mindmap(&self, name: &str, user_id: Option<&str>) -> Result<Option<MindMap>> {
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -1339,7 +1366,8 @@ impl MemoryStorage for SurrealStorage {
             )
         };
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -1358,7 +1386,8 @@ impl MemoryStorage for SurrealStorage {
 
     async fn delete_mindmap(&self, name: &str, user_id: Option<&str>) -> Result<()> {
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -1409,7 +1438,8 @@ impl MemoryStorage for SurrealStorage {
             scope_parts.push(format!("agent_id = '{}'", a));
         }
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -1487,7 +1517,8 @@ impl MemoryStorage for SurrealStorage {
         memory: &crate::memory::Memory,
     ) -> Result<()> {
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -1555,7 +1586,8 @@ impl MemoryStorage for SurrealStorage {
                 }
                 // Expand forward relations
                 let db = {
-                    let state = self.connection.read().unwrap();
+                    let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
                     match &*state {
                         ConnectionState::Connected(db) => db.clone(),
                         ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -1610,7 +1642,8 @@ impl MemoryStorage for SurrealStorage {
                     entities.push(e);
                 }
                 let db = {
-                    let state = self.connection.read().unwrap();
+                    let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
                     match &*state {
                         ConnectionState::Connected(db) => db.clone(),
                         ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -1666,7 +1699,8 @@ impl MemoryStorage for SurrealStorage {
             conditions.push(format!("relation_type = '{}'", rt));
         }
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -1700,7 +1734,8 @@ impl MemoryStorage for SurrealStorage {
 
     async fn get_entity_history(&self, name: &str) -> Result<Vec<crate::memory::MemoryHistory>> {
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
@@ -1721,7 +1756,8 @@ impl MemoryStorage for SurrealStorage {
         before_rfc3339: &str,
     ) -> Result<crate::entity::KnowledgeGraph> {
         let db = {
-            let state = self.connection.read().unwrap();
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
             match &*state {
                 ConnectionState::Connected(db) => db.clone(),
                 ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
