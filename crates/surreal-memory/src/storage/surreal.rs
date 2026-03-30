@@ -111,7 +111,7 @@ impl SurrealStorage {
     {
         let mut response = self
             .db
-            .query("CREATE type::thing($table, $key) CONTENT $value RETURN AFTER")
+            .query("CREATE type::record($table, $key) CONTENT $value RETURN AFTER")
             .bind(("table", table.to_string()))
             .bind(("key", key.to_string()))
             .bind(("value", value))
