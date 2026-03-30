@@ -9,7 +9,7 @@
 #[allow(unused_imports)]
 pub use surreal_memory::storage::MemoryStorage;
 #[allow(unused_imports)]
-pub use surreal_memory::storage::surreal::{SurrealConfig, SurrealMode};
+pub use surreal_memory::storage::surreal::{RetryConfig, SurrealConfig, SurrealMode};
 #[allow(unused_imports)]
 pub use surreal_memory::{
     ContextWindow, Entity, KnowledgeGraph, Memory, MemoryHistory, MemoryScope, MemoryType,
@@ -39,6 +39,7 @@ pub async fn create_storage(
         password: config.surreal_password.clone(),
         namespace: config.surreal_namespace.clone(),
         database: config.surreal_database.clone(),
+        retry: RetryConfig::default(),
     };
 
     let storage = SurrealStorage::new(&surreal_config, embedding_service).await?;

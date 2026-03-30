@@ -77,6 +77,21 @@ impl RetryConfig {
     }
 }
 
+/// Connection state for health tracking and reconnection.
+#[derive(Debug)]
+enum ConnectionState {
+    Connected(Surreal<Any>),
+    Reconnecting,
+    Failed(String),
+}
+
+/// Connection configuration for reconnection attempts.
+#[derive(Debug, Clone)]
+struct ConnectionInfo {
+    config: SurrealConfig,
+    retry_config: RetryConfig,
+}
+
 // ── Config-compatible constructor ─────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -94,6 +109,7 @@ pub struct SurrealConfig {
     pub password: Option<String>,
     pub namespace: String,
     pub database: String,
+    pub retry: RetryConfig,
 }
 
 impl SurrealStorage {
@@ -1503,5 +1519,19 @@ mod retry_tests {
         };
         let delay = config.calculate_delay(10); // Would be > 500ms without cap
         assert!(delay.as_millis() <= 625); // 500 + 25% jitter
+    }
+
+    #[tokio::test]
+    async fn test_connection_state_lifecycle() {
+        // Mock connection (will fail to actually connect, but tests the type)
+        let state = ConnectionState::Reconnecting;
+        assert!(matches!(state, ConnectionState::Reconnecting));
+
+        let state = ConnectionState::Failed("test error".to_string());
+        if let ConnectionState::Failed(msg) = state {
+            assert_eq!(msg, "test error");
+        } else {
+            panic!("Expected Failed state");
+        }
     }
 }
