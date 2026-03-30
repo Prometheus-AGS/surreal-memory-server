@@ -23,5 +23,5 @@ pub use memory::{Memory, MemoryHistory, MemoryScope, MemoryType};
 pub use mindmap::{ExportFormat, MapType, MindMap, MindMapEdge, MindMapNode};
 pub use model_profiles::{MODEL_PROFILES, ModelProfile, profile_for};
 pub use storage::MemoryStorage;
-pub use storage::surreal::SurrealStorage;
+pub use storage::surreal::{RetryConfig, SurrealConfig, SurrealStorage};
 pub use task_stream::{ContextWindow, TaskStream, TaskStreamStatus};

@@ -14,6 +14,44 @@ use embeddings::{EmbeddingService, create_embedding_service};
 use mcp::MemoryMcpServer;
 use storage::{MemoryStorage, create_storage};
 
+/// Parse retry configuration from environment variables with sensible defaults.
+fn parse_retry_config_from_env() -> surreal_memory::RetryConfig {
+    use std::env;
+
+    let max_connect_retries = env::var("SURREAL_MAX_CONNECT_RETRIES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10);
+
+    let max_operation_retries = env::var("SURREAL_MAX_OPERATION_RETRIES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3);
+
+    let base_retry_delay_ms = env::var("SURREAL_BASE_RETRY_DELAY_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100);
+
+    let max_retry_delay_ms = env::var("SURREAL_MAX_RETRY_DELAY_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5000);
+
+    let jitter_factor = env::var("SURREAL_RETRY_JITTER_FACTOR")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.25);
+
+    surreal_memory::RetryConfig {
+        max_connect_retries,
+        max_operation_retries,
+        base_retry_delay_ms,
+        max_retry_delay_ms,
+        jitter_factor,
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
@@ -25,13 +63,14 @@ async fn main() -> Result<()> {
 
     let config = load_config().await?;
     let embedding_service = init_embedding_service(&config).await?;
+    let retry_config = parse_retry_config_from_env();
 
     let api_port: u16 = std::env::var("API_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(3001);
 
-    let storage = init_storage(config, embedding_service).await?;
+    let storage = init_storage(config, embedding_service, retry_config).await?;
 
     // Graceful shutdown channel — send `true` to stop all workers.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -158,9 +197,10 @@ async fn init_embedding_service(config: &Config) -> Result<Arc<dyn EmbeddingServ
 async fn init_storage(
     config: Config,
     embedding_service: Arc<dyn EmbeddingService>,
+    retry_config: surreal_memory::RetryConfig,
 ) -> Result<Arc<dyn MemoryStorage>> {
     tracing::info!("💾 Initializing storage...");
-    let storage = create_storage(&config, embedding_service)
+    let storage = create_storage(&config, embedding_service, retry_config)
         .await
         .context("Failed to initialize SurrealDB storage")?;
     tracing::info!("✅ Storage initialized successfully");
@@ -183,4 +223,123 @@ async fn run_api_server(storage: Arc<dyn MemoryStorage>, port: u16) -> Result<()
     axum::serve(listener, router)
         .await
         .context("REST API server error")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Global lock to ensure tests don't run concurrently and mutate env vars
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn test_retry_config_defaults() {
+        let _lock = ENV_LOCK.lock().unwrap();
+
+        // Clear any environment variables
+        unsafe {
+            std::env::remove_var("SURREAL_MAX_CONNECT_RETRIES");
+            std::env::remove_var("SURREAL_MAX_OPERATION_RETRIES");
+            std::env::remove_var("SURREAL_BASE_RETRY_DELAY_MS");
+            std::env::remove_var("SURREAL_MAX_RETRY_DELAY_MS");
+            std::env::remove_var("SURREAL_RETRY_JITTER_FACTOR");
+        }
+
+        let config = parse_retry_config_from_env();
+
+        assert_eq!(config.max_connect_retries, 10);
+        assert_eq!(config.max_operation_retries, 3);
+        assert_eq!(config.base_retry_delay_ms, 100);
+        assert_eq!(config.max_retry_delay_ms, 5000);
+        assert_eq!(config.jitter_factor, 0.25);
+    }
+
+    #[test]
+    fn test_retry_config_from_env() {
+        let _lock = ENV_LOCK.lock().unwrap();
+
+        unsafe {
+            std::env::set_var("SURREAL_MAX_CONNECT_RETRIES", "20");
+            std::env::set_var("SURREAL_MAX_OPERATION_RETRIES", "5");
+            std::env::set_var("SURREAL_BASE_RETRY_DELAY_MS", "200");
+            std::env::set_var("SURREAL_MAX_RETRY_DELAY_MS", "10000");
+            std::env::set_var("SURREAL_RETRY_JITTER_FACTOR", "0.5");
+        }
+
+        let config = parse_retry_config_from_env();
+
+        assert_eq!(config.max_connect_retries, 20);
+        assert_eq!(config.max_operation_retries, 5);
+        assert_eq!(config.base_retry_delay_ms, 200);
+        assert_eq!(config.max_retry_delay_ms, 10000);
+        assert_eq!(config.jitter_factor, 0.5);
+
+        // Cleanup
+        unsafe {
+            std::env::remove_var("SURREAL_MAX_CONNECT_RETRIES");
+            std::env::remove_var("SURREAL_MAX_OPERATION_RETRIES");
+            std::env::remove_var("SURREAL_BASE_RETRY_DELAY_MS");
+            std::env::remove_var("SURREAL_MAX_RETRY_DELAY_MS");
+            std::env::remove_var("SURREAL_RETRY_JITTER_FACTOR");
+        }
+    }
+
+    #[test]
+    fn test_retry_config_partial_env() {
+        let _lock = ENV_LOCK.lock().unwrap();
+
+        // Set only some variables, others should use defaults
+        unsafe {
+            std::env::remove_var("SURREAL_MAX_CONNECT_RETRIES");
+            std::env::remove_var("SURREAL_MAX_OPERATION_RETRIES");
+            std::env::set_var("SURREAL_BASE_RETRY_DELAY_MS", "500");
+            std::env::remove_var("SURREAL_MAX_RETRY_DELAY_MS");
+            std::env::remove_var("SURREAL_RETRY_JITTER_FACTOR");
+        }
+
+        let config = parse_retry_config_from_env();
+
+        assert_eq!(config.max_connect_retries, 10); // default
+        assert_eq!(config.max_operation_retries, 3); // default
+        assert_eq!(config.base_retry_delay_ms, 500); // custom
+        assert_eq!(config.max_retry_delay_ms, 5000); // default
+        assert_eq!(config.jitter_factor, 0.25); // default
+
+        // Cleanup
+        unsafe {
+            std::env::remove_var("SURREAL_BASE_RETRY_DELAY_MS");
+        }
+    }
+
+    #[test]
+    fn test_retry_config_invalid_values() {
+        let _lock = ENV_LOCK.lock().unwrap();
+
+        // Clear all first
+        unsafe {
+            std::env::remove_var("SURREAL_MAX_CONNECT_RETRIES");
+            std::env::remove_var("SURREAL_MAX_OPERATION_RETRIES");
+            std::env::remove_var("SURREAL_BASE_RETRY_DELAY_MS");
+            std::env::remove_var("SURREAL_MAX_RETRY_DELAY_MS");
+            std::env::remove_var("SURREAL_RETRY_JITTER_FACTOR");
+        }
+
+        // Invalid values should fall back to defaults
+        unsafe {
+            std::env::set_var("SURREAL_MAX_CONNECT_RETRIES", "not_a_number");
+            std::env::set_var("SURREAL_RETRY_JITTER_FACTOR", "invalid");
+        }
+
+        let config = parse_retry_config_from_env();
+
+        assert_eq!(config.max_connect_retries, 10); // default due to parse error
+        assert_eq!(config.jitter_factor, 0.25); // default due to parse error
+
+        // Cleanup
+        unsafe {
+            std::env::remove_var("SURREAL_MAX_CONNECT_RETRIES");
+            std::env::remove_var("SURREAL_RETRY_JITTER_FACTOR");
+        }
+    }
 }

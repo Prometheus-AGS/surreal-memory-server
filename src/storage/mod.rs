@@ -27,6 +27,7 @@ use std::sync::Arc;
 pub async fn create_storage(
     config: &Config,
     embedding_service: Arc<dyn EmbeddingService>,
+    retry_config: RetryConfig,
 ) -> Result<Arc<dyn MemoryStorage>> {
     let surreal_config = SurrealConfig {
         mode: match config.surreal_mode {
@@ -39,7 +40,7 @@ pub async fn create_storage(
         password: config.surreal_password.clone(),
         namespace: config.surreal_namespace.clone(),
         database: config.surreal_database.clone(),
-        retry: RetryConfig::default(),
+        retry: retry_config,
     };
 
     let storage = SurrealStorage::new(&surreal_config, embedding_service).await?;
