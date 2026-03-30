@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -r 'mod migrations' --include=*.rs)",
+      "Bash(docker-compose ps:*)",
+      "Bash(docker-compose logs:*)",
+      "Bash(cargo test:*)",
+      "Bash(docker compose:*)",
+      "Bash(docker ps:*)",
+      "Bash(killall -9 \"docker compose\")",
+      "Bash(cargo build:*)",
+      "Bash(killall cargo:*)",
+      "Bash(curl:*)",
+      "Bash(chmod +x /Users/gqadonis/Projects/references/surreal-memory-server/scripts/test-all-endpoints.sh)",
+      "Bash(/Users/gqadonis/Projects/references/surreal-memory-server/scripts/test-all-endpoints.sh)",
+      "Bash(killall surreal-memory-server:*)",
+      "Bash(chmod +x /Users/gqadonis/Projects/references/surreal-memory-server/scripts/test-mindmaps-taskstreams.sh)",
+      "Bash(/Users/gqadonis/Projects/references/surreal-memory-server/scripts/test-mindmaps-taskstreams.sh)",
+      "Bash(tee /tmp/build.log)"
+    ]
+  }
+}

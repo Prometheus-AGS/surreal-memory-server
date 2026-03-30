@@ -18,5 +18,5 @@ export SURREAL_DATABASE="main"
 export EMBEDDING_PROVIDER="openai"
 
 # Stream pure JSON-RPC over stdio
-cd /home/gqadonis/Projects/prometheus/surreal-memory-server
+cd /Users/gqadonis/Projects/references/surreal-memory-server
 exec cargo run -q --release --bin surreal-memory-server

@@ -3,6 +3,13 @@
 //! Migrations are additive — never destructive. The runner reads the highest
 //! applied version from `schema_version` and runs only pending migrations.
 //! Safe to call at every startup.
+//!
+//! KEY DESIGN DECISIONS:
+//! - mindmap table is SCHEMALESS: node/edge objects carry arbitrary fields
+//!   (color, metadata, node_type, etc.) which SCHEMAFULL rejects without
+//!   explicit sub-field definitions for every array element field.
+//! - task_stream includes all struct fields upfront to avoid schema mismatches.
+//! - memory.metadata is FLEXIBLE to allow arbitrary JSON metadata objects.
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
@@ -80,7 +87,7 @@ static MIGRATIONS: &[Migration] = &[
     },
 ];
 
-// ── v1: Baseline ─────────────────────────────────────────────────────────────
+// ── v1: Baseline entity + relation schema ─────────────────────────────────────
 
 const MIGRATION_V1_SQL: &str = "
 DEFINE TABLE IF NOT EXISTS entity SCHEMAFULL;
@@ -108,7 +115,7 @@ DEFINE FIELD IF NOT EXISTS applied_at ON schema_version TYPE datetime;
 DEFINE FIELD IF NOT EXISTS checksum ON schema_version TYPE string;
 ";
 
-// ── v2: Scoped Memory (mem0-compatible) ──────────────────────────────────────
+// ── v2: Scoped Memory ─────────────────────────────────────────────────────────
 
 const MIGRATION_V2_SQL: &str = "
 DEFINE TABLE IF NOT EXISTS memory SCHEMAFULL;
@@ -139,7 +146,9 @@ DEFINE INDEX IF NOT EXISTS memory_session ON memory FIELDS session_id;
 DEFINE INDEX IF NOT EXISTS memory_scope ON memory FIELDS scope, user_id, agent_id, session_id;
 ";
 
-// ── v3: TaskStream ────────────────────────────────────────────────────────────
+// ── v3: TaskStream — all struct fields including auto-summarization ────────────
+// Includes auto_summarize, summary_count, model_id that the TaskStream struct
+// requires. Defining them here avoids schema mismatch on insert.
 
 const MIGRATION_V3_SQL: &str = "
 DEFINE TABLE IF NOT EXISTS task_stream SCHEMAFULL;
@@ -149,12 +158,15 @@ DEFINE FIELD IF NOT EXISTS agent_id ON task_stream TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS user_id ON task_stream TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS status ON task_stream TYPE any DEFAULT 'active';
 DEFINE FIELD IF NOT EXISTS total_tokens ON task_stream TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS auto_summarize ON task_stream TYPE bool DEFAULT true;
+DEFINE FIELD IF NOT EXISTS summary_count ON task_stream TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS model_id ON task_stream TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS created_at ON task_stream TYPE datetime;
 DEFINE FIELD IF NOT EXISTS last_active ON task_stream TYPE datetime;
 DEFINE INDEX IF NOT EXISTS task_stream_name ON task_stream FIELDS name UNIQUE;
 ";
 
-// ── v4: MemoryHistory (audit log) ─────────────────────────────────────────────
+// ── v4: MemoryHistory audit log ───────────────────────────────────────────────
 
 const MIGRATION_V4_SQL: &str = "
 DEFINE TABLE IF NOT EXISTS memory_history SCHEMAFULL;
@@ -167,29 +179,25 @@ DEFINE FIELD IF NOT EXISTS change_type ON memory_history TYPE string;
 DEFINE INDEX IF NOT EXISTS memory_history_by_memory ON memory_history FIELDS memory_id;
 ";
 
-// ── v5: HNSW vector indexes for ANN search ────────────────────────────────────
+// ── v5: HNSW vector indexes ───────────────────────────────────────────────────
 
 const MIGRATION_V5_SQL: &str = "
-DEFINE INDEX IF NOT EXISTS entity_embedding_hnsw ON entity FIELDS embedding HNSW DIMENSION 1536 DIST COSINE TYPE F32;
-DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw ON memory FIELDS embedding HNSW DIMENSION 1536 DIST COSINE TYPE F32;
+DEFINE INDEX IF NOT EXISTS entity_embedding_hnsw
+  ON entity FIELDS embedding HNSW DIMENSION 1536 DIST COSINE TYPE F32;
+DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
+  ON memory FIELDS embedding HNSW DIMENSION 1536 DIST COSINE TYPE F32;
 ";
 
-// ── v6: Mindmap table + BM25 full-text search indexes ────────────────────────
+// ── v6: Mindmap table — SCHEMALESS ────────────────────────────────────────────
+// CRITICAL: mindmap MUST be SCHEMALESS (not SCHEMAFULL).
+// MindMapNode carries optional fields (color, metadata, node_type, parent_id)
+// that SurrealDB SCHEMAFULL mode rejects unless every array element sub-field
+// is explicitly defined — which breaks with arbitrary JSON in metadata.
+// SCHEMALESS gives full flexibility for node/edge objects while still
+// allowing indexed lookups on the top-level name and agent_id fields.
 
 const MIGRATION_V6_SQL: &str = "
-DEFINE TABLE IF NOT EXISTS mindmap SCHEMAFULL;
-DEFINE FIELD IF NOT EXISTS name ON mindmap TYPE string;
-DEFINE FIELD IF NOT EXISTS description ON mindmap TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS map_type ON mindmap TYPE any DEFAULT 'radial';
-DEFINE FIELD IF NOT EXISTS agent_id ON mindmap TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS user_id ON mindmap TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS task_stream_id ON mindmap TYPE option<record<task_stream>>;
-DEFINE FIELD IF NOT EXISTS tags ON mindmap TYPE array<string> DEFAULT [];
-DEFINE FIELD IF NOT EXISTS tags.* ON mindmap TYPE string;
-DEFINE FIELD IF NOT EXISTS nodes ON mindmap TYPE array<object> DEFAULT [];
-DEFINE FIELD IF NOT EXISTS edges ON mindmap TYPE array<object> DEFAULT [];
-DEFINE FIELD IF NOT EXISTS created_at ON mindmap TYPE datetime;
-DEFINE FIELD IF NOT EXISTS updated_at ON mindmap TYPE datetime;
+DEFINE TABLE IF NOT EXISTS mindmap SCHEMALESS;
 DEFINE INDEX IF NOT EXISTS mindmap_name ON mindmap FIELDS name, user_id UNIQUE;
 DEFINE INDEX IF NOT EXISTS mindmap_agent ON mindmap FIELDS agent_id;
 ";

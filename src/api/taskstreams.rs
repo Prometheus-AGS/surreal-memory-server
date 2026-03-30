@@ -18,7 +18,6 @@ pub fn router() -> Router<AppState> {
         .route("/", get(list_task_streams))
         .route("/{name}", get(get_task_stream))
         .route("/{name}", delete(delete_task_stream))
-        .route("/{name}/archive", post(archive_task_stream))
         .route("/{name}/memories", post(add_memory_to_task_stream))
         .route("/{name}/context", get(get_context_for_task))
         .route("/{name}/summarize", post(auto_summarize_task_stream))
