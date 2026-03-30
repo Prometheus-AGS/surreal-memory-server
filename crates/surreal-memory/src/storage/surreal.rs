@@ -192,6 +192,42 @@ impl SurrealStorage {
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
+    /// Classify errors as retriable or non-retriable.
+    fn is_retriable_error(&self, error: &anyhow::Error) -> bool {
+        let error_msg = format!("{}", error).to_lowercase();
+
+        // Retriable: Network errors
+        if error_msg.contains("connection")
+            || error_msg.contains("timeout")
+            || error_msg.contains("dns")
+            || error_msg.contains("refused")
+            || error_msg.contains("reset")
+            || error_msg.contains("closed") {
+            return true;
+        }
+
+        // Retriable: Transient DB errors
+        if error_msg.contains("too many connections")
+            || error_msg.contains("backpressure")
+            || error_msg.contains("lock timeout")
+            || error_msg.contains("serialization failure") {
+            return true;
+        }
+
+        // Non-retriable: Schema/validation errors
+        if error_msg.contains("field")
+            || error_msg.contains("table")
+            || error_msg.contains("invalid")
+            || error_msg.contains("credential")
+            || error_msg.contains("not found")
+            || error_msg.contains("constraint") {
+            return false;
+        }
+
+        // Default: don't retry unknown errors
+        false
+    }
+
     async fn embed_entity(&self, entity: &Entity) -> Result<Vec<f32>> {
         let mut parts = vec![format!("{} ({})", entity.name, entity.entity_type)];
         parts.extend(entity.observations.iter().cloned());
@@ -1887,6 +1923,79 @@ mod retry_tests {
             assert_eq!(msg, "test error");
         } else {
             panic!("Expected Failed state");
+        }
+    }
+
+    #[test]
+    fn test_retriable_network_errors() {
+        let storage = mock_storage();
+
+        let err = anyhow::anyhow!("Connection uninitialised");
+        assert!(storage.is_retriable_error(&err));
+
+        let err = anyhow::anyhow!("connection closed");
+        assert!(storage.is_retriable_error(&err));
+
+        let err = anyhow::anyhow!("Connection timeout");
+        assert!(storage.is_retriable_error(&err));
+
+        let err = anyhow::anyhow!("too many connections");
+        assert!(storage.is_retriable_error(&err));
+    }
+
+    #[test]
+    fn test_non_retriable_errors() {
+        let storage = mock_storage();
+
+        let err = anyhow::anyhow!("Found field 'foo', but no such field exists");
+        assert!(!storage.is_retriable_error(&err));
+
+        let err = anyhow::anyhow!("invalid credentials");
+        assert!(!storage.is_retriable_error(&err));
+
+        let err = anyhow::anyhow!("table doesn't exist");
+        assert!(!storage.is_retriable_error(&err));
+
+        let err = anyhow::anyhow!("record not found");
+        assert!(!storage.is_retriable_error(&err));
+    }
+
+    fn mock_storage() -> SurrealStorage {
+        // Mock storage for testing error classification
+        use crate::embeddings::EmbeddingService;
+
+        struct MockEmbedding;
+        #[async_trait::async_trait]
+        impl EmbeddingService for MockEmbedding {
+            async fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+                Ok(vec![0.0; 1536])
+            }
+            async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
+                Ok(texts.iter().map(|_| vec![0.0; 1536]).collect())
+            }
+            fn dimensions(&self) -> usize { 1536 }
+        }
+
+        let config = SurrealConfig {
+            mode: SurrealMode::Embedded,
+            embedded_path: Some("/tmp/test".to_string()),
+            endpoint: None,
+            username: None,
+            password: None,
+            namespace: "test".to_string(),
+            database: "test".to_string(),
+            retry: RetryConfig::default(),
+        };
+
+        let connection_info = ConnectionInfo {
+            config: config.clone(),
+            retry_config: config.retry.clone(),
+        };
+
+        SurrealStorage {
+            connection: Arc::new(RwLock::new(ConnectionState::Failed("test".to_string()))),
+            connection_info,
+            embedding_service: Arc::new(MockEmbedding),
         }
     }
 }
