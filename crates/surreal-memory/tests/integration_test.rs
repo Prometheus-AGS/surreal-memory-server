@@ -258,7 +258,7 @@ async fn test_task_stream_lifecycle() {
     let profile = profile_for("default");
     for idx in 0..4 {
         let mut mem = memory(&format!("Long step {}", idx + 2), "u1");
-        mem.token_count = Some((profile.summarization_threshold() / 4 + 1) as usize);
+        mem.token_count = Some((profile.summarization_threshold() / 4 + 1) as u32);
         s.add_to_task_stream("my-task", mem)
             .await
             .expect("seed summarization");

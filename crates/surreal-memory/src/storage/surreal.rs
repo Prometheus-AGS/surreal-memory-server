@@ -206,8 +206,15 @@ impl SurrealStorage {
     where
         T: Serialize + DeserializeOwned + SurrealValue,
     {
-        let mut response = self
-            .db
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+        let mut response = db
             .query("CREATE type::record($table, $key) CONTENT $value RETURN AFTER")
             .bind(("table", table.to_string()))
             .bind(("key", key.to_string()))
@@ -224,8 +231,15 @@ impl SurrealStorage {
     where
         T: Serialize + DeserializeOwned + SurrealValue,
     {
-        let mut response = self
-            .db
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+        let mut response = db
             .query("UPDATE $id CONTENT $value RETURN AFTER")
             .bind(("id", record_id.to_string()))
             .bind(("value", value))
@@ -284,13 +298,20 @@ impl MemoryStorage for SurrealStorage {
     // ── Knowledge Graph ───────────────────────────────────────────────────────
 
     async fn create_entity(&self, mut entity: Entity) -> Result<Entity> {
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
         let now = Datetime::default();
         entity.created_at = now.clone();
         entity.updated_at = now;
         entity.embedding = Some(self.embed_entity(&entity).await?);
 
-        let created: Option<Entity> = self
-            .db
+        let created: Option<Entity> = db
             .create("entity")
             .content(entity)
             .await
@@ -308,8 +329,15 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn get_entity(&self, name: &str) -> Result<Option<Entity>> {
-        let result: Vec<Entity> = self
-            .db
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+        let result: Vec<Entity> = db
             .query("SELECT * FROM entity WHERE name = $name")
             .bind(("name", name.to_string()))
             .await?
@@ -318,11 +346,18 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn update_entity(&self, mut entity: Entity) -> Result<Entity> {
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
         entity.updated_at = Datetime::default();
         entity.embedding = Some(self.embed_entity(&entity).await?);
 
-        let mut res = self
-            .db
+        let mut res = db
             .query("UPDATE entity SET entity_type = $type, observations = $obs, embedding = $embedding, updated_at = $updated WHERE name = $name RETURN AFTER")
             .bind(("name", entity.name.clone()))
             .bind(("type", entity.entity_type.clone()))
@@ -335,16 +370,30 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn delete_entity(&self, name: &str) -> Result<()> {
-        self.db
-            .query("DELETE FROM entity WHERE name = $name; DELETE FROM relation WHERE from = $name OR to = $name")
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+        db.query("DELETE FROM entity WHERE name = $name; DELETE FROM relation WHERE from = $name OR to = $name")
             .bind(("name", name.to_string()))
             .await?;
         Ok(())
     }
 
     async fn search_entities(&self, query: &str) -> Result<Vec<Entity>> {
-        let results: Vec<Entity> = self
-            .db
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+        let results: Vec<Entity> = db
             .query("SELECT * FROM entity WHERE name CONTAINS $q OR entity_type CONTAINS $q OR observations CONTAINS $q")
             .bind(("q", query.to_string()))
             .await?
@@ -353,9 +402,16 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn create_relation(&self, mut relation: Relation) -> Result<Relation> {
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
         relation.created_at = Datetime::default();
-        let created: Option<Relation> = self
-            .db
+        let created: Option<Relation> = db
             .create("relation")
             .content(relation)
             .await
@@ -372,8 +428,15 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn get_relations(&self, entity_name: &str) -> Result<Vec<Relation>> {
-        let results: Vec<Relation> = self
-            .db
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+        let results: Vec<Relation> = db
             .query("SELECT * FROM relation WHERE from = $name OR to = $name")
             .bind(("name", entity_name.to_string()))
             .await?
@@ -382,8 +445,15 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn delete_relation(&self, from: &str, to: &str, relation_type: &str) -> Result<()> {
-        self.db
-            .query("DELETE FROM relation WHERE from = $from AND to = $to AND relation_type = $rt")
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+        db.query("DELETE FROM relation WHERE from = $from AND to = $to AND relation_type = $rt")
             .bind(("from", from.to_string()))
             .bind(("to", to.to_string()))
             .bind(("rt", relation_type.to_string()))
@@ -392,8 +462,16 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn get_graph(&self) -> Result<KnowledgeGraph> {
-        let entities: Vec<Entity> = self.db.query("SELECT * FROM entity").await?.take(0)?;
-        let relations: Vec<Relation> = self.db.query("SELECT * FROM relation").await?.take(0)?;
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+        let entities: Vec<Entity> = db.query("SELECT * FROM entity").await?.take(0)?;
+        let relations: Vec<Relation> = db.query("SELECT * FROM relation").await?.take(0)?;
         Ok(KnowledgeGraph {
             entities,
             relations,
@@ -419,9 +497,16 @@ impl MemoryStorage for SurrealStorage {
         limit: usize,
         threshold: f32,
     ) -> Result<Vec<SemanticSearchResult>> {
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
         let query_emb = self.embed_text(query).await?;
-        let all: Vec<Entity> = self
-            .db
+        let all: Vec<Entity> = db
             .query("SELECT * FROM entity WHERE embedding IS NOT NONE")
             .await?
             .take(0)?;
@@ -481,14 +566,22 @@ impl MemoryStorage for SurrealStorage {
             }
         }
 
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+
         let now = Datetime::default();
         memory.embedding = Some(emb);
         memory.created_at = now.clone();
         memory.updated_at = now;
         memory.version = 1;
 
-        let created: Option<Memory> = self
-            .db
+        let created: Option<Memory> = db
             .create("memory")
             .content(memory.clone())
             .await
@@ -498,7 +591,7 @@ impl MemoryStorage for SurrealStorage {
 
         // Record history
         if let Some(id) = &stored.id {
-            self.db.query(
+            db.query(
                 "INSERT INTO memory_history { memory_id: $mid, version: 1, old_content: NONE, new_content: $content, changed_at: $now, change_type: 'created' }"
             )
             .bind(("mid", id.clone()))
@@ -511,8 +604,15 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn get_memory(&self, id: &str) -> Result<Option<Memory>> {
-        let result: Vec<Memory> = self
-            .db
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+        let result: Vec<Memory> = db
             .query("SELECT * FROM $id")
             .bind(("id", id.to_string()))
             .await?
@@ -521,6 +621,14 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn update_memory(&self, id: &str, content: String) -> Result<Memory> {
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
         let old = self
             .get_memory(id)
             .await?
@@ -530,7 +638,7 @@ impl MemoryStorage for SurrealStorage {
         let token_count = Self::estimate_tokens(&content);
         let now = Datetime::default();
 
-        let mut res = self.db.query(
+        let mut res = db.query(
             "UPDATE $id SET content = $content, embedding = $emb, token_count = $tc, version = $v, updated_at = $now RETURN AFTER"
         )
         .bind(("id", id.to_string()))
@@ -546,7 +654,7 @@ impl MemoryStorage for SurrealStorage {
 
         // History
         if let Some(mem_id) = &updated.id {
-            self.db.query(
+            db.query(
                 "INSERT INTO memory_history { memory_id: $mid, version: $v, old_content: $old, new_content: $new, changed_at: $now, change_type: 'updated' }"
             )
             .bind(("mid", mem_id.clone()))
@@ -561,9 +669,17 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn delete_memory(&self, id: &str) -> Result<()> {
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
         if let Some(mem) = self.get_memory(id).await? {
             if let Some(mem_id) = &mem.id {
-                self.db.query(
+                db.query(
                     "INSERT INTO memory_history { memory_id: $mid, version: $v, old_content: $old, new_content: $old, changed_at: $now, change_type: 'deleted' }"
                 )
                 .bind(("mid", mem_id.clone()))
@@ -573,8 +689,7 @@ impl MemoryStorage for SurrealStorage {
                 .await?;
             }
         }
-        self.db
-            .query("DELETE FROM $id")
+        db.query("DELETE FROM $id")
             .bind(("id", id.to_string()))
             .await?;
         Ok(())
@@ -624,7 +739,16 @@ impl MemoryStorage for SurrealStorage {
 
         query.push_str(&parts.join(" AND "));
 
-        let mut q = self.db.query(query);
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+
+        let mut q = db.query(query);
         if let Some(v) = uid {
             q = q.bind(("user_id", v));
         }
@@ -668,8 +792,15 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn get_memory_history(&self, memory_id: &str) -> Result<Vec<MemoryHistory>> {
-        let results: Vec<MemoryHistory> = self
-            .db
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+        let results: Vec<MemoryHistory> = db
             .query("SELECT * FROM memory_history WHERE memory_id = $mid ORDER BY version ASC")
             .bind(("mid", memory_id.to_string()))
             .await?
@@ -689,8 +820,15 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn get_task_stream(&self, name: &str) -> Result<Option<TaskStream>> {
-        let result: Vec<TaskStream> = self
-            .db
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+        let result: Vec<TaskStream> = db
             .query("SELECT * FROM task_stream WHERE name = $name")
             .bind(("name", name.to_string()))
             .await?
@@ -716,8 +854,16 @@ impl MemoryStorage for SurrealStorage {
         let stored = self.add_memory(memory).await?;
 
         // Update stream token count and last_active
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
         let added_tokens = stored.token_count.unwrap_or(0) as u64;
-        self.db.query(
+        db.query(
             "UPDATE task_stream SET total_tokens += $tokens, last_active = $now WHERE name = $name"
         )
         .bind(("tokens", added_tokens))
@@ -736,6 +882,15 @@ impl MemoryStorage for SurrealStorage {
     ) -> Result<ContextWindow> {
         let budget = max_tokens.unwrap_or_else(|| Self::model_context_budget(model_name));
 
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+
         let stream_id = {
             let stream = self
                 .get_task_stream(stream_name)
@@ -744,8 +899,7 @@ impl MemoryStorage for SurrealStorage {
             stream.id.with_context(|| "TaskStream has no id")?
         };
 
-        let all_memories: Vec<Memory> = self
-            .db
+        let all_memories: Vec<Memory> = db
             .query("SELECT * FROM memory WHERE task_stream_id = $sid ORDER BY importance DESC, created_at DESC")
             .bind(("sid", stream_id))
             .await?
@@ -795,11 +949,20 @@ impl MemoryStorage for SurrealStorage {
             parts.push("true".into());
         }
 
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+
         let query = format!(
             "SELECT * FROM task_stream WHERE {} ORDER BY last_active DESC",
             parts.join(" AND ")
         );
-        let mut q = self.db.query(query);
+        let mut q = db.query(query);
         if let Some(v) = aid {
             q = q.bind(("agent_id", v));
         }
@@ -812,8 +975,15 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn archive_task_stream(&self, name: &str) -> Result<TaskStream> {
-        let mut res = self
-            .db
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+        let mut res = db
             .query("UPDATE task_stream SET status = 'archived' WHERE name = $name RETURN AFTER")
             .bind(("name", name.to_string()))
             .await?;
@@ -852,12 +1022,21 @@ impl MemoryStorage for SurrealStorage {
             scope_parts.push("session_id = $sid".into());
         }
 
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+
         let bm25_sql = format!(
             "SELECT *, search::score(0) AS bm25_score FROM memory WHERE {} LIMIT {}",
             scope_parts.join(" AND "),
             limit * 2
         );
-        let mut q = self.db.query(&bm25_sql).bind(("query", query.to_string()));
+        let mut q = db.query(&bm25_sql).bind(("query", query.to_string()));
         if let Some(v) = user_id {
             q = q.bind(("uid", v.to_string()));
         }
@@ -921,11 +1100,20 @@ impl MemoryStorage for SurrealStorage {
             conditions.push("session_id = $sid".into());
         }
 
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+
         let sql = format!(
             "SELECT * FROM memory WHERE {} ORDER BY created_at ASC",
             conditions.join(" AND ")
         );
-        let mut q = self.db.query(&sql);
+        let mut q = db.query(&sql);
         if let Some(v) = user_id {
             q = q.bind(("uid", v.to_string()));
         }
@@ -1006,8 +1194,15 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn expire_stale_memories(&self) -> Result<u64> {
-        let expired: Vec<Memory> = self
-            .db
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+        let expired: Vec<Memory> = db
             .query(
                 "SELECT * FROM memory WHERE valid_until IS NOT NONE AND valid_until < time::now()",
             )
@@ -1035,11 +1230,19 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn get_mindmap(&self, name: &str, user_id: Option<&str>) -> Result<Option<MindMap>> {
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
         let mut sql = "SELECT * FROM mindmap WHERE name = $name".to_string();
         if user_id.is_some() {
             sql.push_str(" AND user_id = $uid");
         }
-        let mut q = self.db.query(&sql).bind(("name", name.to_string()));
+        let mut q = db.query(&sql).bind(("name", name.to_string()));
         if let Some(v) = user_id {
             q = q.bind(("uid", v.to_string()));
         }
@@ -1135,7 +1338,15 @@ impl MemoryStorage for SurrealStorage {
                 parts.join(" AND ")
             )
         };
-        let mut q = self.db.query(&sql);
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+        let mut q = db.query(&sql);
         if let Some(v) = user_id {
             q = q.bind(("uid", v.to_string()));
         }
@@ -1146,11 +1357,19 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn delete_mindmap(&self, name: &str, user_id: Option<&str>) -> Result<()> {
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
         if let Some(mm) = self.get_mindmap(name, user_id).await? {
             if let Some(id) = &mm.id {
                 let s = Self::record_id_to_string(id);
                 let key = s.split(':').nth(1).unwrap_or(&s).to_string();
-                let _: Option<MindMap> = self.db.delete(("mindmap", key)).await?;
+                let _: Option<MindMap> = db.delete(("mindmap", key)).await?;
             }
         }
         Ok(())
@@ -1189,12 +1408,21 @@ impl MemoryStorage for SurrealStorage {
         if let Some(a) = agent_id {
             scope_parts.push(format!("agent_id = '{}'", a));
         }
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+
         let sql = format!(
             "SELECT * FROM memory WHERE {} ORDER BY created_at ASC LIMIT 200",
             scope_parts.join(" AND ")
         );
         let memories: Vec<crate::memory::Memory> =
-            self.db.query(&sql).await?.take(0).unwrap_or_default();
+            db.query(&sql).await?.take(0).unwrap_or_default();
 
         if memories.len() < 4 {
             return Ok(None); // not enough to compress
@@ -1221,7 +1449,7 @@ impl MemoryStorage for SurrealStorage {
             if let Some(id) = &m.id {
                 let s = Self::record_id_to_string(id);
                 let key = s.split(':').nth(1).unwrap_or(&s).to_string();
-                let _: Option<crate::memory::Memory> = self.db.delete(("memory", key)).await?;
+                let _: Option<crate::memory::Memory> = db.delete(("memory", key)).await?;
             }
         }
 
@@ -1234,12 +1462,11 @@ impl MemoryStorage for SurrealStorage {
             vec!["auto_summary".to_string()],
         );
         let stored: Option<crate::memory::Memory> =
-            self.db.create("memory").content(summary).await?;
+            db.create("memory").content(summary).await?;
         let result = stored.context("Failed to store auto-summary memory")?;
 
         // Update stream summary_count
-        let _: Option<serde_json::Value> = self
-            .db
+        let _: Option<serde_json::Value> = db
             .query("UPDATE type::table($t) SET summary_count += 1, last_active = time::now() WHERE name = $n")
             .bind(("t", "task_stream"))
             .bind(("n", stream_name.to_string()))
@@ -1259,9 +1486,16 @@ impl MemoryStorage for SurrealStorage {
         user_id: &str,
         memory: &crate::memory::Memory,
     ) -> Result<()> {
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
         // Look for a persona mindmap belonging to this user
-        let maps: Vec<MindMap> = self
-            .db
+        let maps: Vec<MindMap> = db
             .query("SELECT * FROM mindmap WHERE user_id = $uid AND map_type = 'radial' LIMIT 1")
             .bind(("uid", user_id.to_string()))
             .await?
@@ -1320,8 +1554,15 @@ impl MemoryStorage for SurrealStorage {
                     break;
                 }
                 // Expand forward relations
-                let neighbors: Vec<crate::entity::Relation> = self
-                    .db
+                let db = {
+                    let state = self.connection.read().unwrap();
+                    match &*state {
+                        ConnectionState::Connected(db) => db.clone(),
+                        ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                        ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+                    }
+                };
+                let neighbors: Vec<crate::entity::Relation> = db
                     .query("SELECT * FROM relation WHERE from = $entity")
                     .bind(("entity", current.clone()))
                     .await?
@@ -1368,8 +1609,15 @@ impl MemoryStorage for SurrealStorage {
                 if let Some(e) = self.get_entity(&name).await? {
                     entities.push(e);
                 }
-                let rels: Vec<crate::entity::Relation> = self
-                    .db
+                let db = {
+                    let state = self.connection.read().unwrap();
+                    match &*state {
+                        ConnectionState::Connected(db) => db.clone(),
+                        ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                        ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+                    }
+                };
+                let rels: Vec<crate::entity::Relation> = db
                     .query("SELECT * FROM relation WHERE from = $n OR to = $n")
                     .bind(("n", name.clone()))
                     .await?
@@ -1417,13 +1665,22 @@ impl MemoryStorage for SurrealStorage {
         if let Some(rt) = relation_type {
             conditions.push(format!("relation_type = '{}'", rt));
         }
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+
         let sql = format!(
             "SELECT * FROM relation WHERE {} LIMIT {}",
             conditions.join(" AND "),
             limit
         );
         let rels: Vec<crate::entity::Relation> =
-            self.db.query(&sql).await?.take(0).unwrap_or_default();
+            db.query(&sql).await?.take(0).unwrap_or_default();
 
         let mut entities: Vec<crate::entity::Entity> = vec![];
         for rel in rels {
@@ -1442,8 +1699,15 @@ impl MemoryStorage for SurrealStorage {
     // ── Phase 4: Temporal Entity History ─────────────────────────────────────
 
     async fn get_entity_history(&self, name: &str) -> Result<Vec<crate::memory::MemoryHistory>> {
-        let rows: Vec<crate::memory::MemoryHistory> = self
-            .db
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+        let rows: Vec<crate::memory::MemoryHistory> = db
             .query("SELECT * FROM memory_history WHERE memory_id = $n ORDER BY changed_at DESC")
             .bind(("n", name.to_string()))
             .await?
@@ -1456,15 +1720,21 @@ impl MemoryStorage for SurrealStorage {
         &self,
         before_rfc3339: &str,
     ) -> Result<crate::entity::KnowledgeGraph> {
-        let entities: Vec<crate::entity::Entity> = self
-            .db
+        let db = {
+            let state = self.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+        let entities: Vec<crate::entity::Entity> = db
             .query("SELECT * FROM entity WHERE created_at <= type::datetime($t)")
             .bind(("t", before_rfc3339.to_string()))
             .await?
             .take(0)
             .unwrap_or_default();
-        let relations: Vec<crate::entity::Relation> = self
-            .db
+        let relations: Vec<crate::entity::Relation> = db
             .query("SELECT * FROM relation WHERE created_at <= type::datetime($t)")
             .bind(("t", before_rfc3339.to_string()))
             .await?

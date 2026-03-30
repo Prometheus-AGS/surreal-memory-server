@@ -16,7 +16,13 @@
       "Bash(killall surreal-memory-server:*)",
       "Bash(chmod +x /Users/gqadonis/Projects/references/surreal-memory-server/scripts/test-mindmaps-taskstreams.sh)",
       "Bash(/Users/gqadonis/Projects/references/surreal-memory-server/scripts/test-mindmaps-taskstreams.sh)",
-      "Bash(tee /tmp/build.log)"
+      "Bash(tee /tmp/build.log)",
+      "Bash(docker exec:*)",
+      "Bash(cargo tree:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(cargo check:*)",
+      "Bash(grep -c \"error\\\\[E0609\\\\]: no field \\\\`db\\\\`\")"
     ]
   }
 }
