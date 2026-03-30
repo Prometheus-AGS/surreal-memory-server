@@ -1,0 +1,111 @@
+{
+  "_meta": {
+    "description": "Mindmap node/edge seed data for Prometheus Fabric knowledge graph",
+    "created": "2026-03-30"
+  },
+  "mindmaps": [
+    {
+      "name": "prometheus-fabric-ecosystem",
+      "map_type": "radial",
+      "root_label": "Travis James",
+      "description": "Full Prometheus Fabric ecosystem: three businesses, the platform, Flint stack, Kaia trust layer, mission alignment",
+      "nodes": [
+        {"node_id": "pags",        "label": "Prometheus AGS",    "parent_id": "root", "color": "#2ECC71"},
+        {"node_id": "tjai",        "label": "travisjames.ai",    "parent_id": "root", "color": "#E04E28"},
+        {"node_id": "knowme",      "label": "KnowMe LLC",        "parent_id": "root", "color": "#4A9EFF"},
+        {"node_id": "fabric",      "label": "Prometheus Fabric", "parent_id": "pags", "color": "#E04E28"},
+        {"node_id": "flint",       "label": "Flint Platform",    "parent_id": "fabric", "color": "#FF6A3D"},
+        {"node_id": "kaia",        "label": "Kaia",              "parent_id": "fabric", "color": "#FFA847"},
+        {"node_id": "openclaw",    "label": "OpenClaw (peer)",   "parent_id": "fabric", "color": "#8A8F9A"},
+        {"node_id": "uar",         "label": "UAR",               "parent_id": "flint",  "color": "#FF6A3D"},
+        {"node_id": "gate",        "label": "Flint Gate",        "parent_id": "flint",  "color": "#FF6A3D"},
+        {"node_id": "pgforge",     "label": "pgforge",           "parent_id": "flint",  "color": "#FF6A3D"},
+        {"node_id": "realtime",    "label": "Flint Realtime",    "parent_id": "flint",  "color": "#FF6A3D"},
+        {"node_id": "gen_ui",      "label": "gen_ui_core",       "parent_id": "knowme", "color": "#4A9EFF"},
+        {"node_id": "kdd",         "label": "KDD",               "parent_id": "root",   "color": "#F39C12"},
+        {"node_id": "twin",        "label": "Digital Twin",      "parent_id": "kaia",   "color": "#FFA847"}
+      ],
+      "edges": [
+        {"from_id": "tjai",   "to_id": "fabric",  "label": "RUNS_ON",     "directed": true},
+        {"from_id": "knowme", "to_id": "fabric",  "label": "RUNS_ON",     "directed": true},
+        {"from_id": "pags",   "to_id": "fabric",  "label": "BUILDS",      "directed": true},
+        {"from_id": "kaia",   "to_id": "twin",    "label": "CERTIFIES",   "directed": true},
+        {"from_id": "uar",    "to_id": "kdd",     "label": "SUPPORTS",    "directed": true},
+        {"from_id": "fabric", "to_id": "openclaw","label": "INTEROPS_WITH","directed": true}
+      ]
+    },
+    {
+      "name": "execution-plan",
+      "map_type": "tree",
+      "root_label": "12-Week Build Plan",
+      "description": "12-week execution plan phases and sprint structure for Prometheus Fabric build",
+      "nodes": [
+        {"node_id": "ph0",  "label": "Phase 0 — Knowledge Foundation",      "parent_id": "root", "color": "#2ECC71", "metadata": {"weeks": "1-2", "status": "87% complete"}},
+        {"node_id": "ph1",  "label": "Phase 1 — Content Infrastructure",    "parent_id": "root", "color": "#E04E28", "metadata": {"weeks": "3-4", "status": "starting"}},
+        {"node_id": "ph2",  "label": "Phase 2 — Hybrid App Foundation",     "parent_id": "root", "color": "#E04E28", "metadata": {"weeks": "3-6", "status": "starting"}},
+        {"node_id": "ph3",  "label": "Phase 3 — First Things in the Wild",  "parent_id": "root", "color": "#F39C12", "metadata": {"weeks": "4-8", "status": "planned"}},
+        {"node_id": "ph4",  "label": "Phase 4 — AI Toolchain Integration",  "parent_id": "root", "color": "#F39C12", "metadata": {"weeks": "4+",  "status": "planned"}},
+        {"node_id": "ph5",  "label": "Phase 5 — Enterprise GTM",            "parent_id": "root", "color": "#4A5060", "metadata": {"weeks": "8-12","status": "planned"}},
+        {"node_id": "ph0_dify",    "label": "dify-kb-mcp built + installed",          "parent_id": "ph0", "color": "#2ECC71"},
+        {"node_id": "ph0_name",    "label": "Platform named: Prometheus Fabric",       "parent_id": "ph0", "color": "#2ECC71"},
+        {"node_id": "ph0_kg",      "label": "KG: 21 entities, 38+ relations",          "parent_id": "ph0", "color": "#2ECC71"},
+        {"node_id": "ph0_docs",    "label": "7 conversation export docs to Dify",      "parent_id": "ph0", "color": "#2ECC71"},
+        {"node_id": "ph0_smfix",   "label": "surreal-memory schema fixed (SCHEMALESS)","parent_id": "ph0", "color": "#2ECC71"},
+        {"node_id": "ph0_difyui",  "label": "Create 4 Dify KBs in UI (pending)",       "parent_id": "ph0", "color": "#F39C12"},
+        {"node_id": "ph1_blog",    "label": "travisjames.ai blog + email capture",     "parent_id": "ph1", "color": "#4A5060"},
+        {"node_id": "ph1_post1",   "label": "Post 1: AI agents need identity",         "parent_id": "ph1", "color": "#4A5060"},
+        {"node_id": "ph1_post2",   "label": "Post 2: The wisdom bottleneck",           "parent_id": "ph1", "color": "#4A5060"},
+        {"node_id": "ph1_oss",     "label": "Open-source dify-kb-mcp",                "parent_id": "ph1", "color": "#4A5060"},
+        {"node_id": "ph2_core",    "label": "gen_ui_core workspace scaffold",          "parent_id": "ph2", "color": "#4A5060"},
+        {"node_id": "ph2_knowme",  "label": "KnowMe app — first consumer",            "parent_id": "ph2", "color": "#4A5060"},
+        {"node_id": "ph3_waitlist","label": "know-me.tools waitlist page",             "parent_id": "ph3", "color": "#4A5060"},
+        {"node_id": "ph3_cnb",     "label": "Citizens National Bank pilot",            "parent_id": "ph3", "color": "#4A5060"},
+        {"node_id": "ph5_bofA",    "label": "BofA speaking engagement (Nandish)",      "parent_id": "ph5", "color": "#4A5060"},
+        {"node_id": "ph5_node",    "label": "First enterprise Fabric node deployed",   "parent_id": "ph5", "color": "#4A5060"}
+      ],
+      "edges": []
+    },
+    {
+      "name": "technical-arch",
+      "map_type": "concept",
+      "root_label": "Prometheus Fabric",
+      "description": "Technical architecture of Prometheus Fabric: Flint Platform components, trust layer, DID hierarchy, protocols",
+      "nodes": [
+        {"node_id": "exec_plane",  "label": "Execution Plane",     "parent_id": "root",       "color": "#E04E28"},
+        {"node_id": "sync_plane",  "label": "Sync Plane",          "parent_id": "root",       "color": "#E04E28"},
+        {"node_id": "coord_plane", "label": "Coordination Plane",  "parent_id": "root",       "color": "#E04E28"},
+        {"node_id": "trust_layer", "label": "Trust + Identity",    "parent_id": "root",       "color": "#FFA847"},
+        {"node_id": "flint_stack", "label": "Flint Stack",         "parent_id": "exec_plane", "color": "#FF6A3D"},
+        {"node_id": "uar_node",    "label": "UAR",                 "parent_id": "flint_stack","color": "#FF6A3D"},
+        {"node_id": "gate_node",   "label": "Flint Gate",          "parent_id": "flint_stack","color": "#FF6A3D"},
+        {"node_id": "pgf_node",    "label": "pgforge",             "parent_id": "flint_stack","color": "#FF6A3D"},
+        {"node_id": "rt_node",     "label": "Flint Realtime",      "parent_id": "flint_stack","color": "#FF6A3D"},
+        {"node_id": "sm_node",     "label": "Surreal Memory",      "parent_id": "flint_stack","color": "#FF6A3D"},
+        {"node_id": "crdt",        "label": "CRDT (diamond-types)","parent_id": "sync_plane", "color": "#4A9EFF"},
+        {"node_id": "webrtc",      "label": "WebRTC (str0m)",      "parent_id": "sync_plane", "color": "#4A9EFF"},
+        {"node_id": "livekit",     "label": "LiveKit Rooms",       "parent_id": "coord_plane","color": "#4A9EFF"},
+        {"node_id": "did_hier",    "label": "DID Hierarchy",       "parent_id": "trust_layer","color": "#FFA847"},
+        {"node_id": "kaia_node",   "label": "Kaia Certification",  "parent_id": "trust_layer","color": "#FFA847"},
+        {"node_id": "vcs",         "label": "Verifiable Credentials","parent_id": "trust_layer","color": "#FFA847"},
+        {"node_id": "did_prom",    "label": "did:prometheus:",     "parent_id": "did_hier",   "color": "#FFA847"},
+        {"node_id": "a2a",         "label": "A2A Protocol",        "parent_id": "uar_node",   "color": "#FF6A3D"},
+        {"node_id": "agui",        "label": "AG-UI Protocol",      "parent_id": "uar_node",   "color": "#FF6A3D"},
+        {"node_id": "atproto",     "label": "ATAgent Protocol",    "parent_id": "uar_node",   "color": "#FF6A3D"},
+        {"node_id": "cedar",       "label": "Cedar Policies",      "parent_id": "uar_node",   "color": "#FF6A3D"},
+        {"node_id": "wasm",        "label": "WASM Sandboxing",     "parent_id": "uar_node",   "color": "#FF6A3D"}
+      ],
+      "edges": [
+        {"from_id": "uar_node",  "to_id": "cedar",    "label": "enforces",  "directed": true},
+        {"from_id": "uar_node",  "to_id": "wasm",     "label": "uses",      "directed": true},
+        {"from_id": "uar_node",  "to_id": "a2a",      "label": "implements","directed": true},
+        {"from_id": "uar_node",  "to_id": "agui",     "label": "implements","directed": true},
+        {"from_id": "uar_node",  "to_id": "atproto",  "label": "implements","directed": true},
+        {"from_id": "kaia_node", "to_id": "vcs",      "label": "issues",    "directed": true},
+        {"from_id": "did_prom",  "to_id": "kaia_node","label": "anchors",   "directed": true},
+        {"from_id": "gate_node", "to_id": "uar_node", "label": "routes to", "directed": true},
+        {"from_id": "gate_node", "to_id": "pgf_node", "label": "routes to", "directed": true},
+        {"from_id": "gate_node", "to_id": "rt_node",  "label": "routes to", "directed": true}
+      ]
+    }
+  ]
+}

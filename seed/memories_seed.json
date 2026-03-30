@@ -1,0 +1,86 @@
+{
+  "_meta": {
+    "description": "Task streams and key memories for Prometheus Fabric build log",
+    "created": "2026-03-30"
+  },
+  "task_streams": [
+    {
+      "name": "prometheus-build-log",
+      "description": "Ongoing build log for Prometheus Fabric — decisions, bugs diagnosed, fixes applied, session learnings"
+    },
+    {
+      "name": "content-pipeline",
+      "description": "Content pipeline tracking — article status, drafts, publish targets, audience building for travisjames.ai"
+    }
+  ],
+  "memories": [
+    {
+      "stream": "prometheus-build-log",
+      "content": "DECISION 2026-03-27: Platform named Prometheus Fabric. Chosen over Prometheus Network, Flint Network, Ember Network. 'Fabric' precisely describes the substrate everything runs on. Final — non-revisitable."
+    },
+    {
+      "stream": "prometheus-build-log",
+      "content": "DECISION 2026-03-26: OpenClaw is EXTERNAL. Previously misidentified as Travis's platform. OpenClaw is a third-party decentralized AI execution network. Prometheus Fabric is independently owned by Prometheus AGS. They can federate as peers via A2A/DID. All 3 stale relations deleted (Travis ARCHITECT_OF OpenClaw, AGS DEPLOYS OpenClaw, gen_ui_core CLIENT_NODE_OF OpenClaw)."
+    },
+    {
+      "stream": "prometheus-build-log",
+      "content": "DECISION 2026-03-26: DID namespace is did:prometheus: — ATAgent lexicon is app.prometheus.*. Replaces did:openclaw: placeholder from early design docs."
+    },
+    {
+      "stream": "prometheus-build-log",
+      "content": "BUG FIX: rmcp 1.2.0 Streamable HTTP transport requires 3 co-enabled features: transport-streamable-http-server + transport-streamable-http-server-session + transport-worker. Enabling only one causes compile errors."
+    },
+    {
+      "stream": "prometheus-build-log",
+      "content": "BUG FIX: SurrealDB 3.x — db.create(table) with auto-IDs returns None. Fix: use db.create((\"table\", uuid_key)).content(record) with explicit UUID keys. Auto-generated IDs don't round-trip through SurrealValue deserialization in server mode."
+    },
+    {
+      "stream": "prometheus-build-log",
+      "content": "BUG FIX: SurrealDB 3.x — mindmap table MUST be SCHEMALESS not SCHEMAFULL. Root cause: SCHEMAFULL rejects all sub-fields of array element objects not explicitly declared. MindMapNode carries color, metadata, node_type, parent_id — none declared in v6 migration. Fix: DEFINE TABLE mindmap SCHEMALESS in migration v6."
+    },
+    {
+      "stream": "prometheus-build-log",
+      "content": "BUG FIX: SurrealDB 3.x — FLEXIBLE syntax order. Parse error: 'FLEXIBLE must be specified after TYPE'. Correct: DEFINE FIELD nodes ON mindmap TYPE array<object> FLEXIBLE. Also: plain TYPE array is invalid with FLEXIBLE — must use TYPE array<object>."
+    },
+    {
+      "stream": "prometheus-build-log",
+      "content": "BUG FIX: SurrealDB — DEFINE FIELD OVERWRITE does not clear sub-field metadata from prior SCHEMAFULL definitions. Fix: use REMOVE FIELD IF EXISTS first, then redefine clean. On fresh DBs, start SCHEMALESS from migration v1 — wipe the volume."
+    },
+    {
+      "stream": "prometheus-build-log",
+      "content": "BUG FIX: mcp-remote — use /mcp/http (Streamable HTTP) not /mcp/sse. The /mcp/sse legacy endpoint causes 'expect initialized request, but received CallTool' — tool calls arrive before MCP initialize handshake. Claude Desktop config updated. Kill stale processes: pkill -f mcp-remote."
+    },
+    {
+      "stream": "prometheus-build-log",
+      "content": "BUG FIX: SurrealDB 3.x — type::thing removed. The function type::thing($table, $key) was removed in SurrealDB 3.x. Correct function is type::record($table, $key). Affects create_mindmap and create_task_stream via the create_record helper. Fixed in commit ae1bccc on Prometheus-AGS/surreal-memory-server."
+    },
+    {
+      "stream": "prometheus-build-log",
+      "content": "BUG FIX: macOS codesigning — new binaries installed to /usr/local/bin need ad-hoc codesigning or Gatekeeper blocks execution. Command: codesign --sign - --force /usr/local/bin/binary-name"
+    },
+    {
+      "stream": "prometheus-build-log",
+      "content": "INFRA STATUS 2026-03-30: dify-kb-mcp COMPLETE — installed at /usr/local/bin/dify-kb-mcp, commit a3af6ff. surreal-memory-server schema at v12, connectivity fix in progress (mcp-remote session lifecycle issue). All entities (21) and relations (38) successfully written to DB. Mindmaps created but node population blocked by connectivity. Seed files written to /seed/ directory for reconstruction."
+    },
+    {
+      "stream": "prometheus-build-log",
+      "content": "PHASE 0 STATUS 2026-03-30: 87% complete. Done: dify-kb-mcp built, platform named, KG entities+relations, 7 docs exported to Dify, surreal-memory-server schema fixed. Pending: Docker rebuild from /references/ dir (in progress), create 4 Dify KBs in UI at dify-pro.prometheusags.ai, mindmap node population (blocked on mcp-remote fix)."
+    },
+    {
+      "stream": "content-pipeline",
+      "content": "CONTENT PLAN: Post 1 — 'Why AI agents need identity, not just prompts'. Audience: technical founders. Introduces DID hierarchy, ATAgent protocol, cryptographic identity as foundation for trustworthy agents. Sets up Prometheus Fabric launch narrative."
+    },
+    {
+      "stream": "content-pipeline",
+      "content": "CONTENT PLAN: Post 2 — 'The wisdom bottleneck — what AI cannot generate'. Audience: knowledge workers and founders. Explains wisdom scaling thesis. Seeds the KnowMe product narrative before the product exists."
+    },
+    {
+      "stream": "content-pipeline",
+      "content": "CONTENT PLAN: Post 3 — 'Building infrastructure for legitimate digital twins'. Audience: CTOs, enterprise architects. Post 4 — 'How I'm using my own stack to scale my consulting'. Conversion post — all audiences."
+    },
+    {
+      "stream": "content-pipeline",
+      "content": "CONTENT RULE: Post 5 (KnowMe announcement) only publishes after 500+ waitlist subscribers at know-me.tools. Warm audience (Posts 1-4 readers) sees the conclusion to a story they've been following. Cold audience sees just an announcement. The sequence matters — do not skip or reorder."
+    }
+  ]
+}

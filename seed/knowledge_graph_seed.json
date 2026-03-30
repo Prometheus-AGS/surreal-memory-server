@@ -1,0 +1,299 @@
+{
+  "_meta": {
+    "description": "Prometheus Fabric knowledge graph seed — full reconstruction data",
+    "created": "2026-03-30",
+    "version": "1.0",
+    "source": "Session with Claude — surreal-memory-server connectivity fix in progress",
+    "replay_with": "python3 seed/replay.py"
+  },
+  "entities": [
+    {
+      "name": "Travis James",
+      "entity_type": "Person",
+      "observations": [
+        "Founder and CTO of Prometheus AGS",
+        "Operates three business entities: travisjames.ai (personal brand), KnowMe LLC (consumer AI), Prometheus AGS (enterprise AI consulting)",
+        "Core methodology: Knowledge-Driven Development (KDD) — domain experts drive the build process directly",
+        "Primary languages: Rust, TypeScript, Go, Python in that order",
+        "Preferred Rust web framework: Axum 0.8. Frontend: React 19 + Vite 7 + TanStack + Zustand 5 + shadcn/ui + Tailwind 4",
+        "Builds at intersection of AI infrastructure, agentic systems, sovereign computing, business automation",
+        "Brand tagline: The Artistic Soul of Technology Architecture",
+        "Contact: travis@know-me.tools | 945-544-7424 | Prosper, Texas",
+        "Partner: Randy Jesberg (CEO Prometheus AGS). Office manager: Nicole Lim",
+        "Key contacts: Neil Henry (Citizens National Bank, Meridian MS) — banking champion; Nandish Hulikantimath (BofA) — speaking engagement organizer"
+      ]
+    },
+    {
+      "name": "travisjames.ai",
+      "entity_type": "Brand",
+      "observations": [
+        "Personal brand and living proof of concept for Prometheus Fabric",
+        "Tagline: The Artistic Soul of Technology Architecture",
+        "Three brand pillars: Architectural Precision, Ember Signature, Technical Elegance",
+        "Color palette: Deep charcoal #0B0F14 + Muted ember #E04E28/#FF6A3D",
+        "Typography: Space Grotesk (display), Inter (UI), Roboto (body), JetBrains Mono (code)",
+        "Role: demonstrates the vision publicly, builds authority, seeds twin knowledge base",
+        "Every content piece is simultaneously thought leadership AND a signed knowledge artifact",
+        "Runs on Prometheus Fabric infrastructure"
+      ]
+    },
+    {
+      "name": "KnowMe LLC",
+      "entity_type": "Organization",
+      "observations": [
+        "Direct-to-consumer AI tools company",
+        "URL: know-me.tools | contact: travis@know-me.tools | phone: 945-544-7424",
+        "Mission: Make wisdom scaling accessible to individuals",
+        "Primary tagline: AI that understands you",
+        "Product: AI personal manager with legitimate digital twin capabilities",
+        "Stack: Flutter (mobile) + Tauri (desktop) + gen_ui_core shared Rust layer",
+        "Logo system: Conviction logomark",
+        "Colors: Navy, teal, tan, red; Zen Dots, Michroma, Montserrat, Syncopate fonts",
+        "Moat: Kaia-verified cryptographically provable twin fidelity — not a generic chatbot",
+        "Runs on Prometheus Fabric infrastructure"
+      ]
+    },
+    {
+      "name": "Prometheus AGS",
+      "entity_type": "Organization",
+      "observations": [
+        "Enterprise AI consulting and infrastructure — Prometheus Agentic Growth Solutions",
+        "Brand: prometheusags.ai | travisjames.ai brand system",
+        "Mission: Build and deploy Prometheus Fabric at enterprise scale",
+        "Positions as: Enterprise-grade AI architecture + agent orchestration + sovereign deployment",
+        "Enterprise pitch: Deploy Prometheus Fabric node, employees get legitimate digital twins, institutional knowledge preserved",
+        "Dify instance: dify-pro.prometheusags.ai",
+        "Hosting: Azure AKS (primary), GKE (also in use). ArgoCD v3.3.4 with Envoy Gateway",
+        "Key infrastructure: Ory Kratos+Oathkeeper, SurrealDB, Cedar policies, WASM sandboxing",
+        "CI/CD: three-layer ownership — Terraform (infra), ArgoCD (manifests), GitHub Actions (build/promote)"
+      ]
+    },
+    {
+      "name": "Prometheus Fabric",
+      "entity_type": "System",
+      "observations": [
+        "Travis James's own decentralized AI execution platform — NOT OpenClaw",
+        "Built and operated by Prometheus AGS",
+        "Every node is a full Flint stack that federates with every other node",
+        "Three layers: Execution Plane (Flint stack), Sync Plane (CRDT/diamond-types over WebRTC), Coordination Plane (LiveKit rooms)",
+        "Node identity: W3C DID, Ed25519 signing key, HKDF-derived hierarchy — DID method: did:prometheus:",
+        "Swarm routing: gossip protocol + NodeCapabilities broadcast",
+        "Can federate with OpenClaw nodes via shared protocols (A2A, DID) — peers, not competitors",
+        "travisjames.ai, KnowMe LLC, and Prometheus AGS all run on this as their infrastructure",
+        "Status: 12-week build plan in progress, Phase 0 87% complete"
+      ]
+    },
+    {
+      "name": "Flint Platform",
+      "entity_type": "System",
+      "observations": [
+        "Core AI infrastructure stack built by Prometheus AGS — the Supabase replacement in Rust",
+        "Five components: Flint Gate (API gateway), pgforge (GraphQL + meta REST), Flint Realtime (6-channel WS), UAR (agent runtime), Surreal Memory (knowledge graph)",
+        "Every Prometheus Fabric node runs a full Flint stack",
+        "Flint Pulse feature: agent that curates ideas from running context using Trigger Bus + Context Aggregator + PMPO loop + Flint Sidebar Panel",
+        "Brand: Ember #E04E28/#FF6A3D, spark #FFA847; IBM Plex Sans + IBM Plex Mono typography"
+      ]
+    },
+    {
+      "name": "UAR",
+      "entity_type": "System",
+      "observations": [
+        "Universal Agent Runtime — PMPO agent runtime at the core of Prometheus Fabric",
+        "Implements Cedar policies for governance, WASM sandboxing, DID identity",
+        "Supports protocols: A2A, AG-UI, A2UI",
+        "did:uar is W3C DID Core compliant with full blockchain interoperability",
+        "Positioning: UAR is not OpenClaw's competitor — it is OpenClaw's floor",
+        "Protocol stance: implementer and governance enforcer, not protocol inventor",
+        "Repo: /Users/gqadonis/Projects/prometheus/universal-agent-runtime"
+      ]
+    },
+    {
+      "name": "Kaia",
+      "entity_type": "System",
+      "observations": [
+        "Agent certification platform — the trust layer across all three businesses",
+        "Certifies agents across 6 behavioral dimensions and issues Verifiable Credentials",
+        "Certifies digital twins for cryptographically provable twin fidelity",
+        "Issues Capability VCs, Behavioral VCs, and Delegation VCs",
+        "The moat for KnowMe: Kaia-certified twins are not generic chatbots",
+        "Status: planned — Phase 5 build target"
+      ]
+    },
+    {
+      "name": "pgforge",
+      "entity_type": "Component",
+      "observations": [
+        "Rust GraphQL + meta REST layer — PostgREST replacement",
+        "Part of Flint Platform core stack",
+        "Receives routes from Flint Gate"
+      ]
+    },
+    {
+      "name": "Flint Gate",
+      "entity_type": "Component",
+      "observations": [
+        "Axum 0.8 API gateway — Oathkeeper + Kong replacement",
+        "Entry point for all Flint Platform traffic",
+        "Routes to pgforge, Flint Realtime, and UAR"
+      ]
+    },
+    {
+      "name": "Flint Realtime",
+      "entity_type": "Component",
+      "observations": [
+        "6-channel Rust WebSocket server",
+        "Uses str0m WebRTC and implements OpenAI Realtime protocol",
+        "Part of Flint Platform core stack",
+        "Receives routes from Flint Gate"
+      ]
+    },
+    {
+      "name": "OpenClaw",
+      "entity_type": "ExternalSystem",
+      "observations": [
+        "Third-party decentralized AI execution network — NOT owned by Travis James or Prometheus AGS",
+        "Prometheus Fabric occupies the same category but is independently owned",
+        "Prometheus Fabric CAN federate with OpenClaw nodes via shared protocols (A2A, DID) as peers",
+        "Previously misidentified as Travis's platform — all docs corrected 2026-03-26"
+      ]
+    },
+    {
+      "name": "gen_ui_core",
+      "entity_type": "Project",
+      "observations": [
+        "Shared Rust crate that IS a Prometheus Fabric client node",
+        "Architecture: Flutter (iOS/Android) + Tauri (macOS/Windows/Linux) as UI layers over shared Rust FFI",
+        "Agent logic never re-implemented in Dart or TypeScript — always in Rust",
+        "KnowMe is the first consumer of gen_ui_core",
+        "Sprint 1 (Weeks 3-4): DID key management, Dify MCP client, AG-UI event stream, local SurrealDB",
+        "Sprint 2 (Weeks 5-6): ATAgent PDS sync, CRDT primitives (diamond-types), UAR executor, Flint Realtime WS client"
+      ]
+    },
+    {
+      "name": "dify-kb-mcp",
+      "entity_type": "Project",
+      "observations": [
+        "Rust MCP server for Dify knowledge base reads/writes",
+        "6 MCP tools, Streamable HTTP + stdio dual transport",
+        "Installed at /usr/local/bin/dify-kb-mcp (ad-hoc codesigned)",
+        "Repo: Prometheus-AGS/dify-kb-mcp | Latest commit: a3af6ff (2026-03-27)",
+        "Config: /Users/gqadonis/Projects/openai-export/kb_mcp_server/config.toml",
+        "5 Dify KB domains: openai-conversations, vision-and-strategy, architecture-and-technical, content-pipeline, build-log",
+        "Status: COMPLETE — Phase 0 done"
+      ]
+    },
+    {
+      "name": "surreal-memory-server",
+      "entity_type": "Project",
+      "observations": [
+        "Rust MCP server for SurrealDB knowledge graph, mindmaps, and task streams",
+        "Docker Compose at /Users/gqadonis/Projects/references/surreal-memory-server/docker-compose.yaml",
+        "Running at localhost:23001 via Docker",
+        "Claude Desktop config: /mcp/http endpoint (Streamable HTTP — NOT /mcp/sse which causes handshake ordering failures)",
+        "Repo: Prometheus-AGS/surreal-memory-server",
+        "Critical fix: mindmap table MUST be SCHEMALESS — SCHEMAFULL rejects MindMapNode sub-fields (color, metadata, node_type)",
+        "Critical fix: create_mindmap and create_task_stream use explicit UUID keys — auto-IDs return None in server mode",
+        "Critical fix: type::thing removed in SurrealDB 3.x — use type::record($table, $key)",
+        "Critical fix: SurrealDB FLEXIBLE syntax is TYPE array<object> FLEXIBLE (FLEXIBLE after TYPE, not before)",
+        "Migration history: v1-v12 in /references/ codebase — v6 is SCHEMALESS mindmap, v3 includes auto_summarize/summary_count/model_id",
+        "Status: Rebuilt from /references/ directory, schema at v12, connectivity fix in progress"
+      ]
+    },
+    {
+      "name": "prom-lanes",
+      "entity_type": "Project",
+      "observations": [
+        "Rust library/CLI for concurrent AI agent session management via git worktree isolation",
+        "WorkspaceProvider trait with git, SurrealDB, Postgres adapters",
+        "AgentBackend abstraction for Claude Code, UAR, Codex, and others",
+        "Bidirectional UAR integration",
+        "Status: Phase 5 target — v2 implementation plan exists"
+      ]
+    },
+    {
+      "name": "ATAgent Protocol",
+      "entity_type": "Concept",
+      "observations": [
+        "AT Protocol adaptation for AI agents",
+        "ATAgent lexicon namespace: app.prometheus.*",
+        "Enables automatic conversation export and KB ingestion pipeline",
+        "UAR is an implementer of this protocol",
+        "PDS client will make context continuity automatic across sessions"
+      ]
+    },
+    {
+      "name": "Digital Twin",
+      "entity_type": "Concept",
+      "observations": [
+        "Kaia-certified, cryptographically provable twin fidelity",
+        "Not a generic chatbot — the certification IS the moat",
+        "KnowMe delivers digital twins to individual consumers",
+        "Prometheus AGS deploys digital twins at enterprise scale (employee knowledge preservation)",
+        "Legitimate vs illegitimate: Kaia certification is what makes a twin legitimate"
+      ]
+    },
+    {
+      "name": "KDD",
+      "entity_type": "Concept",
+      "observations": [
+        "Knowledge-Driven Development — Travis James's core methodology",
+        "Goal: eliminate translation loss in software development",
+        "Domain experts drive the build process directly",
+        "Implementation: Dify KBs + Surreal Memory knowledge graph + Claude Code + Claude Cowork",
+        "Every coding session starts with KB search for context; completed work ingested back to KBs",
+        "Community-building phase in progress: gathering feedback from articles before locking in methodology"
+      ]
+    },
+    {
+      "name": "PMPO",
+      "entity_type": "Concept",
+      "observations": [
+        "Prometheus Meta-Prompting Orchestration — also Plan-Monitor-Plan-Optimize",
+        "Core cognitive processing model for the UAR",
+        "Loop: Plan → Monitor → Plan → Optimize",
+        "Used by Flint Pulse for idea curation",
+        "Technical spec exists at /mnt/project/flint-pmpo-technical-spec-v1.html"
+      ]
+    }
+  ],
+  "relations": [
+    {"from": "Travis James", "relation_type": "OWNS", "to": "travisjames.ai"},
+    {"from": "Travis James", "relation_type": "OWNS", "to": "KnowMe LLC"},
+    {"from": "Travis James", "relation_type": "FOUNDER_OF", "to": "Prometheus AGS"},
+    {"from": "Travis James", "relation_type": "ARCHITECT_OF", "to": "Prometheus Fabric"},
+    {"from": "Travis James", "relation_type": "ARCHITECT_OF", "to": "Flint Platform"},
+    {"from": "Travis James", "relation_type": "ARCHITECT_OF", "to": "UAR"},
+    {"from": "Travis James", "relation_type": "ARCHITECT_OF", "to": "Kaia"},
+    {"from": "Travis James", "relation_type": "CREATED", "to": "dify-kb-mcp"},
+    {"from": "Travis James", "relation_type": "CREATED", "to": "prom-lanes"},
+    {"from": "Travis James", "relation_type": "PRACTICES", "to": "KDD"},
+    {"from": "Prometheus AGS", "relation_type": "BUILDS", "to": "Prometheus Fabric"},
+    {"from": "Prometheus AGS", "relation_type": "OPERATES", "to": "Prometheus Fabric"},
+    {"from": "Prometheus AGS", "relation_type": "BUILDS", "to": "Flint Platform"},
+    {"from": "Prometheus AGS", "relation_type": "DELIVERS", "to": "gen_ui_core"},
+    {"from": "Prometheus AGS", "relation_type": "OWNS", "to": "dify-kb-mcp"},
+    {"from": "Prometheus AGS", "relation_type": "OWNS", "to": "surreal-memory-server"},
+    {"from": "Prometheus AGS", "relation_type": "OWNS", "to": "prom-lanes"},
+    {"from": "travisjames.ai", "relation_type": "RUNS_ON", "to": "Prometheus Fabric"},
+    {"from": "KnowMe LLC", "relation_type": "RUNS_ON", "to": "Prometheus Fabric"},
+    {"from": "KnowMe LLC", "relation_type": "USES", "to": "gen_ui_core"},
+    {"from": "Prometheus Fabric", "relation_type": "CONTAINS", "to": "Flint Platform"},
+    {"from": "Prometheus Fabric", "relation_type": "CONTAINS", "to": "Kaia"},
+    {"from": "Prometheus Fabric", "relation_type": "INTEROPS_WITH", "to": "OpenClaw"},
+    {"from": "Flint Platform", "relation_type": "CONTAINS", "to": "Flint Gate"},
+    {"from": "Flint Platform", "relation_type": "CONTAINS", "to": "pgforge"},
+    {"from": "Flint Platform", "relation_type": "CONTAINS", "to": "Flint Realtime"},
+    {"from": "Flint Platform", "relation_type": "CONTAINS", "to": "UAR"},
+    {"from": "Flint Platform", "relation_type": "CONTAINS", "to": "surreal-memory-server"},
+    {"from": "Flint Gate", "relation_type": "ROUTES_TO", "to": "pgforge"},
+    {"from": "Flint Gate", "relation_type": "ROUTES_TO", "to": "Flint Realtime"},
+    {"from": "Flint Gate", "relation_type": "ROUTES_TO", "to": "UAR"},
+    {"from": "UAR", "relation_type": "IMPLEMENTS", "to": "ATAgent Protocol"},
+    {"from": "UAR", "relation_type": "USES", "to": "PMPO"},
+    {"from": "Kaia", "relation_type": "CERTIFIES", "to": "Digital Twin"},
+    {"from": "gen_ui_core", "relation_type": "RUNS_ON", "to": "Prometheus Fabric"},
+    {"from": "gen_ui_core", "relation_type": "USES", "to": "UAR"},
+    {"from": "dify-kb-mcp", "relation_type": "ENABLES", "to": "KDD"},
+    {"from": "surreal-memory-server", "relation_type": "PART_OF", "to": "Flint Platform"}
+  ]
+}
