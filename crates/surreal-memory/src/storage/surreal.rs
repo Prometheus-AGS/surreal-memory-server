@@ -236,16 +236,7 @@ impl SurrealStorage {
 
         for attempt in 0..max_retries {
             match Self::connect_with_config(&self.connection_info.config).await {
-                Ok(db) => {
-                    if attempt > 0 {
-                        tracing::info!(
-                            attempt = attempt + 1,
-                            max_attempts = max_retries,
-                            "Successfully connected after retry"
-                        );
-                    }
-                    return Ok(db);
-                }
+                Ok(db) => return Ok(db),
                 Err(err) => {
                     last_error = Some(err);
 
