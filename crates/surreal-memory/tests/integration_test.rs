@@ -7,7 +7,7 @@ use surreal_memory::mindmap::{MapType, MindMap, MindMapNode};
 use surreal_memory::{
     Entity, Memory, MemoryStorage, Relation, TaskStream,
     model_profiles::{MODEL_PROFILES, profile_for},
-    storage::surreal::SurrealStorage,
+    storage::surreal::{RetryConfig, SurrealConfig, SurrealMode, SurrealStorage},
     task_stream::TaskStreamStatus,
 };
 
@@ -422,4 +422,97 @@ async fn test_graph_at_time() {
         .get_graph_at_time("2099-01-01T00:00:00Z")
         .await
         .expect("get_graph_at_time");
+}
+
+// ── Retry Logic ───────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_operation_survives_transient_failure() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Create unique test directory
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| format!("{}{}", d.as_secs(), d.subsec_nanos()))
+        .unwrap_or_else(|_| "0".to_string());
+    let test_dir = std::env::temp_dir().join(format!("surreal-retry-test-{}", ts));
+    std::fs::create_dir_all(&test_dir).expect("create test dir");
+
+    // Create storage with aggressive retry config for testing
+    let retry_config = RetryConfig {
+        max_connect_retries: 5,
+        max_operation_retries: 3,
+        base_retry_delay_ms: 10,  // Short delays for test speed
+        max_retry_delay_ms: 100,
+        jitter_factor: 0.1,
+    };
+
+    let config = SurrealConfig {
+        mode: SurrealMode::Embedded,
+        embedded_path: Some(test_dir.display().to_string()),
+        namespace: "test".to_string(),
+        database: "memory".to_string(),
+        retry: retry_config,
+        ..Default::default()
+    };
+
+    // Create embedding service (use NoOpEmbedder from above)
+    let embedding_service: Arc<dyn surreal_memory::embeddings::EmbeddingService> =
+        Arc::new(NoOpEmbedder);
+
+    // Initialize storage with custom retry config
+    let storage = SurrealStorage::new(&config, embedding_service)
+        .await
+        .expect("Failed to create storage");
+
+    // Test 1: Create an entity (uses create_record which has retry logic)
+    let entity = Entity {
+        id: None,
+        name: "RetryTestEntity".to_string(),
+        entity_type: "TestNode".to_string(),
+        observations: vec!["Testing retry behavior".to_string()],
+        created_at: Default::default(),
+        updated_at: Default::default(),
+        embedding: None,
+    };
+
+    let result = storage.create_entity(entity).await;
+    assert!(result.is_ok(), "create_entity should succeed with retry logic");
+    let created_entity = result.unwrap();
+    assert_eq!(created_entity.name, "RetryTestEntity");
+
+    // Test 2: Create a relation (also uses create_record)
+    let entity2 = Entity {
+        id: None,
+        name: "RetryTestEntity2".to_string(),
+        entity_type: "TestNode".to_string(),
+        observations: vec![],
+        created_at: Default::default(),
+        updated_at: Default::default(),
+        embedding: None,
+    };
+    storage.create_entity(entity2).await.expect("create second entity");
+
+    let relation = Relation {
+        id: None,
+        from: "RetryTestEntity".to_string(),
+        to: "RetryTestEntity2".to_string(),
+        relation_type: "TEST_LINK".to_string(),
+        created_at: Default::default(),
+    };
+
+    let result = storage.create_relation(relation).await;
+    assert!(result.is_ok(), "create_relation should succeed with retry logic");
+
+    // Test 3: Verify the entities and relations were actually stored
+    let fetched = storage.get_entity("RetryTestEntity").await;
+    assert!(fetched.is_ok(), "get_entity should succeed");
+    assert!(fetched.unwrap().is_some(), "Entity should exist in database");
+
+    let relations = storage.get_relations("RetryTestEntity").await;
+    assert!(relations.is_ok(), "get_relations should succeed");
+    assert_eq!(relations.unwrap().len(), 1, "Should have 1 relation stored");
+
+    // Cleanup: Remove test database
+    std::fs::remove_dir_all(&test_dir).ok();
 }
