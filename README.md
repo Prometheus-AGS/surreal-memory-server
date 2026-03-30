@@ -182,6 +182,60 @@ RUST_LOG=info
 
 > **GPU acceleration:** `cargo build --release --features cuda` (CUDA) or `--features metal` (macOS)
 
+### Retry Configuration
+
+The memory server includes automatic retry and reconnection logic to handle transient failures. This makes the system resilient to network hiccups, database restarts, and temporary connection issues.
+
+#### How It Works
+
+- **Initial Connection**: Retries connection establishment during startup (configurable, default: 10 attempts)
+- **Operation Retries**: Automatically retries failed operations with exponential backoff (default: 3 attempts)
+- **Smart Reconnection**: Detects connection loss and attempts automatic reconnection before retrying operations
+- **Error Classification**: Only retries retriable errors (network issues, timeouts, transient DB errors)
+
+#### Configuration
+
+Configure retry behavior via environment variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `SURREAL_MAX_CONNECT_RETRIES` | Maximum connection attempts during startup | `10` |
+| `SURREAL_MAX_OPERATION_RETRIES` | Maximum retry attempts per operation | `3` |
+| `SURREAL_BASE_RETRY_DELAY_MS` | Starting delay for exponential backoff (ms) | `100` |
+| `SURREAL_MAX_RETRY_DELAY_MS` | Maximum delay cap for backoff (ms) | `5000` |
+| `SURREAL_RETRY_JITTER_FACTOR` | Jitter factor for delay randomization (0.0-1.0) | `0.25` |
+
+#### Example
+
+```bash
+# Use aggressive retries for high-reliability deployments
+SURREAL_MAX_CONNECT_RETRIES=20 \
+SURREAL_MAX_OPERATION_RETRIES=5 \
+./surreal-memory-server
+```
+
+#### Docker Compose
+
+The retry configuration is already included in `docker-compose.yaml` with sensible defaults. Override them as needed:
+
+```yaml
+services:
+  surreal-memory-server:
+    environment:
+      - SURREAL_MAX_CONNECT_RETRIES=20  # Override default
+      - SURREAL_MAX_OPERATION_RETRIES=5  # Override default
+```
+
+#### Observability
+
+Retry attempts are logged with structured events:
+
+```
+WARN operation=add_memory attempt=2 max_attempts=3 error="Connection timeout" next_delay_ms=200 "Retrying operation after transient failure"
+```
+
+Monitor these log events to understand retry behavior in production.
+
 ---
 
 ## MCP Integration (Claude Desktop / Cursor)
