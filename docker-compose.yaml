@@ -19,6 +19,12 @@ services:
       - "28000:8000"
     volumes:
       - surrealdb_data:/data
+    healthcheck:
+      test: ["CMD", "surreal", "isready", "--endpoint", "http://localhost:8000"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
   surreal-memory-server:
     build:
@@ -43,7 +49,8 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - MCP_STDIO=false
     depends_on:
-      - surrealdb
+      surrealdb:
+        condition: service_healthy
 
 volumes:
   surrealdb_data:
