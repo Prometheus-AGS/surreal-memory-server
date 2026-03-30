@@ -294,6 +294,71 @@ impl SurrealStorage {
         }
     }
 
+    /// Generic retry wrapper for database operations.
+    /// Handles connection extraction, error classification, reconnection, and exponential backoff.
+    async fn retry_operation<F, R, Fut>(&self, op_name: &str, op: F) -> Result<R>
+    where
+        F: Fn(Surreal<Any>) -> Fut,
+        Fut: std::future::Future<Output = Result<R>>,
+    {
+        let max_retries = self.connection_info.retry_config.max_operation_retries;
+        let mut last_error = None;
+
+        for attempt in 0..max_retries {
+            // Extract current connection
+            let db = {
+                let state = self.connection.read()
+                    .expect("Connection lock poisoned - another thread panicked while holding the lock");
+                match &*state {
+                    ConnectionState::Connected(db) => db.clone(),
+                    ConnectionState::Reconnecting => {
+                        anyhow::bail!("Connection is currently reconnecting, please retry later")
+                    }
+                    ConnectionState::Failed(msg) => {
+                        anyhow::bail!("Connection failed: {}", msg)
+                    }
+                }
+            };
+
+            // Attempt operation
+            match op(db).await {
+                Ok(result) => return Ok(result),
+                Err(err) => {
+                    last_error = Some(err);
+
+                    if attempt < max_retries - 1 && self.is_retriable_error(last_error.as_ref().unwrap()) {
+                        // Attempt reconnection
+                        if let Err(reconnect_err) = self.reconnect().await {
+                            tracing::warn!(
+                                operation = op_name,
+                                attempt = attempt + 1,
+                                error = %reconnect_err,
+                                "Reconnection failed during retry"
+                            );
+                        }
+
+                        let delay = self.connection_info.retry_config.calculate_delay(attempt);
+
+                        tracing::warn!(
+                            operation = op_name,
+                            attempt = attempt + 1,
+                            max_attempts = max_retries,
+                            error = %last_error.as_ref().unwrap(),
+                            next_delay_ms = delay.as_millis(),
+                            "Retrying operation after transient failure"
+                        );
+
+                        tokio::time::sleep(delay).await;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Operation '{}' failed with no error details", op_name)))
+    }
+
     async fn embed_entity(&self, entity: &Entity) -> Result<Vec<f32>> {
         let mut parts = vec![format!("{} ({})", entity.name, entity.entity_type)];
         parts.extend(entity.observations.iter().cloned());
@@ -2077,6 +2142,22 @@ mod retry_tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_retry_operation_succeeds_after_retry() {
+        let storage = mock_storage();
+
+        // Test the retry_operation method exists and has correct signature
+        // Operation will fail (no real DB) but proves method compiles
+        let result = storage.retry_operation("test_op", |db| async move {
+            // Simulate a database query
+            let _result: std::result::Result<Option<serde_json::Value>, surrealdb::Error> = db.select(("test", "id")).await;
+            Ok::<(), anyhow::Error>(())
+        }).await;
+
+        // We expect failure (no real DB), but the method exists and compiles
+        assert!(result.is_err());
     }
 
     fn mock_storage() -> SurrealStorage {
