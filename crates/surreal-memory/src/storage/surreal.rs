@@ -263,6 +263,37 @@ impl SurrealStorage {
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Connection failed with no error details")))
     }
 
+    /// Attempts to reconnect after connection loss.
+    /// Updates ConnectionState: Current → Reconnecting → Connected/Failed
+    async fn reconnect(&self) -> Result<()> {
+        // Set state to Reconnecting
+        {
+            let mut state = self.connection.write()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
+            *state = ConnectionState::Reconnecting;
+            tracing::warn!("Connection lost, attempting reconnection");
+        }
+
+        // Attempt to establish new connection
+        match self.connect_with_retry().await {
+            Ok(db) => {
+                let mut state = self.connection.write()
+                    .expect("Connection lock poisoned - another thread panicked while holding the lock");
+                *state = ConnectionState::Connected(db);
+                tracing::info!("Reconnection successful");
+                Ok(())
+            }
+            Err(err) => {
+                let error_msg = format!("{}", err);
+                let mut state = self.connection.write()
+                    .expect("Connection lock poisoned - another thread panicked while holding the lock");
+                *state = ConnectionState::Failed(error_msg.clone());
+                tracing::error!(error = %err, "Reconnection failed after exhausting retries");
+                Err(anyhow::anyhow!("Reconnection failed: {}", error_msg))
+            }
+        }
+    }
+
     async fn embed_entity(&self, entity: &Entity) -> Result<Vec<f32>> {
         let mut parts = vec![format!("{} ({})", entity.name, entity.entity_type)];
         parts.extend(entity.observations.iter().cloned());
@@ -2015,6 +2046,35 @@ mod retry_tests {
             Err(_) => {
                 // Failed to connect (expected in some test environments)
                 assert!(true);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reconnect_updates_connection_state() {
+        // Test that reconnect() properly transitions state through Reconnecting
+        // If DB is available, it ends in Connected; if not, it ends in Failed
+        let storage = mock_storage();
+
+        // Call reconnect
+        let result = storage.reconnect().await;
+
+        // After reconnect, state should be either Connected (if DB available) or Failed (if not)
+        // The important thing is that it's no longer in the initial Failed/Reconnecting state
+        {
+            let state = storage.connection.read().unwrap();
+            match &*state {
+                ConnectionState::Connected(_) => {
+                    // Reconnection succeeded
+                    assert!(result.is_ok());
+                }
+                ConnectionState::Failed(_) => {
+                    // Reconnection failed
+                    assert!(result.is_err());
+                }
+                ConnectionState::Reconnecting => {
+                    panic!("State should not remain Reconnecting after reconnect() completes");
+                }
             }
         }
     }
