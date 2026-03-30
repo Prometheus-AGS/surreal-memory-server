@@ -112,6 +112,21 @@ pub struct SurrealConfig {
     pub retry: RetryConfig,
 }
 
+impl Default for SurrealConfig {
+    fn default() -> Self {
+        Self {
+            mode: SurrealMode::Embedded,
+            endpoint: None,
+            embedded_path: None,
+            username: None,
+            password: None,
+            namespace: "default".to_string(),
+            database: "default".to_string(),
+            retry: RetryConfig::default(),
+        }
+    }
+}
+
 impl SurrealStorage {
     pub async fn new(
         config: &SurrealConfig,
