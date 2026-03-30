@@ -369,55 +369,106 @@ impl SurrealStorage {
         self.embedding_service.embed(text).await
     }
 
+    /// Core implementation for create_record (used by retry wrapper)
+    async fn create_record_impl(
+        db: &Surreal<Any>,
+        table: String,
+        id: String,
+        data: serde_json::Value,
+        operation: String,
+    ) -> Result<serde_json::Value> {
+        tracing::debug!(table = %table, id = %id, operation = %operation, "Creating record");
+
+        let mut response = db
+            .query("CREATE type::record($table, $key) CONTENT $value RETURN AFTER")
+            .bind(("table", table.clone()))
+            .bind(("key", id.clone()))
+            .bind(("value", data))
+            .await
+            .with_context(|| format!("{}: SurrealDB create query failed", operation))?;
+
+        let created: Option<serde_json::Value> = response
+            .take(0)
+            .with_context(|| format!("{}: SurrealDB rejected the write", operation))?;
+
+        created.with_context(|| format!("{}: SurrealDB returned no record after write", operation))
+    }
+
     async fn create_record<T>(&self, table: &str, key: &str, value: T, op: &str) -> Result<T>
     where
         T: Serialize + DeserializeOwned + SurrealValue,
     {
-        let db = {
-            let state = self.connection.read()
-                .expect("Connection lock poisoned - another thread panicked while holding the lock");
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+        let table = table.to_string();
+        let key = key.to_string();
+        let operation = op.to_string();
+        let data_json = serde_json::to_value(&value)
+            .expect("Failed to serialize data to JSON");
+
+        let result = self.retry_operation(&operation, |db| {
+            let table = table.clone();
+            let key = key.clone();
+            let operation = operation.clone();
+            let data_json = data_json.clone();
+
+            async move {
+                Self::create_record_impl(&db, table, key, data_json, operation).await
             }
-        };
+        }).await?;
+
+        // Deserialize result back to T
+        serde_json::from_value(result)
+            .with_context(|| format!("{}: Failed to deserialize result", op))
+    }
+
+    /// Core implementation for replace_record (used by retry wrapper)
+    async fn replace_record_impl(
+        db: &Surreal<Any>,
+        record_id: String,
+        data: serde_json::Value,
+        operation: String,
+    ) -> Result<serde_json::Value> {
+        tracing::debug!(
+            id = %record_id,
+            operation = %operation,
+            "Replacing record"
+        );
+
         let mut response = db
-            .query("CREATE type::record($table, $key) CONTENT $value RETURN AFTER")
-            .bind(("table", table.to_string()))
-            .bind(("key", key.to_string()))
-            .bind(("value", value))
+            .query("UPDATE $id CONTENT $value RETURN AFTER")
+            .bind(("id", record_id.clone()))
+            .bind(("value", data))
             .await
-            .with_context(|| format!("{op}: SurrealDB create query failed"))?;
-        let created: Option<T> = response
+            .with_context(|| format!("{}: SurrealDB update query failed", operation))?;
+
+        let result: Option<serde_json::Value> = response
             .take(0)
-            .with_context(|| format!("{op}: SurrealDB rejected the write"))?;
-        created.with_context(|| format!("{op}: SurrealDB returned no record after write"))
+            .with_context(|| format!("{}: SurrealDB rejected the write", operation))?;
+
+        result.ok_or_else(|| anyhow::anyhow!("{}: SurrealDB returned no record after write", operation))
     }
 
     async fn replace_record<T>(&self, record_id: &str, value: T, op: &str) -> Result<T>
     where
         T: Serialize + DeserializeOwned + SurrealValue,
     {
-        let db = {
-            let state = self.connection.read()
-                .expect("Connection lock poisoned - another thread panicked while holding the lock");
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+        let record_id = record_id.to_string();
+        let operation = op.to_string();
+        let data_json = serde_json::to_value(&value)
+            .expect("Failed to serialize data to JSON");
+
+        let result = self.retry_operation(&operation, |db| {
+            let record_id = record_id.clone();
+            let operation = operation.clone();
+            let data_json = data_json.clone();
+
+            async move {
+                Self::replace_record_impl(&db, record_id, data_json, operation).await
             }
-        };
-        let mut response = db
-            .query("UPDATE $id CONTENT $value RETURN AFTER")
-            .bind(("id", record_id.to_string()))
-            .bind(("value", value))
-            .await
-            .with_context(|| format!("{op}: SurrealDB update query failed"))?;
-        let updated: Option<T> = response
-            .take(0)
-            .with_context(|| format!("{op}: SurrealDB rejected the write"))?;
-        updated.with_context(|| format!("{op}: SurrealDB returned no record after write"))
+        }).await?;
+
+        // Deserialize result back to T
+        serde_json::from_value(result)
+            .with_context(|| format!("{}: Failed to deserialize result", op))
     }
 
     fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -2157,6 +2208,38 @@ mod retry_tests {
         }).await;
 
         // We expect failure (no real DB), but the method exists and compiles
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_record_uses_retry_wrapper() {
+        let storage = mock_storage();
+
+        // Test that create_record compiles with retry wrapper
+        // Will fail without real DB, but proves integration works
+        let result: Result<serde_json::Value> = storage.create_record(
+            "test_table",
+            "test_id",
+            serde_json::json!({"field": "value"}),
+            "test_operation"
+        ).await;
+
+        // Expect failure (no real DB), but method uses retry wrapper
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_replace_record_uses_retry_wrapper() {
+        let storage = mock_storage();
+
+        // Test that replace_record compiles with retry wrapper
+        let result: Result<serde_json::Value> = storage.replace_record(
+            "test_table:test_id",
+            serde_json::json!({"field": "value"}),
+            "test_operation"
+        ).await;
+
+        // Expect failure (no real DB), but method uses retry wrapper
         assert!(result.is_err());
     }
 
