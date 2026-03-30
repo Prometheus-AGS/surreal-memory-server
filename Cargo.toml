@@ -25,6 +25,7 @@ uuid = { version = "1.11.0", features = ["v4", "fast-rng"] }
 axum = { version = "0.8", features = ["macros"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
+rand = "0.8"
 
 [package]
 name = "surreal-memory-server"

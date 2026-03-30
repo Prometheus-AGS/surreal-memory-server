@@ -28,6 +28,55 @@ pub struct SurrealStorage {
     embedding_service: Arc<dyn EmbeddingService>,
 }
 
+// ── Retry Configuration ───────────────────────────────────────────────────────
+
+use std::time::Duration;
+use rand::Rng;
+
+/// Configuration for retry and reconnection behavior.
+#[derive(Debug, Clone)]
+pub struct RetryConfig {
+    pub max_connect_retries: u32,
+    pub max_operation_retries: u32,
+    pub base_retry_delay_ms: u64,
+    pub max_retry_delay_ms: u64,
+    pub jitter_factor: f64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_connect_retries: 10,
+            max_operation_retries: 3,
+            base_retry_delay_ms: 100,
+            max_retry_delay_ms: 5000,
+            jitter_factor: 0.25,
+        }
+    }
+}
+
+impl RetryConfig {
+    /// Calculate exponential backoff delay with jitter.
+    /// Formula: min(base * 2^attempt, max) * (1 ± jitter_factor)
+    pub fn calculate_delay(&self, attempt: u32) -> Duration {
+        let mut rng = rand::thread_rng();
+
+        // Exponential backoff: base * 2^attempt
+        let base_delay = self.base_retry_delay_ms.saturating_mul(2u64.saturating_pow(attempt));
+
+        // Apply max cap
+        let capped_delay = base_delay.min(self.max_retry_delay_ms);
+
+        // Apply jitter: delay * (1 ± jitter_factor)
+        let jitter_range = (capped_delay as f64 * self.jitter_factor) as u64;
+        let min_delay = capped_delay.saturating_sub(jitter_range);
+        let max_delay = capped_delay.saturating_add(jitter_range);
+
+        let jittered_delay = rng.gen_range(min_delay..=max_delay);
+        Duration::from_millis(jittered_delay)
+    }
+}
+
 // ── Config-compatible constructor ─────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -1414,5 +1463,45 @@ impl SurrealStorage {
             db,
             embedding_service,
         })
+    }
+}
+
+// ── Retry configuration tests ─────────────────────────────────────────────────
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    #[test]
+    fn test_retry_config_defaults() {
+        let config = RetryConfig::default();
+        assert_eq!(config.max_connect_retries, 10);
+        assert_eq!(config.max_operation_retries, 3);
+        assert_eq!(config.base_retry_delay_ms, 100);
+        assert_eq!(config.max_retry_delay_ms, 5000);
+        assert_eq!(config.jitter_factor, 0.25);
+    }
+
+    #[test]
+    fn test_exponential_backoff_calculation() {
+        let config = RetryConfig::default();
+        let delay1 = config.calculate_delay(0);
+        let delay2 = config.calculate_delay(1);
+        let delay3 = config.calculate_delay(2);
+
+        // Base delays (before jitter): 100ms, 200ms, 400ms
+        assert!(delay1.as_millis() >= 75 && delay1.as_millis() <= 125); // 100 ± 25%
+        assert!(delay2.as_millis() >= 150 && delay2.as_millis() <= 250); // 200 ± 25%
+        assert!(delay3.as_millis() >= 300 && delay3.as_millis() <= 500); // 400 ± 25%
+    }
+
+    #[test]
+    fn test_backoff_respects_max_delay() {
+        let config = RetryConfig {
+            max_retry_delay_ms: 500,
+            ..Default::default()
+        };
+        let delay = config.calculate_delay(10); // Would be > 500ms without cap
+        assert!(delay.as_millis() <= 625); // 500 + 25% jitter
     }
 }
