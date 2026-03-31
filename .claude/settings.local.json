@@ -35,7 +35,9 @@
       "Bash(docker-compose up:*)",
       "Bash(docker-compose exec:*)",
       "Bash(wait 75015)",
-      "Bash(pkill -f \"docker-compose build\")"
+      "Bash(pkill -f \"docker-compose build\")",
+      "Bash(git checkout:*)",
+      "Bash(git push:*)"
     ]
   }
 }
