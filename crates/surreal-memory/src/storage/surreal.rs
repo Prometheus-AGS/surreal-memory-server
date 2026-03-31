@@ -17,7 +17,7 @@ use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
 use surrealdb::opt::auth::Root;
 use surrealdb::types::{Datetime, RecordId, RecordIdKey};
-use surrealdb_types::SurrealValue;
+use surrealdb_types::{SurrealValue, Value};
 use uuid::Uuid;
 
 /// Token budget constants per model family. Extend via config in Phase 3.
@@ -465,15 +465,33 @@ impl SurrealStorage {
         self.embedding_service.embed(text).await
     }
 
+    fn sanitize_explicit_record_content<P>(data: P) -> Value
+    where
+        P: SurrealValue,
+    {
+        let mut data = data.into_value();
+        if let Value::Object(ref mut map) = data {
+            map.remove("id");
+        }
+        data
+    }
+
+    fn sanitize_json_record_content(mut data: serde_json::Value) -> serde_json::Value {
+        if let serde_json::Value::Object(ref mut map) = data {
+            map.remove("id");
+        }
+        data
+    }
+
     async fn create_record<P, T>(&self, table: &str, key: &str, value: P, op: &str) -> Result<T>
     where
-        P: Clone + Serialize + SurrealValue,
+        P: SurrealValue,
         T: DeserializeOwned + SurrealValue,
     {
         let table = table.to_string();
         let key = key.to_string();
         let operation = op.to_string();
-        let payload = value;
+        let payload = Self::sanitize_explicit_record_content(value);
 
         self.retry_operation(&operation, |db| {
             let table = table.clone();
@@ -504,15 +522,13 @@ impl SurrealStorage {
     async fn replace_record_impl(
         db: &Surreal<Any>,
         record_id: String,
-        mut data: serde_json::Value,
+        data: serde_json::Value,
         operation: String,
     ) -> Result<serde_json::Value> {
         // SurrealDB 3.x rejects UPDATE CONTENT when the data contains an `id` field
         // that conflicts with the record ID specified in the UPDATE statement.
         // Use UPDATE MERGE instead, which only updates provided fields and preserves the id.
-        if let serde_json::Value::Object(ref mut map) = data {
-            map.remove("id");
-        }
+        let data = Self::sanitize_json_record_content(data);
 
         // Estimate JSON size for performance monitoring
         let json_size = serde_json::to_string(&data)
@@ -1556,8 +1572,9 @@ impl MemoryStorage for SurrealStorage {
             }
         };
         let mut res = db
-            .query("UPDATE task_stream SET status = 'archived' WHERE name = $name RETURN AFTER")
+            .query("UPDATE task_stream SET status = $status WHERE name = $name RETURN AFTER")
             .bind(("name", name.to_string()))
+            .bind(("status", TaskStreamStatus::Archived))
             .await?;
         let updated: Option<TaskStream> = res.take(0)?;
         updated.with_context(|| format!("TaskStream '{}' not found", name))
@@ -1574,8 +1591,9 @@ impl MemoryStorage for SurrealStorage {
             }
         };
         let mut res = db
-            .query("UPDATE task_stream SET status = 'paused' WHERE name = $name RETURN AFTER")
+            .query("UPDATE task_stream SET status = $status WHERE name = $name RETURN AFTER")
             .bind(("name", name.to_string()))
+            .bind(("status", TaskStreamStatus::Paused))
             .await?;
         let updated: Option<TaskStream> = res.take(0)?;
         updated.with_context(|| format!("TaskStream '{}' not found", name))
@@ -1815,16 +1833,6 @@ impl MemoryStorage for SurrealStorage {
     // ── Mindmaps ─────────────────────────────────────────────────────────────
 
     async fn create_mindmap(&self, mut mindmap: MindMap) -> Result<MindMap> {
-        let db = {
-            let state = self.connection.read()
-                .expect("Connection lock poisoned - another thread panicked while holding the lock");
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
-
         mindmap.created_at = Datetime::default();
         mindmap.updated_at = mindmap.created_at.clone();
         let key = Uuid::new_v4().to_string();
@@ -2630,6 +2638,24 @@ mod retry_tests {
 
         // Expect failure (no real DB), but method uses retry wrapper
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sanitize_explicit_record_content_removes_id_field() {
+        let payload = surrealdb_types::object! {
+            id: surrealdb_types::Value::Null,
+            name: "example".to_string(),
+            created_at: Datetime::default(),
+            metadata: surrealdb_types::Value::None,
+            nested: surrealdb_types::object! { ok: true }
+        };
+
+        let sanitized = SurrealStorage::sanitize_explicit_record_content(payload);
+        assert!(sanitized["id"].is_none());
+        assert_eq!(sanitized["name"], surrealdb_types::Value::from("example"));
+        assert!(sanitized["created_at"].is_datetime());
+        assert!(sanitized["metadata"].is_none());
+        assert_eq!(sanitized["nested"]["ok"], surrealdb_types::Value::from(true));
     }
 
     #[tokio::test]

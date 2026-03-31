@@ -15,18 +15,21 @@ async fn read_json(response: reqwest::Response) -> Value {
 }
 
 #[tokio::test]
-async fn taskstream_api_server_mode_create_and_get_round_trip() {
+async fn taskstream_api_server_mode_full_lifecycle_round_trip() {
     let client = Client::new();
     let base = api_base();
-    let name = format!("taskstream-api-{}", Uuid::new_v4().simple());
+    let suffix = Uuid::new_v4().simple().to_string();
+    let name = format!("taskstream-api-{suffix}");
+    let user_id = format!("api-user-{suffix}");
+    let agent_id = format!("api-agent-{suffix}");
 
     let create_response = client
         .post(format!("{base}/api/v1/taskstreams"))
         .json(&serde_json::json!({
             "name": name,
             "description": "server api regression",
-            "user_id": "api-user",
-            "agent_id": "api-agent",
+            "user_id": user_id,
+            "agent_id": agent_id,
             "model_id": "gpt-4o",
             "auto_summarize": false
         }))
@@ -39,6 +42,19 @@ async fn taskstream_api_server_mode_create_and_get_round_trip() {
     assert_eq!(created["model_id"], "gpt-4o");
     assert_eq!(created["auto_summarize"], false);
 
+    let list_response = client
+        .get(format!(
+            "{base}/api/v1/taskstreams?user_id={user_id}&agent_id={agent_id}"
+        ))
+        .send()
+        .await
+        .expect("list taskstreams request");
+    assert_eq!(list_response.status(), reqwest::StatusCode::OK);
+    let listed = read_json(list_response).await;
+    let streams = listed.as_array().expect("task stream list should be an array");
+    assert_eq!(streams.len(), 1);
+    assert_eq!(streams[0]["name"], name);
+
     let get_response = client
         .get(format!("{base}/api/v1/taskstreams/{name}"))
         .send()
@@ -49,4 +65,58 @@ async fn taskstream_api_server_mode_create_and_get_round_trip() {
     assert_eq!(fetched["name"], name);
     assert_eq!(fetched["model_id"], "gpt-4o");
     assert_eq!(fetched["auto_summarize"], false);
+
+    let add_memory_response = client
+        .post(format!("{base}/api/v1/taskstreams/{name}/memories"))
+        .json(&serde_json::json!({
+            "content": "first server-mode step",
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "categories": ["regression", "server"]
+        }))
+        .send()
+        .await
+        .expect("add memory request");
+    assert_eq!(add_memory_response.status(), reqwest::StatusCode::CREATED);
+    let stored_memory = read_json(add_memory_response).await;
+    assert_eq!(stored_memory["content"], "first server-mode step");
+
+    let context_response = client
+        .get(format!(
+            "{base}/api/v1/taskstreams/{name}/context?model_name=gpt-4o&max_tokens=64"
+        ))
+        .send()
+        .await
+        .expect("get context request");
+    assert_eq!(context_response.status(), reqwest::StatusCode::OK);
+    let context = read_json(context_response).await;
+    assert_eq!(context["model_name"], "gpt-4o");
+    assert_eq!(context["memories"].as_array().expect("context memories").len(), 1);
+
+    let pause_response = client
+        .post(format!("{base}/api/v1/taskstreams/{name}/pause"))
+        .send()
+        .await
+        .expect("pause request");
+    assert_eq!(pause_response.status(), reqwest::StatusCode::OK);
+    let paused = read_json(pause_response).await;
+    assert_eq!(paused["status"], "paused");
+
+    let archive_response = client
+        .post(format!("{base}/api/v1/taskstreams/{name}/archive"))
+        .send()
+        .await
+        .expect("archive request");
+    assert_eq!(archive_response.status(), reqwest::StatusCode::OK);
+    let archived = read_json(archive_response).await;
+    assert_eq!(archived["status"], "archived");
+
+    let final_get_response = client
+        .get(format!("{base}/api/v1/taskstreams/{name}"))
+        .send()
+        .await
+        .expect("final get taskstream request");
+    assert_eq!(final_get_response.status(), reqwest::StatusCode::OK);
+    let final_taskstream = read_json(final_get_response).await;
+    assert_eq!(final_taskstream["status"], "archived");
 }

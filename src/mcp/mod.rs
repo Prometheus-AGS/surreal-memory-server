@@ -315,6 +315,14 @@ impl MemoryMcpServer {
         self.handler.archive_task_stream(params).await
     }
 
+    #[tool(description = "Pause a task stream by name without archiving it.")]
+    async fn pause_task_stream(
+        &self,
+        Parameters(params): Parameters<TaskStreamNameParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.handler.pause_task_stream(params).await
+    }
+
     // ── Mindmaps ─────────────────────────────────────────────────────────────
 
     #[tool(

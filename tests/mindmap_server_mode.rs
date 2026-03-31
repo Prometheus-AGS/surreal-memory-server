@@ -15,7 +15,7 @@ async fn read_json(response: reqwest::Response) -> Value {
 }
 
 #[tokio::test]
-async fn mindmap_api_server_mode_create_mutate_get_and_list() {
+async fn mindmap_api_server_mode_full_lifecycle_round_trip() {
     let client = Client::new();
     let base = api_base();
     let suffix = Uuid::new_v4().simple().to_string();
@@ -111,4 +111,61 @@ async fn mindmap_api_server_mode_create_mutate_get_and_list() {
     let maps = listed.as_array().expect("list response should be an array");
     assert_eq!(maps.len(), 1);
     assert_eq!(maps[0]["name"], name);
+
+    let delete_node_response = client
+        .delete(format!(
+            "{base}/api/v1/mindmaps/{name}/nodes/beliefs?user_id={user_id}&agent_id={agent_id}"
+        ))
+        .send()
+        .await
+        .expect("delete node request");
+    assert_eq!(delete_node_response.status(), reqwest::StatusCode::OK);
+    let without_node = read_json(delete_node_response).await;
+    assert_eq!(without_node["nodes"].as_array().expect("nodes array").len(), 1);
+    assert_eq!(without_node["edges"].as_array().expect("edges array").len(), 0);
+
+    let export_response = client
+        .get(format!(
+            "{base}/api/v1/mindmaps/{name}/export?user_id={user_id}&agent_id={agent_id}&format=mermaid"
+        ))
+        .send()
+        .await
+        .expect("export mindmap request");
+    assert_eq!(export_response.status(), reqwest::StatusCode::OK);
+    let export_text = export_response.text().await.expect("export response body");
+    assert!(export_text.contains("graph TD"));
+    assert!(export_text.contains("root"));
+
+    let delete_map_response = client
+        .delete(format!(
+            "{base}/api/v1/mindmaps/{name}?user_id={user_id}&agent_id={agent_id}"
+        ))
+        .send()
+        .await
+        .expect("delete mindmap request");
+    assert_eq!(delete_map_response.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let final_get_response = client
+        .get(format!(
+            "{base}/api/v1/mindmaps/{name}?user_id={user_id}&agent_id={agent_id}"
+        ))
+        .send()
+        .await
+        .expect("final get mindmap request");
+    assert_eq!(final_get_response.status(), reqwest::StatusCode::OK);
+    let final_get = read_json(final_get_response).await;
+    assert_eq!(final_get, serde_json::Value::Null);
+
+    let final_list_response = client
+        .get(format!(
+            "{base}/api/v1/mindmaps?user_id={user_id}&agent_id={agent_id}"
+        ))
+        .send()
+        .await
+        .expect("final list mindmaps request");
+    assert_eq!(final_list_response.status(), reqwest::StatusCode::OK);
+    let final_list = read_json(final_list_response).await;
+    assert!(
+        final_list.as_array().expect("final list response should be an array").is_empty()
+    );
 }

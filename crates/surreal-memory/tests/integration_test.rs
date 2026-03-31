@@ -56,6 +56,7 @@ async fn make_server_storage() -> Arc<SurrealStorage> {
         ),
         namespace: format!("test_{}", suffix),
         database: "main".to_string(),
+        retry: RetryConfig::default(),
     };
 
     Arc::new(
@@ -401,12 +402,14 @@ async fn test_mindmap_crud() {
 async fn taskstream_server_mode_explicit_create_round_trips_model_settings() {
     let s = make_server_storage().await;
     let name = format!("taskstream-{}", Uuid::new_v4().simple());
+    let user_id = "user-server";
+    let agent_id = "agent-server";
 
     let mut ts = TaskStream::new(
         &name,
         Some("server-mode regression".to_string()),
-        Some("agent-server".to_string()),
-        Some("user-server".to_string()),
+        Some(agent_id.to_string()),
+        Some(user_id.to_string()),
     );
     ts.model_id = Some("gpt-4o".to_string());
     ts.auto_summarize = false;
@@ -427,6 +430,34 @@ async fn taskstream_server_mode_explicit_create_round_trips_model_settings() {
         .expect("task stream exists");
     assert_eq!(fetched.model_id.as_deref(), Some("gpt-4o"));
     assert!(!fetched.auto_summarize);
+
+    let stored = s
+        .add_to_task_stream(&name, memory("server-mode step", user_id))
+        .await
+        .expect("add_to_task_stream");
+    assert_eq!(stored.content, "server-mode step");
+
+    let listed = s
+        .list_task_streams(Some(agent_id), Some(user_id))
+        .await
+        .expect("list_task_streams");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].name, name);
+
+    let context = s
+        .get_context_for_task(&name, "gpt-4o", Some(64))
+        .await
+        .expect("get_context_for_task");
+    assert_eq!(context.memories.len(), 1);
+
+    let paused = s.pause_task_stream(&name).await.expect("pause_task_stream");
+    assert_eq!(paused.status, surreal_memory::TaskStreamStatus::Paused);
+
+    let archived = s
+        .archive_task_stream(&name)
+        .await
+        .expect("archive_task_stream");
+    assert_eq!(archived.status, surreal_memory::TaskStreamStatus::Archived);
 }
 
 #[tokio::test]
@@ -511,6 +542,37 @@ async fn mindmap_server_mode_mutations_round_trip_without_decode_failures() {
         .expect("list_mindmaps");
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].name, name);
+
+    let without_node = s
+        .delete_mindmap_node(&name, Some(&user_id), Some(&agent_id), "beliefs")
+        .await
+        .expect("delete_mindmap_node");
+    assert_eq!(without_node.nodes.len(), 1);
+    assert_eq!(without_node.edges.len(), 0);
+
+    let exported = s
+        .get_mindmap(&name, Some(&user_id), Some(&agent_id))
+        .await
+        .expect("get_mindmap for export")
+        .expect("mindmap exists for export")
+        .export(&surreal_memory::ExportFormat::Mermaid);
+    assert!(exported.contains("graph TD"));
+
+    s.delete_mindmap(&name, Some(&user_id), Some(&agent_id))
+        .await
+        .expect("delete_mindmap");
+    assert!(
+        s.get_mindmap(&name, Some(&user_id), Some(&agent_id))
+            .await
+            .expect("get_mindmap after delete")
+            .is_none()
+    );
+    assert!(
+        s.list_mindmaps(Some(&user_id), Some(&agent_id))
+            .await
+            .expect("list_mindmaps after delete")
+            .is_empty()
+    );
 }
 
 #[tokio::test]

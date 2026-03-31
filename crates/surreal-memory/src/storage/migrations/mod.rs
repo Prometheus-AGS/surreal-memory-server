@@ -233,54 +233,55 @@ DEFINE FIELD IF NOT EXISTS metadata ON memory TYPE option<object> FLEXIBLE;
 // The `nodes` and `edges` fields were defined as `array<object>` (strict) which
 // causes SurrealDB SCHEMAFULL validation to reject nested objects containing
 // arbitrary fields (e.g. `metadata: Option<serde_json::Value>` in MindMapNode).
-// Redefine as FLEXIBLE so nested object fields are unconstrained.
-// Also drop and recreate the unique index to use NULLS NOT DISTINCT semantics
-// so two mindmaps with the same name but different (or null) user_ids can coexist.
+// For server-mode compatibility we keep the table SCHEMALESS and only type the
+// top-level arrays here; nested fields are added explicitly in later migrations.
 
 // Use OVERWRITE (not IF NOT EXISTS) so we force-update existing strict field
-// definitions that were set in the v6 schema before FLEXIBLE was needed.
+// definitions from earlier versions.
 const MIGRATION_V9_SQL: &str = "
-DEFINE FIELD OVERWRITE nodes ON mindmap TYPE array<object> FLEXIBLE DEFAULT [];
-DEFINE FIELD OVERWRITE edges ON mindmap TYPE array<object> FLEXIBLE DEFAULT [];
+DEFINE FIELD OVERWRITE nodes ON mindmap TYPE array<object> DEFAULT [];
+DEFINE FIELD OVERWRITE edges ON mindmap TYPE array<object> DEFAULT [];
 ";
 
-// ── v10: Force overwrite mindmap nodes/edges to FLEXIBLE ─────────────────────
+// ── v10: Force overwrite mindmap nodes/edges again ───────────────────────────
 //
-// v9 used IF NOT EXISTS which silently skips already-defined fields.
-// v10 uses OVERWRITE to guarantee the existing strict array<object> definition
-// is replaced with FLEXIBLE, unblocking MindMapNode.metadata serialization.
+// Keep this as a no-op overwrite for upgraded databases that already saw v9.
 
 const MIGRATION_V10_SQL: &str = "
-DEFINE FIELD OVERWRITE nodes ON mindmap TYPE array<object> FLEXIBLE DEFAULT [];
-DEFINE FIELD OVERWRITE edges ON mindmap TYPE array<object> FLEXIBLE DEFAULT [];
+DEFINE FIELD OVERWRITE nodes ON mindmap TYPE array<object> DEFAULT [];
+DEFINE FIELD OVERWRITE edges ON mindmap TYPE array<object> DEFAULT [];
 ";
 
-// ── v11: Remove and redefine mindmap nodes/edges as FLEXIBLE ─────────────────
+// ── v11: Remove and redefine mindmap nodes/edges ─────────────────────────────
 //
 // OVERWRITE alone does not clear existing sub-field constraints in SurrealDB 3.x.
 // The v6 schema defined nodes/edges as strict array<object> which rejects any
 // object field not explicitly known to the schema (e.g. nodes[0].color).
-// Fix: REMOVE the fields entirely to purge sub-field metadata, then redefine
-// them clean as FLEXIBLE so MindMapNode can carry arbitrary fields.
+// Remove the fields entirely to purge sub-field metadata, then redefine the
+// typed arrays cleanly before adding explicit nested fields.
 
 const MIGRATION_V11_SQL: &str = "
 REMOVE FIELD IF EXISTS nodes ON mindmap;
 REMOVE FIELD IF EXISTS edges ON mindmap;
-DEFINE FIELD nodes ON mindmap TYPE array<object> FLEXIBLE DEFAULT [];
-DEFINE FIELD edges ON mindmap TYPE array<object> FLEXIBLE DEFAULT [];
+DEFINE FIELD nodes ON mindmap TYPE array<object> DEFAULT [];
+DEFINE FIELD edges ON mindmap TYPE array<object> DEFAULT [];
 ";
 
-// ── v12: Explicitly mark mindmap element objects as FLEXIBLE ──────────────────
+// ── v12: Explicit nested schema for mindmap node objects ─────────────────────
 //
-// v11 fixed the top-level `nodes` / `edges` arrays, but server-mode SurrealDB
-// can still retain stricter expectations around the element objects themselves.
-// Define the wildcard element fields explicitly so nested node metadata and edge
-// attributes remain valid under SCHEMAFULL.
+// Server-mode SurrealDB validates array element shapes once the top-level field
+// exists, even on a SCHEMALESS table. Define the persisted node fields
+// explicitly so create/update calls match the Rust structs.
 
 const MIGRATION_V12_SQL: &str = "
-DEFINE FIELD IF NOT EXISTS nodes.* ON mindmap TYPE object FLEXIBLE;
-DEFINE FIELD IF NOT EXISTS nodes.*.metadata ON mindmap TYPE option<object> FLEXIBLE;
-DEFINE FIELD IF NOT EXISTS edges.* ON mindmap TYPE object FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS nodes.* ON mindmap TYPE object;
+DEFINE FIELD IF NOT EXISTS nodes.*.id ON mindmap TYPE string;
+DEFINE FIELD IF NOT EXISTS nodes.*.label ON mindmap TYPE string;
+DEFINE FIELD IF NOT EXISTS nodes.*.parent_id ON mindmap TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS nodes.*.node_type ON mindmap TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS nodes.*.color ON mindmap TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS nodes.*.metadata ON mindmap TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS edges.* ON mindmap TYPE object;
 ";
 
 // ── v13: Explicit nested schema for mindmap edge objects ─────────────────────
@@ -381,7 +382,8 @@ mod tests {
         assert!(MIGRATION_V11_SQL.contains("DEFINE FIELD nodes ON mindmap"));
         assert!(MIGRATION_V12_SQL.contains("DEFINE FIELD nodes.* ON mindmap"));
         assert!(MIGRATION_V12_SQL.contains("DEFINE FIELD edges.* ON mindmap"));
-        assert!(MIGRATION_V12_SQL.contains("FLEXIBLE"));
+        assert!(MIGRATION_V12_SQL.contains("DEFINE FIELD IF NOT EXISTS nodes.*.metadata"));
+        assert!(!MIGRATION_V12_SQL.contains("FLEXIBLE"));
     }
 
     #[test]

@@ -912,6 +912,20 @@ impl MemoryHandler {
             serde_json::to_string_pretty(&archived).unwrap_or_default(),
         )]))
     }
+
+    pub async fn pause_task_stream(
+        &self,
+        params: TaskStreamNameParams,
+    ) -> Result<CallToolResult, McpError> {
+        let paused = self
+            .storage
+            .pause_task_stream(&params.name)
+            .await
+            .map_err(Self::internal_error)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&paused).unwrap_or_default(),
+        )]))
+    }
 }
 
 #[cfg(test)]
