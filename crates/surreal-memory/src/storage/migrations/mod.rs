@@ -308,7 +308,8 @@ async fn get_current_version(db: &Surreal<Any>) -> Result<u32> {
 }
 
 async fn apply_migration(db: &Surreal<Any>, migration: &Migration) -> Result<()> {
-    let checksum = format!("{:x}", Sha256::digest(migration.sql.as_bytes()));
+    let digest = Sha256::digest(migration.sql.as_bytes());
+    let checksum: String = digest.iter().map(|b| format!("{b:02x}")).collect();
     tracing::info!(
         "Applying migration v{}: {} (checksum: {})",
         migration.version,

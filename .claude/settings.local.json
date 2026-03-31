@@ -22,7 +22,11 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(cargo check:*)",
-      "Bash(grep -c \"error\\\\[E0609\\\\]: no field \\\\`db\\\\`\")"
+      "Bash(grep -c \"error\\[E0609\\]: no field \\`db\\`\")",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:surrealdb.com)",
+      "Bash(python3 -m json.tool)"
     ]
   }
 }
