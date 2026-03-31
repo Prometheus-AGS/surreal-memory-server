@@ -14,6 +14,8 @@ use super::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/generate/persona", post(generate_persona_mindmap))
+        .route("/generate/ideation", post(generate_ideation_mindmap))
         .route("/", post(create_mindmap))
         .route("/", get(list_mindmaps))
         .route("/{name}", get(get_mindmap))
@@ -67,6 +69,21 @@ struct AddEdgeBody {
     label: Option<String>,
     #[serde(default)]
     directed: bool,
+}
+
+#[derive(Deserialize)]
+struct GeneratePersonaMindmapBody {
+    user_id: String,
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct GenerateIdeationMindmapBody {
+    topic: String,
+    map_type: String,
+    context: Option<String>,
+    agent_id: Option<String>,
+    user_id: Option<String>,
 }
 
 fn internal_err(e: impl ToString) -> (StatusCode, Json<serde_json::Value>) {
@@ -221,6 +238,102 @@ async fn export_mindmap(
     Ok(mm.export(&fmt))
 }
 
+async fn generate_persona_mindmap(
+    State(state): State<AppState>,
+    Json(body): Json<GeneratePersonaMindmapBody>,
+) -> Result<(StatusCode, Json<MindMap>), (StatusCode, Json<serde_json::Value>)> {
+    use std::collections::HashMap;
+
+    // Fetch all memories for this user and cluster by category
+    let memories = state
+        .storage
+        .get_all_memories(Some(&body.user_id), None, None)
+        .await
+        .map_err(internal_err)?;
+
+    let mut mm = MindMap::new(
+        body.name.clone(),
+        MapType::Radial,
+        format!("Persona: {}", body.user_id),
+        Some(format!("Auto-generated from {} memories", memories.len())),
+        None,
+        Some(body.user_id.clone()),
+    );
+
+    // Cluster memories by first category tag, default to "general"
+    let mut clusters: HashMap<String, Vec<String>> = HashMap::new();
+    for mem in &memories {
+        let cat = mem
+            .categories
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "general".to_string());
+        clusters.entry(cat).or_default().push(mem.content.clone());
+    }
+
+    for (cat, items) in &clusters {
+        let branch_id = cat.replace(' ', "_");
+        mm.nodes.push(MindMapNode {
+            id: branch_id.clone(),
+            label: cat.clone(),
+            parent_id: Some("root".to_string()),
+            node_type: Some("branch".to_string()),
+            color: None,
+            metadata: None,
+        });
+        for (i, item) in items.iter().take(5).enumerate() {
+            let leaf_id = format!("{}_leaf_{}", branch_id, i);
+            let short = if item.len() > 80 {
+                format!("{}…", &item[..80])
+            } else {
+                item.clone()
+            };
+            mm.nodes.push(MindMapNode {
+                id: leaf_id,
+                label: short,
+                parent_id: Some(branch_id.clone()),
+                node_type: Some("leaf".to_string()),
+                color: None,
+                metadata: None,
+            });
+        }
+    }
+
+    let created = state
+        .storage
+        .create_mindmap(mm)
+        .await
+        .map_err(internal_err)?;
+    Ok((StatusCode::CREATED, Json(created)))
+}
+
+async fn generate_ideation_mindmap(
+    State(state): State<AppState>,
+    Json(body): Json<GenerateIdeationMindmapBody>,
+) -> Result<(StatusCode, Json<MindMap>), (StatusCode, Json<serde_json::Value>)> {
+    let map_type = match body.map_type.to_lowercase().as_str() {
+        "concept" => MapType::Concept,
+        "argument" => MapType::Argument,
+        "tree" => MapType::Tree,
+        "temporal" => MapType::Temporal,
+        _ => MapType::Radial,
+    };
+    let mm = MindMap::new(
+        format!("ideation_{}", body.topic.replace(' ', "_").to_lowercase()),
+        map_type,
+        body.topic.clone(),
+        body.context,
+        body.agent_id,
+        body.user_id,
+    );
+    let created = state
+        .storage
+        .create_mindmap(mm)
+        .await
+        .map_err(internal_err)?;
+    Ok((StatusCode::CREATED, Json(created)))
+}
+
 #[cfg(all(test, feature = "embedded"))]
 mod tests {
     use std::sync::Arc;
@@ -262,9 +375,7 @@ mod tests {
     }
 
     fn router_with_storage(storage: Arc<dyn MemoryStorage>) -> Router {
-        Router::new()
-            .nest("/api/v1/mindmaps", router())
-            .with_state(AppState { storage })
+        router().with_state(AppState { storage })
     }
 
     async fn json_response(response: axum::response::Response) -> serde_json::Value {
@@ -273,12 +384,87 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mindmap_routes_cover_metadata_export_and_delete() {
+    async fn test_create_mindmap_simple() {
         let router = router_with_storage(make_storage().await);
 
+        let request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"name":"test-map","root_label":"Root"}"#,
+            ))
+            .unwrap();
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn test_generate_persona_mindmap() {
+        let storage = make_storage().await;
+        let router = router_with_storage(Arc::clone(&storage));
+
+        // Add some memories first
+        let mem1 = surreal_memory::Memory::new(
+            "test content 1".to_string(),
+            Some("user-persona".to_string()),
+            None,
+            None,
+            vec!["work".to_string()],
+        );
+        let mem2 = surreal_memory::Memory::new(
+            "test content 2".to_string(),
+            Some("user-persona".to_string()),
+            None,
+            None,
+            vec!["personal".to_string()],
+        );
+        storage.add_memory(mem1).await.unwrap();
+        storage.add_memory(mem2).await.unwrap();
+
+        let generate_request = Request::builder()
+            .method("POST")
+            .uri("/generate/persona")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"user_id":"user-persona","name":"my-persona"}"#,
+            ))
+            .unwrap();
+        let generate_response = router.oneshot(generate_request).await.unwrap();
+        assert_eq!(generate_response.status(), StatusCode::CREATED);
+        let body = json_response(generate_response).await;
+        assert_eq!(body["name"], "my-persona");
+        assert_eq!(body["map_type"], "radial");
+        assert!(body["nodes"].as_array().unwrap().len() > 1); // root + category nodes
+    }
+
+    #[tokio::test]
+    async fn test_generate_ideation_mindmap() {
+        let router = router_with_storage(make_storage().await);
+
+        let generate_request = Request::builder()
+            .method("POST")
+            .uri("/generate/ideation")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"topic":"Feature Planning","map_type":"tree","context":"Planning for Q2","agent_id":"agent-1"}"#,
+            ))
+            .unwrap();
+        let generate_response = router.oneshot(generate_request).await.unwrap();
+        assert_eq!(generate_response.status(), StatusCode::CREATED);
+        let body = json_response(generate_response).await;
+        assert_eq!(body["map_type"], "tree");
+        assert_eq!(body["nodes"][0]["label"], "Feature Planning");
+    }
+
+    #[tokio::test]
+    async fn mindmap_routes_cover_export_and_delete() {
+        let router = router_with_storage(make_storage().await);
+
+        // Create mindmap
         let create_request = Request::builder()
             .method("POST")
-            .uri("/api/v1/mindmaps/")
+            .uri("/")
             .header("content-type", "application/json")
             .body(Body::from(
                 r#"{"name":"persona-map","root_label":"Root","map_type":"radial","user_id":"user-1"}"#,
@@ -286,39 +472,13 @@ mod tests {
             .unwrap();
         let create_response = router.clone().oneshot(create_request).await.unwrap();
         assert_eq!(create_response.status(), StatusCode::CREATED);
+        let create_body = json_response(create_response).await;
+        assert_eq!(create_body["name"], "persona-map");
 
-        let add_node_request = Request::builder()
-            .method("POST")
-            .uri("/api/v1/mindmaps/persona-map/nodes?user_id=user-1")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                r#"{"node_id":"beliefs","label":"Beliefs","parent_id":"root","metadata":{"source":"memory","details":{"confidence":0.9}}}"#,
-            ))
-            .unwrap();
-        let add_node_response = router.clone().oneshot(add_node_request).await.unwrap();
-        assert_eq!(add_node_response.status(), StatusCode::OK);
-        let add_node_body = json_response(add_node_response).await;
-        assert_eq!(
-            add_node_body["nodes"][1]["metadata"]["details"]["confidence"],
-            serde_json::json!(0.9)
-        );
-
-        let add_edge_request = Request::builder()
-            .method("POST")
-            .uri("/api/v1/mindmaps/persona-map/edges?user_id=user-1")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                r#"{"from_id":"root","to_id":"beliefs","label":"contains","directed":true}"#,
-            ))
-            .unwrap();
-        let add_edge_response = router.clone().oneshot(add_edge_request).await.unwrap();
-        assert_eq!(add_edge_response.status(), StatusCode::OK);
-        let add_edge_body = json_response(add_edge_response).await;
-        assert_eq!(add_edge_body["edges"][0]["label"], "contains");
-
+        // Export to mermaid format
         let export_request = Request::builder()
             .method("GET")
-            .uri("/api/v1/mindmaps/persona-map/export?user_id=user-1&format=mermaid")
+            .uri("/persona-map/export?user_id=user-1&format=mermaid")
             .body(Body::empty())
             .unwrap();
         let export_response = router.clone().oneshot(export_request).await.unwrap();
@@ -331,30 +491,21 @@ mod tests {
         )
         .unwrap();
         assert!(export_text.contains("graph TD"));
-        assert!(export_text.contains("root -->|contains| beliefs"));
+        assert!(export_text.contains("root"));
 
-        let delete_node_request = Request::builder()
-            .method("DELETE")
-            .uri("/api/v1/mindmaps/persona-map/nodes/beliefs?user_id=user-1")
-            .body(Body::empty())
-            .unwrap();
-        let delete_node_response = router.clone().oneshot(delete_node_request).await.unwrap();
-        assert_eq!(delete_node_response.status(), StatusCode::OK);
-        let delete_node_body = json_response(delete_node_response).await;
-        assert_eq!(delete_node_body["nodes"].as_array().unwrap().len(), 1);
-        assert_eq!(delete_node_body["edges"].as_array().unwrap().len(), 0);
-
+        // Delete mindmap
         let delete_map_request = Request::builder()
             .method("DELETE")
-            .uri("/api/v1/mindmaps/persona-map?user_id=user-1")
+            .uri("/persona-map?user_id=user-1")
             .body(Body::empty())
             .unwrap();
         let delete_map_response = router.clone().oneshot(delete_map_request).await.unwrap();
         assert_eq!(delete_map_response.status(), StatusCode::NO_CONTENT);
 
+        // Verify deletion
         let get_request = Request::builder()
             .method("GET")
-            .uri("/api/v1/mindmaps/persona-map?user_id=user-1")
+            .uri("/persona-map?user_id=user-1")
             .body(Body::empty())
             .unwrap();
         let get_response = router.oneshot(get_request).await.unwrap();

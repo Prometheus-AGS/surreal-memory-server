@@ -18,6 +18,8 @@ pub fn router() -> Router<AppState> {
         .route("/", get(list_task_streams))
         .route("/{name}", get(get_task_stream))
         .route("/{name}", delete(delete_task_stream))
+        .route("/{name}/archive", post(archive_task_stream))
+        .route("/{name}/pause", post(pause_task_stream))
         .route("/{name}/memories", post(add_memory_to_task_stream))
         .route("/{name}/context", get(get_context_for_task))
         .route("/{name}/summarize", post(auto_summarize_task_stream))
@@ -126,13 +128,13 @@ async fn get_task_stream(
 async fn delete_task_stream(
     State(state): State<AppState>,
     Path(name): Path<String>,
-) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
-    state
+) -> Result<Json<TaskStream>, (StatusCode, Json<serde_json::Value>)> {
+    let archived = state
         .storage
         .archive_task_stream(&name)
         .await
         .map_err(internal_err)?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(archived))
 }
 
 async fn archive_task_stream(
@@ -145,6 +147,18 @@ async fn archive_task_stream(
         .await
         .map_err(internal_err)?;
     Ok(Json(archived))
+}
+
+async fn pause_task_stream(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<TaskStream>, (StatusCode, Json<serde_json::Value>)> {
+    let paused = state
+        .storage
+        .pause_task_stream(&name)
+        .await
+        .map_err(internal_err)?;
+    Ok(Json(paused))
 }
 
 async fn add_memory_to_task_stream(
@@ -359,7 +373,9 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let archive_response = router.clone().oneshot(archive_request).await.unwrap();
-        assert_eq!(archive_response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(archive_response.status(), StatusCode::OK);
+        let archive_body = json_response(archive_response).await;
+        assert_eq!(archive_body["status"], "archived");
 
         let get_request = Request::builder()
             .method("GET")
