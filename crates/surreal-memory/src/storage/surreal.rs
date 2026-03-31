@@ -30,7 +30,7 @@ const DEFAULT_CONTEXT_BUDGET: u64 = 100_000;
 /// (remote server mode) auto-reconnect; the initial connection uses
 /// `connect_with_retry` which honours `SurrealConfig::retry`.
 pub struct SurrealStorage {
-    db: Surreal<Any>,
+    connection: Arc<std::sync::RwLock<ConnectionState>>,
     connection_info: ConnectionInfo,
     embedding_service: Arc<dyn EmbeddingService>,
 }
@@ -91,6 +91,16 @@ struct ConnectionInfo {
     config: SurrealConfig,
 }
 
+/// Tracks the lifecycle state of the SurrealDB connection.
+enum ConnectionState {
+    /// Active connection, ready to use.
+    Connected(Surreal<Any>),
+    /// Mid-reconnect; callers should wait or fail fast.
+    Reconnecting,
+    /// Connection could not be established or lost permanently.
+    Failed(String),
+}
+
 // ── Config-compatible constructor ─────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -141,7 +151,7 @@ impl SurrealStorage {
         run_migrations(&db).await?;
 
         Ok(Self {
-            db,
+            connection: Arc::new(std::sync::RwLock::new(ConnectionState::Connected(db))),
             connection_info,
             embedding_service,
         })
@@ -221,8 +231,16 @@ impl SurrealStorage {
     /// Useful for liveness/readiness probes when running against a remote
     /// SurrealDB server.
     pub async fn health_check(&self) -> Result<bool> {
-        self.db
-            .health()
+        let db = {
+            let state = self.connection.read()
+                .expect("Connection lock poisoned");
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+        db.health()
             .await
             .map(|_| true)
             .context("SurrealDB health check failed")
@@ -276,41 +294,6 @@ impl SurrealStorage {
         false
     }
 
-    /// Attempts to establish a connection with retry logic.
-    /// Used during initial startup to handle database availability delays.
-    async fn connect_with_retry(&self) -> Result<Surreal<Any>> {
-        let max_retries = self.connection_info.retry_config.max_connect_retries;
-        let mut last_error = None;
-
-        for attempt in 0..max_retries {
-            match Self::connect_with_config(&self.connection_info.config).await {
-                Ok(db) => return Ok(db),
-                Err(err) => {
-                    last_error = Some(err);
-
-                    if attempt < max_retries - 1 && self.is_retriable_error(last_error.as_ref().unwrap()) {
-                        let delay = self.connection_info.retry_config.calculate_delay(attempt);
-
-                        tracing::warn!(
-                            operation = "connect",
-                            attempt = attempt + 1,
-                            max_attempts = max_retries,
-                            error = %last_error.as_ref().unwrap(),
-                            next_delay_ms = delay.as_millis(),
-                            "Retrying connection after transient failure"
-                        );
-
-                        tokio::time::sleep(delay).await;
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Connection failed with no error details")))
-    }
-
     /// Attempts to reconnect after connection loss.
     /// Updates ConnectionState: Current → Reconnecting → Connected/Failed
     async fn reconnect(&self) -> Result<()> {
@@ -323,7 +306,7 @@ impl SurrealStorage {
         }
 
         // Attempt to establish new connection
-        match self.connect_with_retry().await {
+        match Self::connect_with_retry(&self.connection_info.config).await {
             Ok(db) => {
                 let mut state = self.connection.write()
                     .expect("Connection lock poisoned - another thread panicked while holding the lock");
@@ -349,7 +332,7 @@ impl SurrealStorage {
         F: Fn(Surreal<Any>) -> Fut,
         Fut: std::future::Future<Output = Result<R>>,
     {
-        let max_retries = self.connection_info.retry_config.max_operation_retries;
+        let max_retries = self.connection_info.config.retry.max_operation_retries;
         let mut last_error = None;
 
         for attempt in 0..max_retries {
@@ -385,7 +368,7 @@ impl SurrealStorage {
                             );
                         }
 
-                        let delay = self.connection_info.retry_config.calculate_delay(attempt);
+                        let delay = self.connection_info.config.retry.calculate_delay(attempt);
 
                         tracing::warn!(
                             operation = op_name,
