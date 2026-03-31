@@ -1,5 +1,9 @@
 use anyhow::{Context, Result};
 use std::sync::Arc;
+use surrealdb::Surreal;
+use surrealdb::engine::any::Any;
+use surrealdb::opt::auth::Root;
+use surreal_memory::storage::migrations::{inspect_legacy_enum_data, repair_legacy_enum_data};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod api;
@@ -13,6 +17,12 @@ use config::Config;
 use embeddings::{EmbeddingService, create_embedding_service};
 use mcp::MemoryMcpServer;
 use storage::{MemoryStorage, create_storage};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Command {
+    Serve,
+    RepairData { apply: bool },
+}
 
 /// Parse retry configuration from environment variables with sensible defaults.
 fn parse_retry_config_from_env() -> surreal_memory::RetryConfig {
@@ -55,6 +65,13 @@ fn parse_retry_config_from_env() -> surreal_memory::RetryConfig {
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
+
+    match parse_command(std::env::args().skip(1))? {
+        Command::Serve => {}
+        Command::RepairData { apply } => {
+            return run_repair_command(apply).await;
+        }
+    }
 
     tracing::info!(
         "🚀 Starting Rust Memory MCP Server v{}",
@@ -159,6 +176,138 @@ fn init_logging() {
                 .with_line_number(false),
         )
         .init();
+}
+
+fn parse_command<I, S>(args: I) -> Result<Command>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
+    if args.is_empty() {
+        return Ok(Command::Serve);
+    }
+
+    match args[0].as_str() {
+        "repair-data" => {
+            let apply = args.iter().skip(1).any(|arg| arg == "--apply");
+            let dry_run = args.iter().skip(1).any(|arg| arg == "--dry-run");
+
+            if apply == dry_run {
+                anyhow::bail!("Usage: surreal-memory-server repair-data [--dry-run|--apply]");
+            }
+
+            Ok(Command::RepairData { apply })
+        }
+        other => anyhow::bail!("Unknown command '{}'", other),
+    }
+}
+
+fn load_surreal_config_without_embeddings() -> Result<surreal_memory::SurrealConfig> {
+    dotenvy::dotenv().ok();
+
+    let mode = match std::env::var("SURREAL_MODE")
+        .unwrap_or_else(|_| "embedded".to_string())
+        .to_lowercase()
+        .as_str()
+    {
+        "server" => surreal_memory::storage::surreal::SurrealMode::Server,
+        _ => surreal_memory::storage::surreal::SurrealMode::Embedded,
+    };
+
+    Ok(surreal_memory::SurrealConfig {
+        mode,
+        endpoint: std::env::var("SURREAL_ENDPOINT").ok(),
+        embedded_path: std::env::var("SURREAL_PATH")
+            .ok()
+            .or_else(|| Some("./data/memory.db".to_string())),
+        username: std::env::var("SURREAL_USERNAME").ok(),
+        password: std::env::var("SURREAL_PASSWORD").ok(),
+        namespace: std::env::var("SURREAL_NAMESPACE").unwrap_or_else(|_| "memory".to_string()),
+        database: std::env::var("SURREAL_DATABASE").unwrap_or_else(|_| "mcp".to_string()),
+        retry: parse_retry_config_from_env(),
+    })
+}
+
+async fn connect_surreal_for_repair(config: &surreal_memory::SurrealConfig) -> Result<Surreal<Any>> {
+    let db = match &config.mode {
+        surreal_memory::storage::surreal::SurrealMode::Embedded => {
+            let path = config
+                .embedded_path
+                .as_ref()
+                .context("Embedded path required for embedded repair mode")?;
+            surrealdb::engine::any::connect(format!("rocksdb://{}", path)).await?
+        }
+        surreal_memory::storage::surreal::SurrealMode::Server => {
+            let endpoint = config
+                .endpoint
+                .as_ref()
+                .context("SURREAL_ENDPOINT is required for server repair mode")?;
+            surrealdb::engine::any::connect(endpoint).await?
+        }
+    };
+
+    if let (Some(username), Some(password)) = (&config.username, &config.password) {
+        db.signin(Root {
+            username: username.clone(),
+            password: password.clone(),
+        })
+        .await
+        .context("Failed to sign in to SurrealDB")?;
+    }
+
+    db.use_ns(&config.namespace)
+        .use_db(&config.database)
+        .await
+        .context("Failed to select namespace/database for repair")?;
+
+    Ok(db)
+}
+
+async fn run_repair_command(apply: bool) -> Result<()> {
+    let config = load_surreal_config_without_embeddings()?;
+    let db = connect_surreal_for_repair(&config).await?;
+
+    if apply {
+        let report = repair_legacy_enum_data(&db).await?;
+        print_repair_report("apply", &report);
+    } else {
+        let report = inspect_legacy_enum_data(&db).await?;
+        print_repair_report("dry-run", &report);
+        if report.has_issues() {
+            anyhow::bail!(
+                "repair-data --dry-run found {} unrecognized enum value(s)",
+                report.issues.len()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn print_repair_report(mode: &str, report: &surreal_memory::storage::migrations::RepairReport) {
+    println!(
+        "repair-data {}: scanned_records={} planned_repairs={} repairs_applied={} issues={}",
+        mode,
+        report.scanned_records,
+        report.planned_repairs(),
+        report.repairs_applied,
+        report.issues.len()
+    );
+
+    for change in &report.changes {
+        println!(
+            "repair {}.{} {} => {}",
+            change.table, change.field, change.record_id, change.normalized_value
+        );
+    }
+
+    for issue in &report.issues {
+        println!(
+            "issue {}.{} {} raw={} error={}",
+            issue.table, issue.field, issue.record_id, issue.raw_value, issue.message
+        );
+    }
 }
 
 async fn load_config() -> Result<Config> {
@@ -341,5 +490,31 @@ mod tests {
             std::env::remove_var("SURREAL_MAX_CONNECT_RETRIES");
             std::env::remove_var("SURREAL_RETRY_JITTER_FACTOR");
         }
+    }
+
+    #[test]
+    fn test_parse_command_defaults_to_serve() {
+        assert_eq!(parse_command(Vec::<String>::new()).unwrap(), Command::Serve);
+    }
+
+    #[test]
+    fn test_parse_command_accepts_repair_apply() {
+        assert_eq!(
+            parse_command(vec!["repair-data".to_string(), "--apply".to_string()]).unwrap(),
+            Command::RepairData { apply: true }
+        );
+    }
+
+    #[test]
+    fn test_parse_command_requires_explicit_repair_mode() {
+        assert!(parse_command(vec!["repair-data".to_string()]).is_err());
+        assert!(
+            parse_command(vec![
+                "repair-data".to_string(),
+                "--dry-run".to_string(),
+                "--apply".to_string()
+            ])
+            .is_err()
+        );
     }
 }

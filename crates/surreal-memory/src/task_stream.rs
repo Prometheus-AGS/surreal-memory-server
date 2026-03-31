@@ -5,6 +5,7 @@
 //! aware view for injecting into a model prompt.
 
 use serde::{Deserialize, Serialize};
+use std::{fmt, str::FromStr};
 use surrealdb::types::{Datetime, RecordId};
 use surrealdb_types::SurrealValue;
 
@@ -19,6 +20,39 @@ pub enum TaskStreamStatus {
     Active,
     Paused,
     Archived,
+}
+
+impl TaskStreamStatus {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::Archived => "archived",
+        }
+    }
+
+    pub fn parse_str(raw: &str) -> Result<Self, String> {
+        match raw {
+            "active" => Ok(Self::Active),
+            "paused" => Ok(Self::Paused),
+            "archived" => Ok(Self::Archived),
+            _ => Err(format!("unknown task stream status '{raw}'")),
+        }
+    }
+}
+
+impl fmt::Display for TaskStreamStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for TaskStreamStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse_str(s)
+    }
 }
 
 /// A named, long-running task context that accumulates scoped memories.
@@ -72,7 +106,7 @@ impl TaskStream {
             model_id: None,
             auto_summarize: true,
             summary_count: 0,
-            created_at: now.clone(),
+            created_at: now,
             last_active: now,
         }
     }
@@ -101,4 +135,26 @@ pub struct ContextWindow {
     pub model_name: String,
     /// The effective token budget (model limit minus reserved-for-response).
     pub token_budget: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TaskStreamStatus;
+
+    #[test]
+    fn task_stream_status_codec_round_trips() {
+        for status in [
+            TaskStreamStatus::Active,
+            TaskStreamStatus::Paused,
+            TaskStreamStatus::Archived,
+        ] {
+            assert_eq!(TaskStreamStatus::parse_str(status.as_str()).unwrap(), status);
+        }
+    }
+
+    #[test]
+    fn task_stream_status_codec_rejects_unknown_values() {
+        assert!(TaskStreamStatus::parse_str("Active").is_err());
+        assert!(TaskStreamStatus::parse_str("unknown").is_err());
+    }
 }

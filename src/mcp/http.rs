@@ -159,10 +159,10 @@ async fn messages_handler(
     Query(query): Query<MessagesQuery>,
     Json(payload): Json<ClientJsonRpcMessage>,
 ) -> axum::response::Result<impl axum::response::IntoResponse, axum::http::StatusCode> {
-    if let Some(tx) = state.sessions.get(&query.session_id) {
-        if tx.send(payload).await.is_ok() {
-            return Ok(axum::http::StatusCode::ACCEPTED);
-        }
+    if let Some(tx) = state.sessions.get(&query.session_id)
+        && tx.send(payload).await.is_ok()
+    {
+        return Ok(axum::http::StatusCode::ACCEPTED);
     }
 
     Err(axum::http::StatusCode::NOT_FOUND)

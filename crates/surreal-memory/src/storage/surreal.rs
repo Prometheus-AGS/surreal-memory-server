@@ -4,13 +4,14 @@ use super::MemoryStorage;
 use crate::{
     embeddings::EmbeddingService,
     entity::{Entity, KnowledgeGraph, Relation, SemanticSearchResult},
-    memory::{Memory, MemoryHistory},
-    mindmap::{MindMap, MindMapEdge, MindMapNode},
+    memory::{Memory, MemoryHistory, MemoryScope, MemoryType},
+    mindmap::{MapType, MindMap, MindMapEdge, MindMapNode},
     storage::migrations::run_migrations,
     task_stream::{ContextWindow, TaskStream, TaskStreamStatus},
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde::{Serialize, de::DeserializeOwned};
 use std::{cmp::Ordering, sync::Arc};
 use surrealdb::Surreal;
@@ -101,13 +102,14 @@ enum ConnectionState {
     Failed(String),
 }
 
-#[derive(Clone, Serialize, SurrealValue)]
-struct CreateTaskStreamRecord {
+#[derive(Clone, Debug, Serialize, Deserialize, SurrealValue)]
+struct DbTaskStream {
+    id: Option<RecordId>,
     name: String,
     description: Option<String>,
     agent_id: Option<String>,
     user_id: Option<String>,
-    status: TaskStreamStatus,
+    status: String,
     total_tokens: u64,
     model_id: Option<String>,
     auto_summarize: bool,
@@ -116,14 +118,15 @@ struct CreateTaskStreamRecord {
     last_active: Datetime,
 }
 
-impl From<TaskStream> for CreateTaskStreamRecord {
+impl From<TaskStream> for DbTaskStream {
     fn from(stream: TaskStream) -> Self {
         Self {
+            id: stream.id,
             name: stream.name,
             description: stream.description,
             agent_id: stream.agent_id,
             user_id: stream.user_id,
-            status: stream.status,
+            status: stream.status.as_str().to_string(),
             total_tokens: stream.total_tokens,
             model_id: stream.model_id,
             auto_summarize: stream.auto_summarize,
@@ -134,11 +137,47 @@ impl From<TaskStream> for CreateTaskStreamRecord {
     }
 }
 
-#[derive(Clone, Serialize, SurrealValue)]
-struct CreateMindMapRecord {
+impl TryFrom<DbTaskStream> for TaskStream {
+    type Error = anyhow::Error;
+
+    fn try_from(stream: DbTaskStream) -> Result<Self> {
+        let record_id = stream
+            .id
+            .as_ref()
+            .map(SurrealStorage::record_id_to_string)
+            .unwrap_or_else(|| "<new>".to_string());
+        let status = TaskStreamStatus::parse_str(&stream.status).map_err(|err| {
+            anyhow::anyhow!(
+                "task_stream.status decode failed for record {}: {} (raw={})",
+                record_id,
+                err,
+                stream.status
+            )
+        })?;
+
+        Ok(Self {
+            id: stream.id,
+            name: stream.name,
+            description: stream.description,
+            agent_id: stream.agent_id,
+            user_id: stream.user_id,
+            status,
+            total_tokens: stream.total_tokens,
+            model_id: stream.model_id,
+            auto_summarize: stream.auto_summarize,
+            summary_count: stream.summary_count,
+            created_at: stream.created_at,
+            last_active: stream.last_active,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, SurrealValue)]
+struct DbMindMap {
+    id: Option<RecordId>,
     name: String,
     description: Option<String>,
-    map_type: crate::mindmap::MapType,
+    map_type: String,
     agent_id: Option<String>,
     user_id: Option<String>,
     task_stream_id: Option<RecordId>,
@@ -149,12 +188,13 @@ struct CreateMindMapRecord {
     updated_at: Datetime,
 }
 
-impl From<MindMap> for CreateMindMapRecord {
+impl From<MindMap> for DbMindMap {
     fn from(mindmap: MindMap) -> Self {
         Self {
+            id: mindmap.id,
             name: mindmap.name,
             description: mindmap.description,
-            map_type: mindmap.map_type,
+            map_type: mindmap.map_type.as_str().to_string(),
             agent_id: mindmap.agent_id,
             user_id: mindmap.user_id,
             task_stream_id: mindmap.task_stream_id,
@@ -164,6 +204,140 @@ impl From<MindMap> for CreateMindMapRecord {
             created_at: mindmap.created_at,
             updated_at: mindmap.updated_at,
         }
+    }
+}
+
+impl TryFrom<DbMindMap> for MindMap {
+    type Error = anyhow::Error;
+
+    fn try_from(mindmap: DbMindMap) -> Result<Self> {
+        let record_id = mindmap
+            .id
+            .as_ref()
+            .map(SurrealStorage::record_id_to_string)
+            .unwrap_or_else(|| "<new>".to_string());
+        let map_type = MapType::parse_str(&mindmap.map_type).map_err(|err| {
+            anyhow::anyhow!(
+                "mindmap.map_type decode failed for record {}: {} (raw={})",
+                record_id,
+                err,
+                mindmap.map_type
+            )
+        })?;
+
+        Ok(Self {
+            id: mindmap.id,
+            name: mindmap.name,
+            description: mindmap.description,
+            map_type,
+            agent_id: mindmap.agent_id,
+            user_id: mindmap.user_id,
+            task_stream_id: mindmap.task_stream_id,
+            tags: mindmap.tags,
+            nodes: mindmap.nodes,
+            edges: mindmap.edges,
+            created_at: mindmap.created_at,
+            updated_at: mindmap.updated_at,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, SurrealValue)]
+struct DbMemory {
+    id: Option<RecordId>,
+    content: String,
+    embedding: Option<Vec<f32>>,
+    scope: String,
+    memory_type: String,
+    user_id: Option<String>,
+    session_id: Option<String>,
+    agent_id: Option<String>,
+    task_stream_id: Option<RecordId>,
+    categories: Vec<String>,
+    metadata: Option<serde_json::Value>,
+    token_count: Option<u32>,
+    importance: f32,
+    access_count: u32,
+    last_accessed_at: Option<Datetime>,
+    valid_until: Option<Datetime>,
+    version: u32,
+    created_at: Datetime,
+    updated_at: Datetime,
+}
+
+impl From<Memory> for DbMemory {
+    fn from(memory: Memory) -> Self {
+        Self {
+            id: memory.id,
+            content: memory.content,
+            embedding: memory.embedding,
+            scope: memory.scope.as_str().to_string(),
+            memory_type: memory.memory_type.as_str().to_string(),
+            user_id: memory.user_id,
+            session_id: memory.session_id,
+            agent_id: memory.agent_id,
+            task_stream_id: memory.task_stream_id,
+            categories: memory.categories,
+            metadata: memory.metadata,
+            token_count: memory.token_count,
+            importance: memory.importance,
+            access_count: memory.access_count,
+            last_accessed_at: memory.last_accessed_at,
+            valid_until: memory.valid_until,
+            version: memory.version,
+            created_at: memory.created_at,
+            updated_at: memory.updated_at,
+        }
+    }
+}
+
+impl TryFrom<DbMemory> for Memory {
+    type Error = anyhow::Error;
+
+    fn try_from(memory: DbMemory) -> Result<Self> {
+        let record_id = memory
+            .id
+            .as_ref()
+            .map(SurrealStorage::record_id_to_string)
+            .unwrap_or_else(|| "<new>".to_string());
+        let scope = MemoryScope::parse_str(&memory.scope).map_err(|err| {
+            anyhow::anyhow!(
+                "memory.scope decode failed for record {}: {} (raw={})",
+                record_id,
+                err,
+                memory.scope
+            )
+        })?;
+        let memory_type = MemoryType::parse_str(&memory.memory_type).map_err(|err| {
+            anyhow::anyhow!(
+                "memory.memory_type decode failed for record {}: {} (raw={})",
+                record_id,
+                err,
+                memory.memory_type
+            )
+        })?;
+
+        Ok(Self {
+            id: memory.id,
+            content: memory.content,
+            embedding: memory.embedding,
+            scope,
+            memory_type,
+            user_id: memory.user_id,
+            session_id: memory.session_id,
+            agent_id: memory.agent_id,
+            task_stream_id: memory.task_stream_id,
+            categories: memory.categories,
+            metadata: memory.metadata,
+            token_count: memory.token_count,
+            importance: memory.importance,
+            access_count: memory.access_count,
+            last_accessed_at: memory.last_accessed_at,
+            valid_until: memory.valid_until,
+            version: memory.version,
+            created_at: memory.created_at,
+            updated_at: memory.updated_at,
+        })
     }
 }
 // ── Config-compatible constructor ─────────────────────────────────────────────
@@ -476,11 +650,28 @@ impl SurrealStorage {
         data
     }
 
-    fn sanitize_json_record_content(mut data: serde_json::Value) -> serde_json::Value {
-        if let serde_json::Value::Object(ref mut map) = data {
-            map.remove("id");
-        }
-        data
+    fn decode_memory(record: DbMemory) -> Result<Memory> {
+        record.try_into()
+    }
+
+    fn decode_memories(records: Vec<DbMemory>) -> Result<Vec<Memory>> {
+        records.into_iter().map(Self::decode_memory).collect()
+    }
+
+    fn decode_task_stream(record: DbTaskStream) -> Result<TaskStream> {
+        record.try_into()
+    }
+
+    fn decode_task_streams(records: Vec<DbTaskStream>) -> Result<Vec<TaskStream>> {
+        records.into_iter().map(Self::decode_task_stream).collect()
+    }
+
+    fn decode_mindmap(record: DbMindMap) -> Result<MindMap> {
+        record.try_into()
+    }
+
+    fn decode_mindmaps(records: Vec<DbMindMap>) -> Result<Vec<MindMap>> {
+        records.into_iter().map(Self::decode_mindmap).collect()
     }
 
     async fn create_record<P, T>(&self, table: &str, key: &str, value: P, op: &str) -> Result<T>
@@ -516,125 +707,6 @@ impl SurrealStorage {
                 created.with_context(|| format!("{operation}: SurrealDB returned no record after write"))
             }
         }).await
-    }
-
-    /// Core implementation for replace_record (used by retry wrapper)
-    async fn replace_record_impl(
-        db: &Surreal<Any>,
-        record_id: String,
-        data: serde_json::Value,
-        operation: String,
-    ) -> Result<serde_json::Value> {
-        // SurrealDB 3.x rejects UPDATE CONTENT when the data contains an `id` field
-        // that conflicts with the record ID specified in the UPDATE statement.
-        // Use UPDATE MERGE instead, which only updates provided fields and preserves the id.
-        let data = Self::sanitize_json_record_content(data);
-
-        // Estimate JSON size for performance monitoring
-        let json_size = serde_json::to_string(&data)
-            .map(|s| s.len())
-            .unwrap_or(0);
-
-        tracing::debug!(
-            id = %record_id,
-            operation = %operation,
-            json_size_bytes = json_size,
-            "Replacing record"
-        );
-
-        // Warn about large objects that may cause performance issues
-        // Known SurrealDB issue: UPDATE CONTENT with large JSON (>500KB) can be very slow
-        if json_size > 500_000 {
-            tracing::warn!(
-                id = %record_id,
-                operation = %operation,
-                json_size_kb = json_size / 1024,
-                "Large object update detected - this may be slow (SurrealDB issue #1810)"
-            );
-        }
-
-        // Add 30-second timeout to prevent indefinite hangs on large objects
-        // SurrealDB can take 4+ minutes for large JSON updates without a timeout
-        // Use MERGE instead of CONTENT to preserve the id field.
-        //
-        // KEY FORMAT: split "table:key" and use two-arg type::record($table, $key)
-        // This matches the CREATE type::record($table, $key) call in create_record_impl,
-        // ensuring the key type is identical on both CREATE and UPDATE.
-        // Using the single-arg form type::record("table:uuid") causes a UUID key-type
-        // mismatch — SurrealDB parses the UUID substring as a UUID type rather than
-        // the string type stored by create_record_impl.
-        let (tbl, key_part) = record_id
-            .split_once(':')
-            .unwrap_or((&record_id, ""));
-        let tbl = tbl.to_string();
-        let key_part = key_part.to_string();
-
-        let mut response = db
-            .query("UPDATE type::record($table, $key) MERGE $value RETURN AFTER TIMEOUT 30s")
-            .bind(("table", tbl))
-            .bind(("key", key_part))
-            .bind(("value", data))
-            .await
-            .with_context(|| format!("{}: SurrealDB update query failed", operation))?;
-        response = response
-            .check()
-            .with_context(|| format!("{}: SurrealDB rejected the write", operation))?;
-
-        let result: Option<serde_json::Value> = response
-            .take(0)
-            .map_err(|e| {
-                tracing::error!(
-                    id = %record_id,
-                    operation = %operation,
-                    error = %e,
-                    "Failed to parse SurrealDB UPDATE response"
-                );
-                e
-            })
-            .with_context(|| format!("{}: SurrealDB rejected the write", operation))?;
-
-        match result {
-            Some(value) => {
-                tracing::debug!(
-                    id = %record_id,
-                    operation = %operation,
-                    "UPDATE succeeded, got response"
-                );
-                Ok(value)
-            }
-            None => {
-                tracing::error!(
-                    id = %record_id,
-                    operation = %operation,
-                    "UPDATE returned None - record may have been deleted"
-                );
-                Err(anyhow::anyhow!("{}: SurrealDB returned no record after write", operation))
-            }
-        }
-    }
-
-    async fn replace_record<T>(&self, record_id: &str, value: T, op: &str) -> Result<T>
-    where
-        T: Serialize + DeserializeOwned + SurrealValue,
-    {
-        let record_id = record_id.to_string();
-        let operation = op.to_string();
-        let data_json = serde_json::to_value(&value)
-            .expect("Failed to serialize data to JSON");
-
-        let result = self.retry_operation(&operation, |db| {
-            let record_id = record_id.clone();
-            let operation = operation.clone();
-            let data_json = data_json.clone();
-
-            async move {
-                Self::replace_record_impl(&db, record_id, data_json, operation).await
-            }
-        }).await?;
-
-        // Deserialize result back to T
-        serde_json::from_value(result)
-            .with_context(|| format!("{}: Failed to deserialize result", op))
     }
     fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
@@ -708,10 +780,11 @@ impl SurrealStorage {
         response = response
             .check()
             .with_context(|| format!("{op}: SurrealDB rejected the write"))?;
-        let updated: Option<MindMap> = response
+        let updated: Option<DbMindMap> = response
             .take(0)
             .with_context(|| format!("{op}: Failed to deserialize result"))?;
-        updated.with_context(|| format!("{op}: SurrealDB returned no record after write"))
+        let updated = updated.with_context(|| format!("{op}: SurrealDB returned no record after write"))?;
+        Self::decode_mindmap(updated)
     }
 
     async fn append_mindmap_node(
@@ -746,10 +819,11 @@ impl SurrealStorage {
         response = response
             .check()
             .with_context(|| format!("{op}: SurrealDB rejected the write"))?;
-        let updated: Option<MindMap> = response
+        let updated: Option<DbMindMap> = response
             .take(0)
             .with_context(|| format!("{op}: Failed to deserialize result"))?;
-        updated.with_context(|| format!("{op}: SurrealDB returned no record after write"))
+        let updated = updated.with_context(|| format!("{op}: SurrealDB returned no record after write"))?;
+        Self::decode_mindmap(updated)
     }
 
     async fn append_mindmap_edge(
@@ -786,15 +860,16 @@ impl SurrealStorage {
         response = response
             .check()
             .with_context(|| format!("{op}: SurrealDB rejected the write"))?;
-        let updated: Option<MindMap> = response
+        let updated: Option<DbMindMap> = response
             .take(0)
             .with_context(|| format!("{op}: Failed to deserialize result"))?;
-        updated.with_context(|| format!("{op}: SurrealDB returned no record after write"))
+        let updated = updated.with_context(|| format!("{op}: SurrealDB returned no record after write"))?;
+        Self::decode_mindmap(updated)
     }
 
     fn estimate_tokens(text: &str) -> u32 {
         // Rough heuristic: ~4 chars per token (good enough for budget tracking)
-        (text.len() as u32 + 3) / 4
+        (text.len() as u32).div_ceil(4)
     }
 
     fn model_context_budget(model_name: &str) -> u64 {
@@ -826,7 +901,7 @@ impl MemoryStorage for SurrealStorage {
             }
         };
         let now = Datetime::default();
-        entity.created_at = now.clone();
+        entity.created_at = now;
         entity.updated_at = now;
         entity.embedding = Some(self.embed_entity(&entity).await?);
 
@@ -884,7 +959,7 @@ impl MemoryStorage for SurrealStorage {
             .bind(("type", entity.entity_type.clone()))
             .bind(("obs", entity.observations.clone()))
             .bind(("embedding", entity.embedding.clone()))
-            .bind(("updated", entity.updated_at.clone()))
+            .bind(("updated", entity.updated_at))
             .await?;
         let updated: Option<Entity> = res.take(0)?;
         updated.context("Failed to update entity")
@@ -1069,7 +1144,9 @@ impl MemoryStorage for SurrealStorage {
     async fn add_memory(&self, mut memory: Memory) -> Result<Memory> {
         // Compute embedding and token count
         let emb = self.embed_text(&memory.content).await?;
-        memory.token_count = Some(Self::estimate_tokens(&memory.content));
+        if memory.token_count.is_none() {
+            memory.token_count = Some(Self::estimate_tokens(&memory.content));
+        }
 
         // Semantic deduplication at 0.92 threshold
         let candidates = self
@@ -1084,13 +1161,12 @@ impl MemoryStorage for SurrealStorage {
             .await?;
 
         for candidate in candidates {
-            if let Some(c_emb) = &candidate.embedding {
-                if Self::cosine_similarity(&emb, c_emb) >= 0.92 {
-                    if let Some(id) = &candidate.id {
-                        let id_str = Self::record_id_to_string(id);
-                        return self.update_memory(&id_str, memory.content).await;
-                    }
-                }
+            if let Some(c_emb) = &candidate.embedding
+                && Self::cosine_similarity(&emb, c_emb) >= 0.92
+                && let Some(id) = &candidate.id
+            {
+                let id_str = Self::record_id_to_string(id);
+                return self.update_memory(&id_str, memory.content).await;
             }
         }
 
@@ -1106,17 +1182,18 @@ impl MemoryStorage for SurrealStorage {
 
         let now = Datetime::default();
         memory.embedding = Some(emb);
-        memory.created_at = now.clone();
+        memory.created_at = now;
         memory.updated_at = now;
         memory.version = 1;
 
-        let created: Option<Memory> = db
+        let created: Option<DbMemory> = db
             .create("memory")
-            .content(memory.clone())
+            .content(DbMemory::from(memory))
             .await
             .context("Failed to create memory")?;
 
         let stored = created.ok_or_else(|| anyhow::anyhow!("No memory returned after creation"))?;
+        let stored = Self::decode_memory(stored)?;
 
         // Record history
         if let Some(id) = &stored.id {
@@ -1143,13 +1220,13 @@ impl MemoryStorage for SurrealStorage {
             }
         };
         let (table, key) = Self::parse_record_id_str(id, "memory")?;
-        let result: Vec<Memory> = db
+        let result: Vec<DbMemory> = db
             .query("SELECT * FROM type::record($table, $key)")
             .bind(("table", table))
             .bind(("key", key))
             .await?
             .take(0)?;
-        Ok(result.into_iter().next())
+        result.into_iter().next().map(Self::decode_memory).transpose()
     }
 
     async fn update_memory(&self, id: &str, content: String) -> Result<Memory> {
@@ -1184,11 +1261,12 @@ impl MemoryStorage for SurrealStorage {
             .bind(("emb", new_emb))
             .bind(("tc", token_count))
             .bind(("v", new_version))
-            .bind(("now", now.clone()))
+            .bind(("now", now))
             .await?;
 
-        let updated: Option<Memory> = res.take(0)?;
+        let updated: Option<DbMemory> = res.take(0)?;
         let updated = updated.context("Failed to update memory")?;
+        let updated = Self::decode_memory(updated)?;
 
         // History
         if let Some(mem_id) = &updated.id {
@@ -1216,17 +1294,17 @@ impl MemoryStorage for SurrealStorage {
                 ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
             }
         };
-        if let Some(mem) = self.get_memory(id).await? {
-            if let Some(mem_id) = &mem.id {
-                db.query(
-                    "INSERT INTO memory_history { memory_id: $mid, version: $v, old_content: $old, new_content: $old, changed_at: $now, change_type: 'deleted' }"
-                )
-                .bind(("mid", mem_id.clone()))
-                .bind(("v", mem.version + 1))
-                .bind(("old", mem.content))
-                .bind(("now", Datetime::default()))
-                .await?;
-            }
+        if let Some(mem) = self.get_memory(id).await?
+            && let Some(mem_id) = &mem.id
+        {
+            db.query(
+                "INSERT INTO memory_history { memory_id: $mid, version: $v, old_content: $old, new_content: $old, changed_at: $now, change_type: 'deleted' }"
+            )
+            .bind(("mid", mem_id.clone()))
+            .bind(("v", mem.version + 1))
+            .bind(("old", mem.content))
+            .bind(("now", Datetime::default()))
+            .await?;
         }
         let (table, key) = Self::parse_record_id_str(id, "memory")?;
         db
@@ -1302,8 +1380,8 @@ impl MemoryStorage for SurrealStorage {
             q = q.bind(("session_id", v));
         }
 
-        let results: Vec<Memory> = q.await?.take(0)?;
-        Ok(results)
+        let results: Vec<DbMemory> = q.await?.take(0)?;
+        Self::decode_memories(results)
     }
 
     async fn search_memories(
@@ -1356,12 +1434,13 @@ impl MemoryStorage for SurrealStorage {
 
     async fn create_task_stream(&self, mut stream: TaskStream) -> Result<TaskStream> {
         let now = Datetime::default();
-        stream.created_at = now.clone();
+        stream.created_at = now;
         stream.last_active = now;
         let key = Uuid::new_v4().to_string();
-        let payload = CreateTaskStreamRecord::from(stream);
+        let payload = DbTaskStream::from(stream);
         self.create_record("task_stream", &key, payload, "create_task_stream")
             .await
+            .and_then(Self::decode_task_stream)
     }
 
     async fn get_task_stream(&self, name: &str) -> Result<Option<TaskStream>> {
@@ -1374,12 +1453,12 @@ impl MemoryStorage for SurrealStorage {
                 ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
             }
         };
-        let result: Vec<TaskStream> = db
+        let result: Vec<DbTaskStream> = db
             .query("SELECT * FROM task_stream WHERE name = $name")
             .bind(("name", name.to_string()))
             .await?
             .take(0)?;
-        Ok(result.into_iter().next())
+        result.into_iter().next().map(Self::decode_task_stream).transpose()
     }
 
     async fn add_to_task_stream(&self, stream_name: &str, mut memory: Memory) -> Result<Memory> {
@@ -1428,9 +1507,10 @@ impl MemoryStorage for SurrealStorage {
             .bind(("now", Datetime::default()))
             .bind(("name", stream_name.to_string()))
             .await?;
-        let updated_stream: Option<TaskStream> = res.take(0)?;
+        let updated_stream: Option<DbTaskStream> = res.take(0)?;
         let updated_stream = updated_stream
             .with_context(|| format!("TaskStream '{}' disappeared during token update", stream_name))?;
+        let updated_stream = Self::decode_task_stream(updated_stream)?;
 
         // Trigger auto-summarization when the running token total crosses 80 % of
         // the model's context budget.  Run inline; the operation is async but
@@ -1485,11 +1565,12 @@ impl MemoryStorage for SurrealStorage {
             stream.id.with_context(|| "TaskStream has no id")?
         };
 
-        let all_memories: Vec<Memory> = db
+        let all_memories: Vec<DbMemory> = db
             .query("SELECT * FROM memory WHERE task_stream_id = $sid ORDER BY importance DESC, created_at DESC")
             .bind(("sid", stream_id))
             .await?
             .take(0)?;
+        let all_memories = Self::decode_memories(all_memories)?;
 
         let mut included = Vec::new();
         let mut tokens_used: u64 = 0;
@@ -1557,8 +1638,8 @@ impl MemoryStorage for SurrealStorage {
             q = q.bind(("user_id", v));
         }
 
-        let results: Vec<TaskStream> = q.await?.take(0)?;
-        Ok(results)
+        let results: Vec<DbTaskStream> = q.await?.take(0)?;
+        Self::decode_task_streams(results)
     }
 
     async fn archive_task_stream(&self, name: &str) -> Result<TaskStream> {
@@ -1574,10 +1655,11 @@ impl MemoryStorage for SurrealStorage {
         let mut res = db
             .query("UPDATE task_stream SET status = $status WHERE name = $name RETURN AFTER")
             .bind(("name", name.to_string()))
-            .bind(("status", TaskStreamStatus::Archived))
+            .bind(("status", TaskStreamStatus::Archived.as_str()))
             .await?;
-        let updated: Option<TaskStream> = res.take(0)?;
-        updated.with_context(|| format!("TaskStream '{}' not found", name))
+        let updated: Option<DbTaskStream> = res.take(0)?;
+        let updated = updated.with_context(|| format!("TaskStream '{}' not found", name))?;
+        Self::decode_task_stream(updated)
     }
 
     async fn pause_task_stream(&self, name: &str) -> Result<TaskStream> {
@@ -1593,10 +1675,11 @@ impl MemoryStorage for SurrealStorage {
         let mut res = db
             .query("UPDATE task_stream SET status = $status WHERE name = $name RETURN AFTER")
             .bind(("name", name.to_string()))
-            .bind(("status", TaskStreamStatus::Paused))
+            .bind(("status", TaskStreamStatus::Paused.as_str()))
             .await?;
-        let updated: Option<TaskStream> = res.take(0)?;
-        updated.with_context(|| format!("TaskStream '{}' not found", name))
+        let updated: Option<DbTaskStream> = res.take(0)?;
+        let updated = updated.with_context(|| format!("TaskStream '{}' not found", name))?;
+        Self::decode_task_stream(updated)
     }
 
     // ── Hybrid BM25 + HNSW Search ─────────────────────────────────────────────
@@ -1655,7 +1738,8 @@ impl MemoryStorage for SurrealStorage {
         if let Some(v) = session_id {
             q = q.bind(("sid", v.to_string()));
         }
-        let bm25_results: Vec<Memory> = q.await?.take(0).unwrap_or_default();
+        let bm25_results: Vec<DbMemory> = q.await?.take(0).unwrap_or_default();
+        let bm25_results = Self::decode_memories(bm25_results)?;
 
         // Merge scores: weighted RRF-style normalisation
         let mut scores: HashMap<String, (Memory, f32)> = HashMap::new();
@@ -1733,7 +1817,8 @@ impl MemoryStorage for SurrealStorage {
         if let Some(v) = session_id {
             q = q.bind(("sid", v.to_string()));
         }
-        let old_memories: Vec<Memory> = q.await?.take(0).unwrap_or_default();
+        let old_memories: Vec<DbMemory> = q.await?.take(0).unwrap_or_default();
+        let old_memories = Self::decode_memories(old_memories)?;
 
         if old_memories.is_empty() {
             return Ok(None);
@@ -1813,13 +1898,14 @@ impl MemoryStorage for SurrealStorage {
                 ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
             }
         };
-        let expired: Vec<Memory> = db
+        let expired: Vec<DbMemory> = db
             .query(
                 "SELECT * FROM memory WHERE valid_until IS NOT NONE AND valid_until < time::now()",
             )
             .await?
             .take(0)
             .unwrap_or_default();
+        let expired = Self::decode_memories(expired)?;
         let count = expired.len() as u64;
         for m in &expired {
             if let Some(id) = &m.id {
@@ -1834,11 +1920,12 @@ impl MemoryStorage for SurrealStorage {
 
     async fn create_mindmap(&self, mut mindmap: MindMap) -> Result<MindMap> {
         mindmap.created_at = Datetime::default();
-        mindmap.updated_at = mindmap.created_at.clone();
+        mindmap.updated_at = mindmap.created_at;
         let key = Uuid::new_v4().to_string();
-        let payload = CreateMindMapRecord::from(mindmap);
+        let payload = DbMindMap::from(mindmap);
         self.create_record("mindmap", &key, payload, "create_mindmap")
             .await
+            .and_then(Self::decode_mindmap)
             .context("Failed to create mindmap")
     }
 
@@ -1871,8 +1958,8 @@ impl MemoryStorage for SurrealStorage {
         if let Some(v) = agent_id {
             q = q.bind(("aid", v.to_string()));
         }
-        let mut results: Vec<MindMap> = q.await?.take(0)?;
-        Ok(results.pop())
+        let mut results: Vec<DbMindMap> = q.await?.take(0)?;
+        results.pop().map(Self::decode_mindmap).transpose()
     }
 
     async fn add_mindmap_node(
@@ -2017,7 +2104,8 @@ impl MemoryStorage for SurrealStorage {
         if let Some(v) = agent_id {
             q = q.bind(("aid", v.to_string()));
         }
-        Ok(q.await?.take(0)?)
+        let results: Vec<DbMindMap> = q.await?.take(0)?;
+        Self::decode_mindmaps(results)
     }
 
     async fn delete_mindmap(
@@ -2035,16 +2123,16 @@ impl MemoryStorage for SurrealStorage {
                 ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
             }
         };
-        if let Some(mm) = self.get_mindmap(name, user_id, agent_id).await? {
-            if let Some(id) = &mm.id {
-                let (table, key) = Self::record_id_parts(id);
-                let _: Option<MindMap> = db
-                    .query("DELETE type::record($table, $key) RETURN BEFORE")
-                    .bind(("table", table))
-                    .bind(("key", key))
-                    .await?
-                    .take(0)?;
-            }
+        if let Some(mm) = self.get_mindmap(name, user_id, agent_id).await?
+            && let Some(id) = &mm.id
+        {
+            let (table, key) = Self::record_id_parts(id);
+            let _: Option<DbMindMap> = db
+                .query("DELETE type::record($table, $key) RETURN BEFORE")
+                .bind(("table", table))
+                .bind(("key", key))
+                .await?
+                .take(0)?;
         }
         Ok(())
     }
@@ -2096,8 +2184,8 @@ impl MemoryStorage for SurrealStorage {
             "SELECT * FROM memory WHERE {} ORDER BY created_at ASC LIMIT 200",
             scope_parts.join(" AND ")
         );
-        let memories: Vec<crate::memory::Memory> =
-            db.query(&sql).await?.take(0).unwrap_or_default();
+        let memories: Vec<DbMemory> = db.query(&sql).await?.take(0).unwrap_or_default();
+        let memories = Self::decode_memories(memories)?;
 
         if memories.len() < 4 {
             return Ok(None); // not enough to compress
@@ -2124,7 +2212,7 @@ impl MemoryStorage for SurrealStorage {
             if let Some(id) = &m.id {
                 let s = Self::record_id_to_string(id);
                 let key = s.split(':').nth(1).unwrap_or(&s).to_string();
-                let _: Option<crate::memory::Memory> = db.delete(("memory", key)).await?;
+                let _: Option<DbMemory> = db.delete(("memory", key)).await?;
             }
         }
 
@@ -2136,9 +2224,7 @@ impl MemoryStorage for SurrealStorage {
             None,
             vec!["auto_summary".to_string()],
         );
-        let stored: Option<crate::memory::Memory> =
-            db.create("memory").content(summary).await?;
-        let result = stored.context("Failed to store auto-summary memory")?;
+        let stored = self.add_memory(summary).await?;
 
         // Update stream summary_count
         let _: Option<serde_json::Value> = db
@@ -2153,7 +2239,7 @@ impl MemoryStorage for SurrealStorage {
             half,
             stream_name
         );
-        Ok(Some(result))
+        Ok(Some(stored))
     }
 
     async fn try_update_persona_mindmap(
@@ -2171,12 +2257,13 @@ impl MemoryStorage for SurrealStorage {
             }
         };
         // Look for a persona mindmap belonging to this user
-        let maps: Vec<MindMap> = db
+        let maps: Vec<DbMindMap> = db
             .query("SELECT * FROM mindmap WHERE user_id = $uid AND map_type = 'radial' LIMIT 1")
             .bind(("uid", user_id.to_string()))
             .await?
             .take(0)
             .unwrap_or_default();
+        let maps = Self::decode_mindmaps(maps)?;
 
         let Some(mm) = maps.into_iter().next() else {
             return Ok(()); // no persona mindmap exists yet
@@ -2448,12 +2535,7 @@ impl SurrealStorage {
         embedding_service: Arc<dyn crate::embeddings::EmbeddingService>,
     ) -> Result<Self> {
         use crate::storage::migrations::run_migrations;
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| format!("{}{}", d.as_secs(), d.subsec_nanos()))
-            .unwrap_or_else(|_| "0".to_string());
-        let dir = std::env::temp_dir().join(format!("surreal-test-{}", ts));
+        let dir = std::env::temp_dir().join(format!("surreal-test-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir)?;
         let path = dir.display().to_string();
 
@@ -2652,25 +2734,16 @@ mod retry_tests {
 
         let sanitized = SurrealStorage::sanitize_explicit_record_content(payload);
         assert!(sanitized["id"].is_none());
-        assert_eq!(sanitized["name"], surrealdb_types::Value::from("example"));
+        assert!(matches!(
+            &sanitized["name"],
+            surrealdb_types::Value::String(value) if value == "example"
+        ));
         assert!(sanitized["created_at"].is_datetime());
         assert!(sanitized["metadata"].is_none());
-        assert_eq!(sanitized["nested"]["ok"], surrealdb_types::Value::from(true));
-    }
-
-    #[tokio::test]
-    async fn test_replace_record_uses_retry_wrapper() {
-        let storage = mock_storage();
-
-        // Test that replace_record compiles with retry wrapper
-        let result: Result<serde_json::Value> = storage.replace_record(
-            "test_table:test_id",
-            serde_json::json!({"field": "value"}),
-            "test_operation"
-        ).await;
-
-        // Expect failure (no real DB), but method uses retry wrapper
-        assert!(result.is_err());
+        assert!(matches!(
+            &sanitized["nested"]["ok"],
+            surrealdb_types::Value::Bool(true)
+        ));
     }
 
     fn mock_storage() -> SurrealStorage {

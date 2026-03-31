@@ -11,85 +11,73 @@
 //! - task_stream includes all struct fields upfront to avoid schema mismatches.
 //! - memory.metadata is FLEXIBLE to allow arbitrary JSON metadata objects.
 
+use crate::{
+    memory::{MemoryScope, MemoryType},
+    mindmap::MapType,
+    task_stream::TaskStreamStatus,
+};
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
+use std::{future::Future, pin::Pin};
 use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
-use surrealdb::types::Datetime;
+use surrealdb::types::{Datetime, RecordId, RecordIdKey};
 use surrealdb_types::SurrealValue;
+
+type MigrationFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+type RepairFn = for<'a> fn(&'a Surreal<Any>) -> MigrationFuture<'a>;
 
 pub struct Migration {
     pub version: u32,
     pub name: &'static str,
     pub sql: &'static str,
+    pub repair: Option<RepairFn>,
+    pub checksum_source: &'static str,
+}
+
+impl Migration {
+    const fn sql(version: u32, name: &'static str, sql: &'static str) -> Self {
+        Self {
+            version,
+            name,
+            sql,
+            repair: None,
+            checksum_source: sql,
+        }
+    }
+
+    const fn repair(version: u32, name: &'static str, repair: RepairFn, checksum_source: &'static str) -> Self {
+        Self {
+            version,
+            name,
+            sql: "",
+            repair: Some(repair),
+            checksum_source,
+        }
+    }
 }
 
 static MIGRATIONS: &[Migration] = &[
-    Migration {
-        version: 1,
-        name: "initial_entity_relation_schema",
-        sql: MIGRATION_V1_SQL,
-    },
-    Migration {
-        version: 2,
-        name: "scoped_memory_table",
-        sql: MIGRATION_V2_SQL,
-    },
-    Migration {
-        version: 3,
-        name: "task_stream_table",
-        sql: MIGRATION_V3_SQL,
-    },
-    Migration {
-        version: 4,
-        name: "memory_history_table",
-        sql: MIGRATION_V4_SQL,
-    },
-    Migration {
-        version: 5,
-        name: "hnsw_vector_indexes",
-        sql: MIGRATION_V5_SQL,
-    },
-    Migration {
-        version: 6,
-        name: "mindmap_table_and_fulltext_indexes",
-        sql: MIGRATION_V6_SQL,
-    },
-    Migration {
-        version: 7,
-        name: "task_stream_auto_summarization_fields",
-        sql: MIGRATION_V7_SQL,
-    },
-    Migration {
-        version: 8,
-        name: "memory_metadata_flexible",
-        sql: MIGRATION_V8_SQL,
-    },
-    Migration {
-        version: 9,
-        name: "mindmap_nodes_edges_flexible",
-        sql: MIGRATION_V9_SQL,
-    },
-    Migration {
-        version: 10,
-        name: "mindmap_nodes_edges_flexible_overwrite",
-        sql: MIGRATION_V10_SQL,
-    },
-    Migration {
-        version: 11,
-        name: "mindmap_nodes_edges_remove_redefine",
-        sql: MIGRATION_V11_SQL,
-    },
-    Migration {
-        version: 12,
-        name: "mindmap_node_element_fields_flexible",
-        sql: MIGRATION_V12_SQL,
-    },
-    Migration {
-        version: 13,
-        name: "mindmap_edge_nested_fields",
-        sql: MIGRATION_V13_SQL,
-    },
+    Migration::sql(1, "initial_entity_relation_schema", MIGRATION_V1_SQL),
+    Migration::sql(2, "scoped_memory_table", MIGRATION_V2_SQL),
+    Migration::sql(3, "task_stream_table", MIGRATION_V3_SQL),
+    Migration::sql(4, "memory_history_table", MIGRATION_V4_SQL),
+    Migration::sql(5, "hnsw_vector_indexes", MIGRATION_V5_SQL),
+    Migration::sql(6, "mindmap_table_and_fulltext_indexes", MIGRATION_V6_SQL),
+    Migration::sql(7, "task_stream_auto_summarization_fields", MIGRATION_V7_SQL),
+    Migration::sql(8, "memory_metadata_flexible", MIGRATION_V8_SQL),
+    Migration::sql(9, "mindmap_nodes_edges_flexible", MIGRATION_V9_SQL),
+    Migration::sql(10, "mindmap_nodes_edges_flexible_overwrite", MIGRATION_V10_SQL),
+    Migration::sql(11, "mindmap_nodes_edges_remove_redefine", MIGRATION_V11_SQL),
+    Migration::sql(12, "mindmap_node_element_fields_flexible", MIGRATION_V12_SQL),
+    Migration::sql(13, "mindmap_edge_nested_fields", MIGRATION_V13_SQL),
+    Migration::repair(
+        14,
+        "legacy_enum_string_normalization",
+        repair_legacy_enum_data_migration,
+        "legacy_enum_string_normalization_v14",
+    ),
+    Migration::sql(15, "enum_fields_as_strings", MIGRATION_V15_SQL),
 ];
 
 // ── v1: Baseline entity + relation schema ─────────────────────────────────────
@@ -298,6 +286,276 @@ DEFINE FIELD IF NOT EXISTS edges.*.label ON mindmap TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS edges.*.directed ON mindmap TYPE bool;
 ";
 
+// ── v15: Persist enum-like fields as canonical strings ──────────────────────
+
+const MIGRATION_V15_SQL: &str = "
+DEFINE FIELD OVERWRITE scope ON memory TYPE string DEFAULT 'global';
+DEFINE FIELD OVERWRITE memory_type ON memory TYPE string DEFAULT 'semantic';
+DEFINE FIELD OVERWRITE status ON task_stream TYPE string DEFAULT 'active';
+DEFINE FIELD OVERWRITE map_type ON mindmap TYPE string DEFAULT 'radial';
+";
+
+#[derive(Debug, Clone)]
+pub struct RepairChange {
+    pub table: &'static str,
+    pub field: &'static str,
+    pub record: RecordId,
+    pub record_id: String,
+    pub raw_value: serde_json::Value,
+    pub normalized_value: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RepairIssue {
+    pub table: &'static str,
+    pub field: &'static str,
+    pub record_id: String,
+    pub raw_value: serde_json::Value,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RepairReport {
+    pub scanned_records: usize,
+    pub changes: Vec<RepairChange>,
+    pub issues: Vec<RepairIssue>,
+    pub repairs_applied: usize,
+}
+
+impl RepairReport {
+    pub fn planned_repairs(&self) -> usize {
+        self.changes.len()
+    }
+
+    pub fn has_issues(&self) -> bool {
+        !self.issues.is_empty()
+    }
+}
+
+#[derive(Debug, serde::Deserialize, SurrealValue)]
+struct RawMemoryEnumRecord {
+    id: RecordId,
+    #[serde(default)]
+    scope: serde_json::Value,
+    #[serde(default)]
+    memory_type: serde_json::Value,
+}
+
+#[derive(Debug, serde::Deserialize, SurrealValue)]
+struct RawTaskStreamEnumRecord {
+    id: RecordId,
+    #[serde(default)]
+    status: serde_json::Value,
+}
+
+#[derive(Debug, serde::Deserialize, SurrealValue)]
+struct RawMindMapEnumRecord {
+    id: RecordId,
+    #[serde(default)]
+    map_type: serde_json::Value,
+}
+
+pub async fn inspect_legacy_enum_data(db: &Surreal<Any>) -> Result<RepairReport> {
+    let mut report = RepairReport::default();
+
+    let memory_rows: Vec<RawMemoryEnumRecord> = db
+        .query("SELECT id, scope, memory_type FROM memory")
+        .await
+        .context("Failed to inspect memory enum fields")?
+        .take(0)
+        .unwrap_or_default();
+    report.scanned_records += memory_rows.len();
+    for row in memory_rows {
+        inspect_enum_field(
+            &mut report,
+            "memory",
+            "scope",
+            row.id.clone(),
+            row.scope,
+            |raw| MemoryScope::parse_str(raw).map(|value| value.as_str().to_string()),
+        );
+        inspect_enum_field(
+            &mut report,
+            "memory",
+            "memory_type",
+            row.id,
+            row.memory_type,
+            |raw| MemoryType::parse_str(raw).map(|value| value.as_str().to_string()),
+        );
+    }
+
+    let task_stream_rows: Vec<RawTaskStreamEnumRecord> = db
+        .query("SELECT id, status FROM task_stream")
+        .await
+        .context("Failed to inspect task_stream enum fields")?
+        .take(0)
+        .unwrap_or_default();
+    report.scanned_records += task_stream_rows.len();
+    for row in task_stream_rows {
+        inspect_enum_field(
+            &mut report,
+            "task_stream",
+            "status",
+            row.id,
+            row.status,
+            |raw| TaskStreamStatus::parse_str(raw).map(|value| value.as_str().to_string()),
+        );
+    }
+
+    let mindmap_rows: Vec<RawMindMapEnumRecord> = db
+        .query("SELECT id, map_type FROM mindmap")
+        .await
+        .context("Failed to inspect mindmap enum fields")?
+        .take(0)
+        .unwrap_or_default();
+    report.scanned_records += mindmap_rows.len();
+    for row in mindmap_rows {
+        inspect_enum_field(
+            &mut report,
+            "mindmap",
+            "map_type",
+            row.id,
+            row.map_type,
+            |raw| MapType::parse_str(raw).map(|value| value.as_str().to_string()),
+        );
+    }
+
+    Ok(report)
+}
+
+pub async fn repair_legacy_enum_data(db: &Surreal<Any>) -> Result<RepairReport> {
+    let mut report = inspect_legacy_enum_data(db).await?;
+    if report.has_issues() {
+        anyhow::bail!(format_repair_issues(&report.issues));
+    }
+
+    for change in &report.changes {
+        apply_repair_change(db, change).await.with_context(|| {
+            format!(
+                "Failed to normalize {}.{} for {}",
+                change.table, change.field, change.record_id
+            )
+        })?;
+        report.repairs_applied += 1;
+    }
+
+    Ok(report)
+}
+
+fn repair_legacy_enum_data_migration(db: &Surreal<Any>) -> MigrationFuture<'_> {
+    Box::pin(async move { repair_legacy_enum_data(db).await.map(|_| ()) })
+}
+
+fn inspect_enum_field(
+    report: &mut RepairReport,
+    table: &'static str,
+    field: &'static str,
+    record: RecordId,
+    raw_value: serde_json::Value,
+    canonicalize: impl Fn(&str) -> std::result::Result<String, String>,
+) {
+    match normalize_enum_value(table, field, &record, &raw_value, canonicalize) {
+        Ok(Some(normalized_value)) => report.changes.push(RepairChange {
+            table,
+            field,
+            record_id: record_id_to_string(&record),
+            record,
+            raw_value,
+            normalized_value,
+        }),
+        Ok(None) => {}
+        Err(issue) => report.issues.push(issue),
+    }
+}
+
+fn normalize_enum_value(
+    table: &'static str,
+    field: &'static str,
+    record: &RecordId,
+    raw_value: &serde_json::Value,
+    canonicalize: impl Fn(&str) -> std::result::Result<String, String>,
+) -> std::result::Result<Option<String>, RepairIssue> {
+    let record_id = record_id_to_string(record);
+
+    let candidate = match raw_value {
+        serde_json::Value::String(value) => value.trim().to_string(),
+        serde_json::Value::Object(map) if map.len() == 1 => map
+            .keys()
+            .next()
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default(),
+        other => {
+            return Err(RepairIssue {
+                table,
+                field,
+                record_id,
+                raw_value: other.clone(),
+                message: format!(
+                    "unsupported legacy enum shape for {}.{}: expected string or single-key object",
+                    table, field
+                ),
+            });
+        }
+    };
+
+    let canonical_input = candidate.to_lowercase();
+    let normalized_value = canonicalize(&canonical_input).map_err(|message| RepairIssue {
+        table,
+        field,
+        record_id,
+        raw_value: raw_value.clone(),
+        message,
+    })?;
+
+    if *raw_value == serde_json::Value::String(normalized_value.clone()) {
+        Ok(None)
+    } else {
+        Ok(Some(normalized_value))
+    }
+}
+
+async fn apply_repair_change(db: &Surreal<Any>, change: &RepairChange) -> Result<()> {
+    let sql = match (change.table, change.field) {
+        ("memory", "scope") => "UPDATE $record SET scope = $value",
+        ("memory", "memory_type") => "UPDATE $record SET memory_type = $value",
+        ("task_stream", "status") => "UPDATE $record SET status = $value",
+        ("mindmap", "map_type") => "UPDATE $record SET map_type = $value",
+        _ => anyhow::bail!("Unsupported repair target {}.{}", change.table, change.field),
+    };
+
+    let response = db
+        .query(sql)
+        .bind(("record", change.record.clone()))
+        .bind(("value", change.normalized_value.clone()))
+        .await?;
+    response.check()?;
+    Ok(())
+}
+
+fn record_id_to_string(id: &RecordId) -> String {
+    let key = match &id.key {
+        RecordIdKey::String(value) => value.clone(),
+        RecordIdKey::Number(value) => value.to_string(),
+        RecordIdKey::Uuid(value) => value.to_string(),
+        other => format!("{other:?}"),
+    };
+    format!("{}:{}", id.table.as_str(), key)
+}
+
+fn format_repair_issues(issues: &[RepairIssue]) -> String {
+    let details = issues
+        .iter()
+        .map(|issue| {
+            format!(
+                "{}.{} {} raw={} error={}",
+                issue.table, issue.field, issue.record_id, issue.raw_value, issue.message
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!("Legacy enum normalization failed: {}", details)
+}
+
 // ── Runner ────────────────────────────────────────────────────────────────────
 
 pub async fn run_migrations(db: &Surreal<Any>) -> Result<()> {
@@ -328,7 +586,7 @@ async fn get_current_version(db: &Surreal<Any>) -> Result<u32> {
 }
 
 async fn apply_migration(db: &Surreal<Any>, migration: &Migration) -> Result<()> {
-    let digest = Sha256::digest(migration.sql.as_bytes());
+    let digest = Sha256::digest(migration.checksum_source.as_bytes());
     let checksum: String = digest.iter().map(|b| format!("{b:02x}")).collect();
     tracing::info!(
         "Applying migration v{}: {} (checksum: {})",
@@ -337,13 +595,19 @@ async fn apply_migration(db: &Surreal<Any>, migration: &Migration) -> Result<()>
         &checksum[..8]
     );
 
-    let response = db
-        .query(migration.sql)
-        .await
-        .with_context(|| format!("SQL error in migration v{}", migration.version))?;
-    response
-        .check()
-        .with_context(|| format!("Migration v{} was rejected by SurrealDB", migration.version))?;
+    if !migration.sql.trim().is_empty() {
+        let response = db
+            .query(migration.sql)
+            .await
+            .with_context(|| format!("SQL error in migration v{}", migration.version))?;
+        response
+            .check()
+            .with_context(|| format!("Migration v{} was rejected by SurrealDB", migration.version))?;
+    }
+
+    if let Some(repair) = migration.repair {
+        repair(db).await?;
+    }
 
     let applied_at = Datetime::default();
     db.query(
@@ -367,21 +631,30 @@ struct SchemaVersion {
 
 #[cfg(test)]
 mod tests {
-    use super::{MIGRATION_V11_SQL, MIGRATION_V12_SQL, MIGRATION_V13_SQL, MIGRATIONS};
+    use super::{
+        MIGRATION_V11_SQL, MIGRATION_V12_SQL, MIGRATION_V13_SQL, MIGRATION_V15_SQL, MIGRATIONS,
+        RawMemoryEnumRecord, RawMindMapEnumRecord, RawTaskStreamEnumRecord,
+        apply_migration, inspect_legacy_enum_data, normalize_enum_value,
+    };
+    use crate::{MapType, TaskStreamStatus};
+    use surrealdb::Surreal;
+    use surrealdb::engine::any::connect;
+    use surrealdb::types::{Datetime, RecordId};
+    use uuid::Uuid;
 
     #[test]
-    fn migration_v13_is_registered() {
+    fn migration_v15_is_registered() {
         let last = MIGRATIONS.last().expect("at least one migration");
-        assert_eq!(last.version, 13);
-        assert_eq!(last.name, "mindmap_edge_nested_fields");
-        assert_eq!(last.sql, MIGRATION_V13_SQL);
+        assert_eq!(last.version, 15);
+        assert_eq!(last.name, "enum_fields_as_strings");
+        assert_eq!(last.sql, MIGRATION_V15_SQL);
     }
 
     #[test]
     fn migration_v12_covers_nested_mindmap_fields() {
         assert!(MIGRATION_V11_SQL.contains("DEFINE FIELD nodes ON mindmap"));
-        assert!(MIGRATION_V12_SQL.contains("DEFINE FIELD nodes.* ON mindmap"));
-        assert!(MIGRATION_V12_SQL.contains("DEFINE FIELD edges.* ON mindmap"));
+        assert!(MIGRATION_V12_SQL.contains("DEFINE FIELD IF NOT EXISTS nodes.* ON mindmap"));
+        assert!(MIGRATION_V12_SQL.contains("DEFINE FIELD IF NOT EXISTS edges.* ON mindmap"));
         assert!(MIGRATION_V12_SQL.contains("DEFINE FIELD IF NOT EXISTS nodes.*.metadata"));
         assert!(!MIGRATION_V12_SQL.contains("FLEXIBLE"));
     }
@@ -392,5 +665,184 @@ mod tests {
         assert!(MIGRATION_V13_SQL.contains("DEFINE FIELD IF NOT EXISTS edges.*.to_id"));
         assert!(MIGRATION_V13_SQL.contains("DEFINE FIELD IF NOT EXISTS edges.*.label"));
         assert!(MIGRATION_V13_SQL.contains("DEFINE FIELD IF NOT EXISTS edges.*.directed"));
+    }
+
+    #[test]
+    fn normalize_enum_value_accepts_legacy_object_shape() {
+        let record = RecordId::new("mindmap", "persona");
+        let raw = serde_json::json!({"Radial": {}});
+        let normalized = normalize_enum_value("mindmap", "map_type", &record, &raw, |value| {
+            MapType::parse_str(value).map(|parsed| parsed.as_str().to_string())
+        })
+        .expect("legacy enum normalizes");
+
+        assert_eq!(normalized.as_deref(), Some("radial"));
+    }
+
+    #[test]
+    fn normalize_enum_value_rejects_unknown_value() {
+        let record = RecordId::new("task_stream", "alpha");
+        let raw = serde_json::json!({"UnknownStatus": {}});
+        let issue = normalize_enum_value("task_stream", "status", &record, &raw, |value| {
+            TaskStreamStatus::parse_str(value).map(|parsed| parsed.as_str().to_string())
+        })
+        .expect_err("unknown status should fail");
+
+        assert_eq!(issue.table, "task_stream");
+        assert_eq!(issue.field, "status");
+    }
+
+    #[tokio::test]
+    async fn repair_migration_normalizes_legacy_rows() {
+        let db = make_test_db().await;
+
+        for migration in MIGRATIONS.iter().filter(|migration| migration.version <= 13) {
+            apply_migration(&db, migration)
+                .await
+                .expect("apply setup migration");
+        }
+
+        seed_legacy_rows(&db).await;
+
+        let report = inspect_legacy_enum_data(&db)
+            .await
+            .expect("inspect legacy rows");
+        assert_eq!(report.planned_repairs(), 4);
+        assert!(!report.has_issues());
+
+        for migration in MIGRATIONS.iter().filter(|migration| migration.version >= 14) {
+            apply_migration(&db, migration)
+                .await
+                .expect("apply repair migration");
+        }
+
+        let repaired_memory: Vec<RawMemoryEnumRecord> = db
+            .query("SELECT id, scope, memory_type FROM memory")
+            .await
+            .expect("query memory")
+            .take(0)
+            .unwrap_or_default();
+        assert_eq!(repaired_memory.len(), 1);
+        assert_eq!(repaired_memory[0].scope, serde_json::Value::String("global".to_string()));
+        assert_eq!(
+            repaired_memory[0].memory_type,
+            serde_json::Value::String("semantic".to_string())
+        );
+
+        let repaired_streams: Vec<RawTaskStreamEnumRecord> = db
+            .query("SELECT id, status FROM task_stream")
+            .await
+            .expect("query task_stream")
+            .take(0)
+            .unwrap_or_default();
+        assert_eq!(
+            repaired_streams[0].status,
+            serde_json::Value::String("active".to_string())
+        );
+
+        let repaired_maps: Vec<RawMindMapEnumRecord> = db
+            .query("SELECT id, map_type FROM mindmap")
+            .await
+            .expect("query mindmap")
+            .take(0)
+            .unwrap_or_default();
+        assert_eq!(
+            repaired_maps[0].map_type,
+            serde_json::Value::String("radial".to_string())
+        );
+    }
+
+    async fn make_test_db() -> Surreal<surrealdb::engine::any::Any> {
+        let path = std::env::temp_dir().join(format!("migration-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&path).expect("create temp dir");
+        let db = connect(format!("rocksdb://{}", path.display()))
+            .await
+            .expect("connect embedded surrealdb");
+        db.use_ns("test").use_db("test").await.expect("use ns/db");
+        db
+    }
+
+    async fn seed_legacy_rows(db: &Surreal<surrealdb::engine::any::Any>) {
+        let now = Datetime::default();
+
+        let response = db
+            .query(
+                "CREATE memory:test_memory CONTENT {
+                    content: $content,
+                    embedding: NONE,
+                    scope: { Global: {} },
+                    memory_type: { Semantic: {} },
+                    user_id: $user_id,
+                    session_id: NONE,
+                    agent_id: NONE,
+                    task_stream_id: NONE,
+                    categories: [],
+                    metadata: NONE,
+                    token_count: NONE,
+                    importance: 0.5,
+                    access_count: 0,
+                    last_accessed_at: NONE,
+                    valid_until: NONE,
+                    version: 1,
+                    created_at: $now,
+                    updated_at: $now
+                }"
+            )
+            .bind(("content", "legacy memory"))
+            .bind(("user_id", "user-1"))
+            .bind(("now", now))
+            .await
+            .expect("seed memory");
+        response.check().expect("memory seed accepted");
+
+        let response = db
+            .query(
+                "CREATE task_stream:test_stream CONTENT {
+                    name: $name,
+                    description: $description,
+                    agent_id: $agent_id,
+                    user_id: $user_id,
+                    status: { Active: {} },
+                    total_tokens: 0,
+                    auto_summarize: true,
+                    summary_count: 0,
+                    model_id: NONE,
+                    created_at: $now,
+                    last_active: $now
+                }"
+            )
+            .bind(("name", "legacy-stream"))
+            .bind(("description", "legacy stream"))
+            .bind(("agent_id", "agent-1"))
+            .bind(("user_id", "user-1"))
+            .bind(("now", now))
+            .await
+            .expect("seed task_stream");
+        response.check().expect("task_stream seed accepted");
+
+        let response = db
+            .query(
+                "CREATE mindmap:test_map CONTENT {
+                    name: $name,
+                    description: $description,
+                    map_type: { Radial: {} },
+                    agent_id: $agent_id,
+                    user_id: $user_id,
+                    task_stream_id: NONE,
+                    tags: [],
+                    nodes: [],
+                    edges: [],
+                    created_at: $now,
+                    updated_at: $now
+                }"
+            )
+            .bind(("name", "legacy-map"))
+            .bind(("description", "legacy map"))
+            .bind(("agent_id", "agent-1"))
+            .bind(("user_id", "user-1"))
+            .bind(("now", now))
+            .await
+            .expect("seed mindmap");
+        response.check().expect("mindmap seed accepted");
     }
 }

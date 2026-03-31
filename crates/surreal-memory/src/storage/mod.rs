@@ -73,6 +73,7 @@ pub trait MemoryStorage: Send + Sync {
 
     /// Hybrid BM25 + HNSW vector search. Scores merged as:
     /// `vector_weight * vec_score + bm25_weight * bm25_score`.
+    #[allow(clippy::too_many_arguments)]
     async fn hybrid_search_memories(
         &self,
         query: &str,

@@ -8,6 +8,7 @@
 //! - `Temporal` — concept evolution across time periods
 
 use serde::{Deserialize, Serialize};
+use std::{fmt, str::FromStr};
 use surrealdb::types::{Datetime, RecordId};
 use surrealdb_types::SurrealValue;
 
@@ -26,6 +27,43 @@ pub enum MapType {
     Tree,
     /// Temporal / timeline — branches represent time periods.
     Temporal,
+}
+
+impl MapType {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Radial => "radial",
+            Self::Concept => "concept",
+            Self::Argument => "argument",
+            Self::Tree => "tree",
+            Self::Temporal => "temporal",
+        }
+    }
+
+    pub fn parse_str(raw: &str) -> Result<Self, String> {
+        match raw {
+            "radial" => Ok(Self::Radial),
+            "concept" => Ok(Self::Concept),
+            "argument" => Ok(Self::Argument),
+            "tree" => Ok(Self::Tree),
+            "temporal" => Ok(Self::Temporal),
+            _ => Err(format!("unknown map_type '{raw}'")),
+        }
+    }
+}
+
+impl fmt::Display for MapType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for MapType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse_str(s)
+    }
 }
 
 /// A node within a mindmap.
@@ -113,9 +151,33 @@ impl MindMap {
             tags: vec![],
             nodes: vec![root_node],
             edges: vec![],
-            created_at: now.clone(),
+            created_at: now,
             updated_at: now,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MapType;
+
+    #[test]
+    fn map_type_codec_round_trips() {
+        for map_type in [
+            MapType::Radial,
+            MapType::Concept,
+            MapType::Argument,
+            MapType::Tree,
+            MapType::Temporal,
+        ] {
+            assert_eq!(MapType::parse_str(map_type.as_str()).unwrap(), map_type);
+        }
+    }
+
+    #[test]
+    fn map_type_codec_rejects_unknown_values() {
+        assert!(MapType::parse_str("Radial").is_err());
+        assert!(MapType::parse_str("unknown").is_err());
     }
 }
 

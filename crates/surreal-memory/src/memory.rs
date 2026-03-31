@@ -4,6 +4,7 @@
 //! full audit trail and semantic deduplication support.
 
 use serde::{Deserialize, Serialize};
+use std::{fmt, str::FromStr};
 use surrealdb::types::{Datetime, RecordId};
 use surrealdb_types::SurrealValue;
 
@@ -24,6 +25,43 @@ pub enum MemoryScope {
     Task,
 }
 
+impl MemoryScope {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Agent => "agent",
+            Self::User => "user",
+            Self::Session => "session",
+            Self::Task => "task",
+        }
+    }
+
+    pub fn parse_str(raw: &str) -> Result<Self, String> {
+        match raw {
+            "global" => Ok(Self::Global),
+            "agent" => Ok(Self::Agent),
+            "user" => Ok(Self::User),
+            "session" => Ok(Self::Session),
+            "task" => Ok(Self::Task),
+            _ => Err(format!("unknown memory scope '{raw}'")),
+        }
+    }
+}
+
+impl fmt::Display for MemoryScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for MemoryScope {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse_str(s)
+    }
+}
+
 /// Cognitive memory type — determines storage and retrieval behaviour.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SurrealValue, Default)]
 #[serde(rename_all = "lowercase")]
@@ -37,6 +75,41 @@ pub enum MemoryType {
     Procedural,
     /// Connections and associations between concepts
     Associative,
+}
+
+impl MemoryType {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Episodic => "episodic",
+            Self::Semantic => "semantic",
+            Self::Procedural => "procedural",
+            Self::Associative => "associative",
+        }
+    }
+
+    pub fn parse_str(raw: &str) -> Result<Self, String> {
+        match raw {
+            "episodic" => Ok(Self::Episodic),
+            "semantic" => Ok(Self::Semantic),
+            "procedural" => Ok(Self::Procedural),
+            "associative" => Ok(Self::Associative),
+            _ => Err(format!("unknown memory type '{raw}'")),
+        }
+    }
+}
+
+impl fmt::Display for MemoryType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for MemoryType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse_str(s)
+    }
 }
 
 /// A single memory unit — the core data structure for the mem0-compatible layer.
@@ -114,7 +187,7 @@ impl Memory {
             last_accessed_at: None,
             valid_until: None,
             version: 1,
-            created_at: now.clone(),
+            created_at: now,
             updated_at: now,
         }
     }
@@ -135,4 +208,42 @@ pub struct MemoryHistory {
     pub changed_at: Datetime,
     /// One of: `created`, `updated`, `deleted`
     pub change_type: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MemoryScope, MemoryType};
+
+    #[test]
+    fn memory_scope_codec_round_trips() {
+        for scope in [
+            MemoryScope::Global,
+            MemoryScope::Agent,
+            MemoryScope::User,
+            MemoryScope::Session,
+            MemoryScope::Task,
+        ] {
+            assert_eq!(MemoryScope::parse_str(scope.as_str()).unwrap(), scope);
+        }
+    }
+
+    #[test]
+    fn memory_type_codec_round_trips() {
+        for memory_type in [
+            MemoryType::Episodic,
+            MemoryType::Semantic,
+            MemoryType::Procedural,
+            MemoryType::Associative,
+        ] {
+            assert_eq!(MemoryType::parse_str(memory_type.as_str()).unwrap(), memory_type);
+        }
+    }
+
+    #[test]
+    fn memory_codecs_reject_unknown_values() {
+        assert!(MemoryScope::parse_str("Global").is_err());
+        assert!(MemoryType::parse_str("Semantic").is_err());
+        assert!(MemoryScope::parse_str("unknown").is_err());
+        assert!(MemoryType::parse_str("unknown").is_err());
+    }
 }

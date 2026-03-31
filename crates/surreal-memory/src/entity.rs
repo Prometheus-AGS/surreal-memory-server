@@ -29,7 +29,7 @@ impl Entity {
             entity_type,
             observations,
             embedding: None,
-            created_at: now.clone(),
+            created_at: now,
             updated_at: now,
         }
     }
