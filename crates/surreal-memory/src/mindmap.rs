@@ -138,12 +138,111 @@ impl MindMap {
         }
     }
 
+    /// Validate structural integrity of the mindmap.
+    ///
+    /// Checks performed:
+    /// - No duplicate node IDs.
+    /// - Every `parent_id` reference points to an existing node.
+    /// - Every edge `from_id` / `to_id` references an existing node.
+    /// - Radial and Tree maps have exactly one root node (node without a `parent_id`).
+    pub fn validate(&self) -> anyhow::Result<()> {
+        use std::collections::HashSet;
+
+        // Collect all node IDs; detect duplicates in one pass.
+        let mut seen: HashSet<&str> = HashSet::new();
+        for node in &self.nodes {
+            if !seen.insert(node.id.as_str()) {
+                anyhow::bail!("Duplicate node id '{}' in mindmap '{}'", node.id, self.name);
+            }
+        }
+
+        // Validate parent references.
+        for node in &self.nodes {
+            if let Some(parent_id) = &node.parent_id {
+                anyhow::ensure!(
+                    seen.contains(parent_id.as_str()),
+                    "Node '{}' references unknown parent '{}' in mindmap '{}'",
+                    node.id,
+                    parent_id,
+                    self.name
+                );
+            }
+        }
+
+        // Validate edge endpoints.
+        for edge in &self.edges {
+            if !seen.contains(edge.from_id.as_str()) {
+                anyhow::bail!(
+                    "Edge from_id '{}' references unknown node in mindmap '{}'",
+                    edge.from_id,
+                    self.name
+                );
+            }
+            if !seen.contains(edge.to_id.as_str()) {
+                anyhow::bail!(
+                    "Edge to_id '{}' references unknown node in mindmap '{}'",
+                    edge.to_id,
+                    self.name
+                );
+            }
+        }
+
+        // Tree and Radial maps must have exactly one root.
+        if matches!(self.map_type, MapType::Radial | MapType::Tree) {
+            let root_count = self.nodes.iter().filter(|n| n.parent_id.is_none()).count();
+            if root_count != 1 {
+                anyhow::bail!(
+                    "Mindmap '{}' (type {:?}) must have exactly 1 root node, found {}",
+                    self.name,
+                    self.map_type,
+                    root_count
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Compute the depth of a node by walking the `parent_id` chain.
+    ///
+    /// Returns 0 for root nodes.  Cycles are broken after visiting more nodes
+    /// than exist in the map.
+    fn depth_of(&self, node_id: &str) -> usize {
+        let mut depth = 0usize;
+        let mut current = node_id;
+        // Safety cap: stop after visiting more hops than there are nodes.
+        let limit = self.nodes.len();
+        while depth < limit {
+            match self.nodes.iter().find(|n| n.id == current) {
+                Some(n) => match &n.parent_id {
+                    Some(parent) => {
+                        depth += 1;
+                        current = parent.as_str();
+                    }
+                    None => break,
+                },
+                None => break,
+            }
+        }
+        depth
+    }
+
     fn to_mermaid(&self) -> String {
+        use std::collections::HashSet;
+
         let mut out = String::from("graph TD\n");
+
+        // Emit node declarations.
         for node in &self.nodes {
             let safe_id = node.id.replace([':', '-', '.', ' '], "_");
             out.push_str(&format!("    {}[\"{}\"]\n", safe_id, node.label));
         }
+
+        // Track emitted (from, to) pairs to avoid duplicates between explicit
+        // edges and the implicit parent→child edges derived from node.parent_id.
+        let mut emitted: HashSet<(String, String)> = HashSet::new();
+
+        // Emit explicit edges first.
         for edge in &self.edges {
             let from = edge.from_id.replace([':', '-', '.', ' '], "_");
             let to = edge.to_id.replace([':', '-', '.', ' '], "_");
@@ -152,15 +251,20 @@ impl MindMap {
             } else {
                 out.push_str(&format!("    {} --> {}\n", from, to));
             }
+            emitted.insert((from, to));
         }
-        // Also add parent→child edges from node.parent_id
+
+        // Emit implicit parent→child edges only when not already covered above.
         for node in &self.nodes {
             if let Some(parent_id) = &node.parent_id {
                 let parent = parent_id.replace([':', '-', '.', ' '], "_");
                 let child = node.id.replace([':', '-', '.', ' '], "_");
-                out.push_str(&format!("    {} --> {}\n", parent, child));
+                if emitted.insert((parent.clone(), child.clone())) {
+                    out.push_str(&format!("    {} --> {}\n", parent, child));
+                }
             }
         }
+
         out
     }
 
@@ -172,12 +276,10 @@ impl MindMap {
         out.push_str(&format!("**Type:** {:?}\n\n", self.map_type));
         out.push_str("## Nodes\n\n");
         for node in &self.nodes {
-            let indent = if node.parent_id.is_some() {
-                "  - "
-            } else {
-                "- "
-            };
-            out.push_str(&format!("{}`{}` — {}\n", indent, node.id, node.label));
+            // Compute actual nesting depth by walking the parent_id chain.
+            let depth = self.depth_of(&node.id);
+            let indent = "  ".repeat(depth);
+            out.push_str(&format!("{}- `{}` — {}\n", indent, node.id, node.label));
         }
         if !self.edges.is_empty() {
             out.push_str("\n## Edges\n\n");

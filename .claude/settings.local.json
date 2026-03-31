@@ -16,7 +16,13 @@
       "Bash(killall surreal-memory-server:*)",
       "Bash(chmod +x /Users/gqadonis/Projects/references/surreal-memory-server/scripts/test-mindmaps-taskstreams.sh)",
       "Bash(/Users/gqadonis/Projects/references/surreal-memory-server/scripts/test-mindmaps-taskstreams.sh)",
-      "Bash(tee /tmp/build.log)"
+      "Bash(tee /tmp/build.log)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:surrealdb.com)",
+      "Bash(python3 -m json.tool)",
+      "Bash(docker exec:*)",
+      "Bash(git add:*)"
     ]
   }
 }

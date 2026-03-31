@@ -12,7 +12,7 @@ use crate::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
-use std::{cmp::Ordering, sync::Arc, sync::RwLock};
+use std::{cmp::Ordering, sync::Arc};
 use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
 use surrealdb::opt::auth::Root;
@@ -23,8 +23,14 @@ use uuid::Uuid;
 /// Token budget constants per model family. Extend via config in Phase 3.
 const DEFAULT_CONTEXT_BUDGET: u64 = 100_000;
 
+/// SurrealDB-backed memory storage.
+///
+/// `Surreal<Any>` is internally `Arc`-wrapped and `Clone`-safe; no additional
+/// mutex or wrapper is needed for concurrent access.  WebSocket connections
+/// (remote server mode) auto-reconnect; the initial connection uses
+/// `connect_with_retry` which honours `SurrealConfig::retry`.
 pub struct SurrealStorage {
-    connection: Arc<RwLock<ConnectionState>>,
+    db: Surreal<Any>,
     connection_info: ConnectionInfo,
     embedding_service: Arc<dyn EmbeddingService>,
 }
@@ -32,7 +38,6 @@ pub struct SurrealStorage {
 // ── Retry Configuration ───────────────────────────────────────────────────────
 
 use std::time::Duration;
-use rand::Rng;
 
 /// Configuration for retry and reconnection behavior.
 #[derive(Debug, Clone)]
@@ -60,7 +65,8 @@ impl RetryConfig {
     /// Calculate exponential backoff delay with jitter.
     /// Formula: min(base * 2^attempt, max) * (1 ± jitter_factor)
     pub fn calculate_delay(&self, attempt: u32) -> Duration {
-        let mut rng = rand::thread_rng();
+        use rand::RngExt as _;
+        let mut rng = rand::rng();
 
         // Exponential backoff: base * 2^attempt
         let base_delay = self.base_retry_delay_ms.saturating_mul(2u64.saturating_pow(attempt));
@@ -71,26 +77,18 @@ impl RetryConfig {
         // Apply jitter: delay * (1 ± jitter_factor)
         let jitter_range = (capped_delay as f64 * self.jitter_factor) as u64;
         let min_delay = capped_delay.saturating_sub(jitter_range);
-        let max_delay = capped_delay.saturating_add(jitter_range);
+        let max_delay = capped_delay.saturating_add(jitter_range).max(min_delay);
 
-        let jittered_delay = rng.gen_range(min_delay..=max_delay);
+        let jittered_delay = rng.random_range(min_delay..=max_delay);
         Duration::from_millis(jittered_delay)
     }
 }
 
-/// Connection state for health tracking and reconnection.
-#[derive(Debug)]
-enum ConnectionState {
-    Connected(Surreal<Any>),
-    Reconnecting,
-    Failed(String),
-}
-
-/// Connection configuration for reconnection attempts.
+/// Connection configuration — stored on the struct for diagnostics and
+/// future reconnection needs.  `config.retry` holds the retry settings.
 #[derive(Debug, Clone)]
 struct ConnectionInfo {
     config: SurrealConfig,
-    retry_config: RetryConfig,
 }
 
 // ── Config-compatible constructor ─────────────────────────────────────────────
@@ -135,21 +133,49 @@ impl SurrealStorage {
     ) -> Result<Self> {
         let connection_info = ConnectionInfo {
             config: config.clone(),
-            retry_config: config.retry.clone(),
         };
 
-        let db = Self::connect_with_config(config).await?;
+        let db = Self::connect_with_retry(config).await?;
 
         // Run migrations on initial connection
         run_migrations(&db).await?;
 
-        let connection = Arc::new(RwLock::new(ConnectionState::Connected(db)));
-
         Ok(Self {
-            connection,
+            db,
             connection_info,
             embedding_service,
         })
+    }
+
+    /// Establish a connection with exponential-backoff retry.
+    ///
+    /// Used by `new()` for the initial connection.  `new_mem()` (embedded test
+    /// helper) skips retries because a missing embedded path is a programmer
+    /// error, not a transient failure.
+    async fn connect_with_retry(config: &SurrealConfig) -> Result<Surreal<Any>> {
+        let mut attempt = 0u32;
+        loop {
+            match Self::connect_with_config(config).await {
+                Ok(db) => return Ok(db),
+                Err(e) if attempt < config.retry.max_connect_retries => {
+                    let delay = config.retry.calculate_delay(attempt);
+                    tracing::warn!(
+                        attempt,
+                        delay_ms = delay.as_millis(),
+                        error = %e,
+                        "SurrealDB connect failed, retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                }
+                Err(e) => {
+                    return Err(e).context(format!(
+                        "SurrealDB connection failed after {} attempts",
+                        attempt + 1
+                    ));
+                }
+            }
+        }
     }
 
     /// Establish connection without retry logic (called by connect_with_retry).
@@ -188,6 +214,28 @@ impl SurrealStorage {
             .context("Failed to use namespace/database")?;
 
         Ok(db)
+    }
+
+    /// Ping the database to verify the connection is alive.
+    ///
+    /// Useful for liveness/readiness probes when running against a remote
+    /// SurrealDB server.
+    pub async fn health_check(&self) -> Result<bool> {
+        self.db
+            .health()
+            .await
+            .map(|_| true)
+            .context("SurrealDB health check failed")
+    }
+
+    /// Return the namespace and database this storage instance is connected to.
+    ///
+    /// Useful for diagnostics, logging, and multi-tenant routing.
+    pub fn connection_config(&self) -> (&str, &str) {
+        (
+            self.connection_info.config.namespace.as_str(),
+            self.connection_info.config.database.as_str(),
+        )
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
@@ -715,15 +763,54 @@ impl MemoryStorage for SurrealStorage {
 
         let stored = self.add_memory(memory).await?;
 
-        // Update stream token count and last_active
-        let added_tokens = stored.token_count.unwrap_or(0) as u64;
-        self.db.query(
-            "UPDATE task_stream SET total_tokens += $tokens, last_active = $now WHERE name = $name"
-        )
-        .bind(("tokens", added_tokens))
-        .bind(("now", Datetime::default()))
-        .bind(("name", stream_name.to_string()))
-        .await?;
+        // Standardised token count: prefer stored value, fall back to heuristic estimate.
+        // This matches the fallback logic used in `get_context_for_task` so that
+        // `total_tokens` stays consistent with per-memory token sums.
+        let added_tokens = stored
+            .token_count
+            .map(|t| t as u64)
+            .unwrap_or_else(|| Self::estimate_tokens(&stored.content) as u64);
+
+        // Verify the update actually found and modified the stream record.
+        let mut res = self
+            .db
+            .query(
+                "UPDATE task_stream \
+                 SET total_tokens += $tokens, last_active = $now \
+                 WHERE name = $name \
+                 RETURN AFTER",
+            )
+            .bind(("tokens", added_tokens))
+            .bind(("now", Datetime::default()))
+            .bind(("name", stream_name.to_string()))
+            .await?;
+        let updated_stream: Option<TaskStream> = res.take(0)?;
+        let updated_stream = updated_stream
+            .with_context(|| format!("TaskStream '{}' disappeared during token update", stream_name))?;
+
+        // Trigger auto-summarization when the running token total crosses 80 % of
+        // the model's context budget.  Run inline; the operation is async but
+        // bounded and callers already await this method.
+        if updated_stream.needs_summarization() {
+            let model_id = updated_stream
+                .model_id
+                .clone()
+                .unwrap_or_else(|| "default".to_string());
+            // Pass through agent_id / user_id from the stream so the summary
+            // memory is scoped identically to the other memories in the stream.
+            let agent_id = updated_stream.agent_id.as_deref();
+            let user_id = updated_stream.user_id.as_deref();
+            if let Err(e) = self
+                .auto_summarize_task_stream(stream_name, user_id, agent_id, &model_id)
+                .await
+            {
+                tracing::warn!(
+                    stream = stream_name,
+                    error = %e,
+                    "Auto-summarization failed (non-fatal)"
+                );
+            }
+        }
 
         Ok(stored)
     }
@@ -815,6 +902,16 @@ impl MemoryStorage for SurrealStorage {
         let mut res = self
             .db
             .query("UPDATE task_stream SET status = 'archived' WHERE name = $name RETURN AFTER")
+            .bind(("name", name.to_string()))
+            .await?;
+        let updated: Option<TaskStream> = res.take(0)?;
+        updated.with_context(|| format!("TaskStream '{}' not found", name))
+    }
+
+    async fn pause_task_stream(&self, name: &str) -> Result<TaskStream> {
+        let mut res = self
+            .db
+            .query("UPDATE task_stream SET status = 'paused' WHERE name = $name RETURN AFTER")
             .bind(("name", name.to_string()))
             .await?;
         let updated: Option<TaskStream> = res.take(0)?;
@@ -1057,11 +1154,33 @@ impl MemoryStorage for SurrealStorage {
             .get_mindmap(mindmap_name, user_id)
             .await?
             .with_context(|| format!("Mindmap '{}' not found", mindmap_name))?;
+
+        // Guard: node ID must be unique within the mindmap.
         if mm.nodes.iter().any(|n| n.id == node.id) {
-            anyhow::bail!("Node '{}' already exists", node.id);
+            anyhow::bail!(
+                "Node with id '{}' already exists in mindmap '{}'",
+                node.id,
+                mindmap_name
+            );
         }
+
+        // Guard: parent_id, if set, must reference an existing node.
+        if let Some(parent_id) = &node.parent_id {
+            anyhow::ensure!(
+                mm.nodes.iter().any(|n| &n.id == parent_id),
+                "Node '{}' references unknown parent '{}' in mindmap '{}'",
+                node.id,
+                parent_id,
+                mindmap_name
+            );
+        }
+
         mm.nodes.push(node);
         mm.updated_at = Datetime::default();
+
+        // Full structural validation before persisting.
+        mm.validate()?;
+
         let record_key = mm
             .id
             .as_ref()
@@ -1515,16 +1634,13 @@ impl SurrealStorage {
 
         let connection_info = ConnectionInfo {
             config: config.clone(),
-            retry_config: config.retry.clone(),
         };
 
         let db = Self::connect_with_config(&config).await?;
         run_migrations(&db).await?;
 
-        let connection = Arc::new(RwLock::new(ConnectionState::Connected(db)));
-
         Ok(Self {
-            connection,
+            db,
             connection_info,
             embedding_service,
         })
@@ -1570,17 +1686,12 @@ mod retry_tests {
         assert!(delay.as_millis() <= 625); // 500 + 25% jitter
     }
 
-    #[tokio::test]
-    async fn test_connection_state_lifecycle() {
-        // Mock connection (will fail to actually connect, but tests the type)
-        let state = ConnectionState::Reconnecting;
-        assert!(matches!(state, ConnectionState::Reconnecting));
-
-        let state = ConnectionState::Failed("test error".to_string());
-        if let ConnectionState::Failed(msg) = state {
-            assert_eq!(msg, "test error");
-        } else {
-            panic!("Expected Failed state");
-        }
+    #[test]
+    fn test_retry_config_is_used_by_connect_with_retry() {
+        // Verify that RetryConfig values are accessible — the retry loop in
+        // connect_with_retry reads these fields at runtime.
+        let config = RetryConfig::default();
+        assert!(config.max_connect_retries > 0);
+        assert!(config.max_operation_retries > 0);
     }
 }

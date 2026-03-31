@@ -2,7 +2,7 @@ use anyhow::Result;
 use rmcp::{
     ErrorData as McpError, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, Implementation, ServerCapabilities, ServerInfo},
+    model::{CallToolResult, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
     transport::stdio,
 };
@@ -479,10 +479,8 @@ impl MemoryMcpServer {
 #[tool_handler]
 impl ServerHandler for MemoryMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation::from_build_env(),
-            instructions: Some(
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_instructions(
                 "Knowledge graph memory server with scoped memory, TaskStreams, Mindmaps, and Graph-RAG. \
                 Knowledge graph: create_entity/create_entities, add_observations, create_relation/create_relations, \
                 read_graph, search_entities, semantic_search, delete_entity, delete_relation. \
@@ -491,13 +489,11 @@ impl ServerHandler for MemoryMcpServer {
                 delete_all_memories, get_all_memories, search_memories, get_memory_history, \
                 hybrid_search_memories, compress_memories, add_memories_from_conversation. \
                 TaskStreams: create_task_stream, get_task_stream, add_to_task_stream, \
-                get_context_for_task, list_task_streams, archive_task_stream, auto_summarize_task_stream. \
+                get_context_for_task, list_task_streams, archive_task_stream, auto_summarize_task_stream, \
+                pause_task_stream. \
                 Mindmaps: create_mindmap, get_mindmap, list_mindmaps, add_mindmap_node, \
                 add_mindmap_edge, delete_mindmap_node, delete_mindmap, export_mindmap, \
-                generate_persona_mindmap, generate_ideation_mindmap."
-                    .to_string(),
-            ),
-            ..Default::default()
-        }
+                generate_persona_mindmap, generate_ideation_mindmap.",
+            )
     }
 }
