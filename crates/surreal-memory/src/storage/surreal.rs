@@ -411,7 +411,7 @@ impl SurrealStorage {
         tracing::debug!(table = %table, id = %id, operation = %operation, "Creating record");
 
         let mut response = db
-            .query("CREATE type::record($table, $key) CONTENT $value RETURN AFTER")
+            .query("CREATE type::record($table, $key) CONTENT $value RETURN AFTER TIMEOUT 30s")
             .bind(("table", table.clone()))
             .bind(("key", id.clone()))
             .bind(("value", data))
@@ -420,6 +420,16 @@ impl SurrealStorage {
 
         let created: Option<serde_json::Value> = response
             .take(0)
+            .map_err(|e| {
+                tracing::error!(
+                    table = %table,
+                    id = %id,
+                    operation = %operation,
+                    error = %e,
+                    "Failed to parse SurrealDB response"
+                );
+                e
+            })
             .with_context(|| format!("{}: SurrealDB rejected the write", operation))?;
 
         created.with_context(|| format!("{}: SurrealDB returned no record after write", operation))
@@ -455,9 +465,16 @@ impl SurrealStorage {
     async fn replace_record_impl(
         db: &Surreal<Any>,
         record_id: String,
-        data: serde_json::Value,
+        mut data: serde_json::Value,
         operation: String,
     ) -> Result<serde_json::Value> {
+        // SurrealDB 3.x rejects UPDATE CONTENT when the data contains an `id` field
+        // that conflicts with the record ID specified in the UPDATE statement.
+        // Use UPDATE MERGE instead, which only updates provided fields and preserves the id.
+        if let serde_json::Value::Object(ref mut map) = data {
+            map.remove("id");
+        }
+
         // Estimate JSON size for performance monitoring
         let json_size = serde_json::to_string(&data)
             .map(|s| s.len())
@@ -483,8 +500,9 @@ impl SurrealStorage {
 
         // Add 30-second timeout to prevent indefinite hangs on large objects
         // SurrealDB can take 4+ minutes for large JSON updates without a timeout
+        // Use MERGE instead of CONTENT to preserve the id field
         let mut response = db
-            .query("UPDATE type::record($id) CONTENT $value RETURN AFTER TIMEOUT 30s")
+            .query("UPDATE type::record($id) MERGE $value RETURN AFTER TIMEOUT 30s")
             .bind(("id", record_id.clone()))
             .bind(("value", data))
             .await
@@ -492,9 +510,35 @@ impl SurrealStorage {
 
         let result: Option<serde_json::Value> = response
             .take(0)
+            .map_err(|e| {
+                tracing::error!(
+                    id = %record_id,
+                    operation = %operation,
+                    error = %e,
+                    "Failed to parse SurrealDB UPDATE response"
+                );
+                e
+            })
             .with_context(|| format!("{}: SurrealDB rejected the write", operation))?;
 
-        result.ok_or_else(|| anyhow::anyhow!("{}: SurrealDB returned no record after write", operation))
+        match result {
+            Some(value) => {
+                tracing::debug!(
+                    id = %record_id,
+                    operation = %operation,
+                    "UPDATE succeeded, got response"
+                );
+                Ok(value)
+            }
+            None => {
+                tracing::error!(
+                    id = %record_id,
+                    operation = %operation,
+                    "UPDATE returned None - record may have been deleted"
+                );
+                Err(anyhow::anyhow!("{}: SurrealDB returned no record after write", operation))
+            }
+        }
     }
 
     async fn replace_record<T>(&self, record_id: &str, value: T, op: &str) -> Result<T>
@@ -1572,11 +1616,28 @@ impl MemoryStorage for SurrealStorage {
     // ── Mindmaps ─────────────────────────────────────────────────────────────
 
     async fn create_mindmap(&self, mut mindmap: MindMap) -> Result<MindMap> {
+        let db = {
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+
         mindmap.created_at = Datetime::default();
         mindmap.updated_at = mindmap.created_at.clone();
-        let key = Uuid::new_v4().to_string();
-        self.create_record("mindmap", &key, mindmap, "create_mindmap")
+
+        // Use db.create() directly like create_entity() does
+        // This lets SurrealDB auto-assign the ID without conflicts
+        let created: Option<MindMap> = db
+            .create("mindmap")
+            .content(mindmap)
             .await
+            .context("Failed to create mindmap")?;
+
+        created.ok_or_else(|| anyhow::anyhow!("No mindmap returned after creation"))
     }
 
     async fn get_mindmap(&self, name: &str, user_id: Option<&str>) -> Result<Option<MindMap>> {
