@@ -500,10 +500,24 @@ impl SurrealStorage {
 
         // Add 30-second timeout to prevent indefinite hangs on large objects
         // SurrealDB can take 4+ minutes for large JSON updates without a timeout
-        // Use MERGE instead of CONTENT to preserve the id field
+        // Use MERGE instead of CONTENT to preserve the id field.
+        //
+        // KEY FORMAT: split "table:key" and use two-arg type::record($table, $key)
+        // This matches the CREATE type::record($table, $key) call in create_record_impl,
+        // ensuring the key type is identical on both CREATE and UPDATE.
+        // Using the single-arg form type::record("table:uuid") causes a UUID key-type
+        // mismatch — SurrealDB parses the UUID substring as a UUID type rather than
+        // the string type stored by create_record_impl.
+        let (tbl, key_part) = record_id
+            .split_once(':')
+            .unwrap_or((&record_id, ""));
+        let tbl = tbl.to_string();
+        let key_part = key_part.to_string();
+
         let mut response = db
-            .query("UPDATE type::record($id) MERGE $value RETURN AFTER TIMEOUT 30s")
-            .bind(("id", record_id.clone()))
+            .query("UPDATE type::record($table, $key) MERGE $value RETURN AFTER TIMEOUT 30s")
+            .bind(("table", tbl))
+            .bind(("key", key_part))
             .bind(("value", data))
             .await
             .with_context(|| format!("{}: SurrealDB update query failed", operation))?;
