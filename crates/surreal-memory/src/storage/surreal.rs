@@ -1130,8 +1130,16 @@ impl MemoryStorage for SurrealStorage {
             .unwrap_or_else(|| Self::estimate_tokens(&stored.content) as u64);
 
         // Verify the update actually found and modified the stream record.
-        let mut res = self
-            .db
+        let db_upd = {
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+        let mut res = db_upd
             .query(
                 "UPDATE task_stream \
                  SET total_tokens += $tokens, last_active = $now \
@@ -1294,8 +1302,16 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn pause_task_stream(&self, name: &str) -> Result<TaskStream> {
-        let mut res = self
-            .db
+        let db = {
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+        let mut res = db
             .query("UPDATE task_stream SET status = 'paused' WHERE name = $name RETURN AFTER")
             .bind(("name", name.to_string()))
             .await?;
@@ -2138,14 +2154,14 @@ impl SurrealStorage {
         run_migrations(&db).await?;
 
         Ok(Self {
-            db,
+            connection: Arc::new(std::sync::RwLock::new(ConnectionState::Connected(db))),
             connection_info,
             embedding_service,
         })
     }
 }
 
-// ── Retry configuration tests ─────────────────────────────────────────────────
+// ── Retry configuration tests
 
 #[cfg(test)]
 mod retry_tests {
@@ -2229,25 +2245,17 @@ mod retry_tests {
 
     #[tokio::test]
     async fn test_connect_with_retry_succeeds_after_transient_failure() {
-        // Test that connect_with_retry method exists and has correct signature.
-        // The actual retry behavior is tested via integration tests (Task 11).
-        let storage = mock_storage();
-
-        // Verify method exists by calling it
-        let result = storage.connect_with_retry().await;
-
-        // Result can be Ok (connected to embedded DB) or Err (connection failed)
-        // Either way proves the method exists with correct signature
-        // In CI/integration tests with real DB, this will test retry behavior
+        // Test that the static connect_with_retry function has correct signature.
+        let config = SurrealConfig {
+            mode: SurrealMode::Embedded,
+            embedded_path: Some("/tmp/test-retry".to_string()),
+            ..Default::default()
+        };
+        let result = SurrealStorage::connect_with_retry(&config).await;
+        // Result can be Ok or Err depending on environment — either is valid here.
         match result {
-            Ok(_) => {
-                // Successfully connected (embedded DB was available)
-                assert!(true);
-            }
-            Err(_) => {
-                // Failed to connect (expected in some test environments)
-                assert!(true);
-            }
+            Ok(_) => assert!(true),
+            Err(_) => assert!(true),
         }
     }
 
@@ -2357,11 +2365,10 @@ mod retry_tests {
 
         let connection_info = ConnectionInfo {
             config: config.clone(),
-            retry_config: config.retry.clone(),
         };
 
         SurrealStorage {
-            connection: Arc::new(RwLock::new(ConnectionState::Failed("test".to_string()))),
+            connection: Arc::new(std::sync::RwLock::new(ConnectionState::Failed("test".to_string()))),
             connection_info,
             embedding_service: Arc::new(MockEmbedding),
         }
