@@ -129,23 +129,31 @@ pub trait MemoryStorage: Send + Sync {
     // ── Mindmaps ─────────────────────────────────────────────────────────────
 
     async fn create_mindmap(&self, mindmap: MindMap) -> Result<MindMap>;
-    async fn get_mindmap(&self, name: &str, user_id: Option<&str>) -> Result<Option<MindMap>>;
+    async fn get_mindmap(
+        &self,
+        name: &str,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> Result<Option<MindMap>>;
     async fn add_mindmap_node(
         &self,
         mindmap_name: &str,
         user_id: Option<&str>,
+        agent_id: Option<&str>,
         node: MindMapNode,
     ) -> Result<MindMap>;
     async fn add_mindmap_edge(
         &self,
         mindmap_name: &str,
         user_id: Option<&str>,
+        agent_id: Option<&str>,
         edge: MindMapEdge,
     ) -> Result<MindMap>;
     async fn delete_mindmap_node(
         &self,
         mindmap_name: &str,
         user_id: Option<&str>,
+        agent_id: Option<&str>,
         node_id: &str,
     ) -> Result<MindMap>;
     async fn list_mindmaps(
@@ -153,7 +161,12 @@ pub trait MemoryStorage: Send + Sync {
         user_id: Option<&str>,
         agent_id: Option<&str>,
     ) -> Result<Vec<MindMap>>;
-    async fn delete_mindmap(&self, name: &str, user_id: Option<&str>) -> Result<()>;
+    async fn delete_mindmap(
+        &self,
+        name: &str,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> Result<()>;
 
     // ── Phase 3: Advanced Context + Graph-RAG ────────────────────────────────
 

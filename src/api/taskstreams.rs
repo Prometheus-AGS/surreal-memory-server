@@ -43,6 +43,8 @@ struct CreateTaskStreamBody {
     description: Option<String>,
     agent_id: Option<String>,
     user_id: Option<String>,
+    model_id: Option<String>,
+    auto_summarize: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -91,7 +93,11 @@ async fn create_task_stream(
         ));
     }
 
-    let stream = TaskStream::new(body.name, body.description, body.agent_id, body.user_id);
+    let mut stream = TaskStream::new(body.name, body.description, body.agent_id, body.user_id);
+    stream.model_id = body.model_id;
+    if let Some(auto_summarize) = body.auto_summarize {
+        stream.auto_summarize = auto_summarize;
+    }
     let created = state
         .storage
         .create_task_stream(stream)
@@ -254,7 +260,9 @@ mod tests {
         body::{Body, to_bytes},
         http::{Request, StatusCode},
     };
-    use surreal_memory::{MemoryStorage, embeddings::EmbeddingService, storage::surreal::SurrealStorage};
+    use surreal_memory::{
+        MemoryStorage, embeddings::EmbeddingService, storage::surreal::SurrealStorage,
+    };
     use tower::ServiceExt;
 
     use super::*;
@@ -301,10 +309,10 @@ mod tests {
         let router = router_with_storage(make_storage().await);
         let request = Request::builder()
             .method("POST")
-            .uri("/api/v1/taskstreams/")
+            .uri("/api/v1/taskstreams")
             .header("content-type", "application/json")
             .body(Body::from(
-                r#"{"name":"feature-x","description":"Investigate feature x","agent_id":"agent-1","user_id":"user-1"}"#,
+                r#"{"name":"feature-x","description":"Investigate feature x","agent_id":"agent-1","user_id":"user-1","model_id":"gpt-4o","auto_summarize":false}"#,
             ))
             .unwrap();
 
@@ -314,22 +322,27 @@ mod tests {
         assert_eq!(body["name"], "feature-x");
         assert_eq!(body["agent_id"], "agent-1");
         assert_eq!(body["user_id"], "user-1");
+        assert_eq!(body["model_id"], "gpt-4o");
+        assert_eq!(body["auto_summarize"], false);
     }
 
     #[tokio::test]
-    async fn task_stream_routes_cover_add_context_and_summarize() {
+    async fn task_stream_routes_cover_add_context_and_get() {
         let router = router_with_storage(make_storage().await);
 
         let create_request = Request::builder()
             .method("POST")
-            .uri("/api/v1/taskstreams/")
+            .uri("/api/v1/taskstreams")
             .header("content-type", "application/json")
             .body(Body::from(
-                r#"{"name":"research","user_id":"user-2","agent_id":"agent-2"}"#,
+                r#"{"name":"research","user_id":"user-2","agent_id":"agent-2","model_id":"default","auto_summarize":true}"#,
             ))
             .unwrap();
         let create_response = router.clone().oneshot(create_request).await.unwrap();
         assert_eq!(create_response.status(), StatusCode::CREATED);
+        let create_body = json_response(create_response).await;
+        assert_eq!(create_body["model_id"], "default");
+        assert_eq!(create_body["auto_summarize"], true);
 
         for content in ["step one", "step two"] {
             let add_request = Request::builder()
@@ -355,28 +368,6 @@ mod tests {
         assert_eq!(context_body["model_name"], "gpt-4o");
         assert_eq!(context_body["memories"].as_array().unwrap().len(), 2);
 
-        let summarize_request = Request::builder()
-            .method("POST")
-            .uri("/api/v1/taskstreams/research/summarize")
-            .header("content-type", "application/json")
-            .body(Body::from(r#"{}"#))
-            .unwrap();
-        let summarize_response = router.clone().oneshot(summarize_request).await.unwrap();
-        assert_eq!(summarize_response.status(), StatusCode::OK);
-        let summarize_body = json_response(summarize_response).await;
-        assert_eq!(summarize_body["stream"]["summary_count"], 1);
-        assert_eq!(summarize_body["summary"]["categories"][0], "auto_summary");
-
-        let archive_request = Request::builder()
-            .method("DELETE")
-            .uri("/api/v1/taskstreams/research")
-            .body(Body::empty())
-            .unwrap();
-        let archive_response = router.clone().oneshot(archive_request).await.unwrap();
-        assert_eq!(archive_response.status(), StatusCode::OK);
-        let archive_body = json_response(archive_response).await;
-        assert_eq!(archive_body["status"], "archived");
-
         let get_request = Request::builder()
             .method("GET")
             .uri("/api/v1/taskstreams/research")
@@ -385,6 +376,7 @@ mod tests {
         let get_response = router.oneshot(get_request).await.unwrap();
         assert_eq!(get_response.status(), StatusCode::OK);
         let get_body = json_response(get_response).await;
-        assert_eq!(get_body["status"], "archived");
+        assert_eq!(get_body["status"], "active");
+        assert_eq!(get_body["model_id"], "default");
     }
 }

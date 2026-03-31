@@ -5,7 +5,7 @@ use crate::{
     embeddings::EmbeddingService,
     entity::{Entity, KnowledgeGraph, Relation, SemanticSearchResult},
     memory::{Memory, MemoryHistory},
-    mindmap::MindMap,
+    mindmap::{MindMap, MindMapEdge, MindMapNode},
     storage::migrations::run_migrations,
     task_stream::{ContextWindow, TaskStream, TaskStreamStatus},
 };
@@ -16,7 +16,7 @@ use std::{cmp::Ordering, sync::Arc};
 use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
 use surrealdb::opt::auth::Root;
-use surrealdb::types::Datetime;
+use surrealdb::types::{Datetime, RecordId, RecordIdKey};
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
@@ -101,6 +101,71 @@ enum ConnectionState {
     Failed(String),
 }
 
+#[derive(Clone, Serialize, SurrealValue)]
+struct CreateTaskStreamRecord {
+    name: String,
+    description: Option<String>,
+    agent_id: Option<String>,
+    user_id: Option<String>,
+    status: TaskStreamStatus,
+    total_tokens: u64,
+    model_id: Option<String>,
+    auto_summarize: bool,
+    summary_count: u32,
+    created_at: Datetime,
+    last_active: Datetime,
+}
+
+impl From<TaskStream> for CreateTaskStreamRecord {
+    fn from(stream: TaskStream) -> Self {
+        Self {
+            name: stream.name,
+            description: stream.description,
+            agent_id: stream.agent_id,
+            user_id: stream.user_id,
+            status: stream.status,
+            total_tokens: stream.total_tokens,
+            model_id: stream.model_id,
+            auto_summarize: stream.auto_summarize,
+            summary_count: stream.summary_count,
+            created_at: stream.created_at,
+            last_active: stream.last_active,
+        }
+    }
+}
+
+#[derive(Clone, Serialize, SurrealValue)]
+struct CreateMindMapRecord {
+    name: String,
+    description: Option<String>,
+    map_type: crate::mindmap::MapType,
+    agent_id: Option<String>,
+    user_id: Option<String>,
+    task_stream_id: Option<RecordId>,
+    tags: Vec<String>,
+    nodes: Vec<MindMapNode>,
+    edges: Vec<MindMapEdge>,
+    created_at: Datetime,
+    updated_at: Datetime,
+}
+
+impl From<MindMap> for CreateMindMapRecord {
+    fn from(mindmap: MindMap) -> Self {
+        Self {
+            name: mindmap.name,
+            description: mindmap.description,
+            map_type: mindmap.map_type,
+            agent_id: mindmap.agent_id,
+            user_id: mindmap.user_id,
+            task_stream_id: mindmap.task_stream_id,
+            tags: mindmap.tags,
+            nodes: mindmap.nodes,
+            edges: mindmap.edges,
+            created_at: mindmap.created_at,
+            updated_at: mindmap.updated_at,
+        }
+    }
+}
 // ── Config-compatible constructor ─────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -400,65 +465,39 @@ impl SurrealStorage {
         self.embedding_service.embed(text).await
     }
 
-    /// Core implementation for create_record (used by retry wrapper)
-    async fn create_record_impl(
-        db: &Surreal<Any>,
-        table: String,
-        id: String,
-        data: serde_json::Value,
-        operation: String,
-    ) -> Result<serde_json::Value> {
-        tracing::debug!(table = %table, id = %id, operation = %operation, "Creating record");
-
-        let mut response = db
-            .query("CREATE type::record($table, $key) CONTENT $value RETURN AFTER TIMEOUT 30s")
-            .bind(("table", table.clone()))
-            .bind(("key", id.clone()))
-            .bind(("value", data))
-            .await
-            .with_context(|| format!("{}: SurrealDB create query failed", operation))?;
-
-        let created: Option<serde_json::Value> = response
-            .take(0)
-            .map_err(|e| {
-                tracing::error!(
-                    table = %table,
-                    id = %id,
-                    operation = %operation,
-                    error = %e,
-                    "Failed to parse SurrealDB response"
-                );
-                e
-            })
-            .with_context(|| format!("{}: SurrealDB rejected the write", operation))?;
-
-        created.with_context(|| format!("{}: SurrealDB returned no record after write", operation))
-    }
-
-    async fn create_record<T>(&self, table: &str, key: &str, value: T, op: &str) -> Result<T>
+    async fn create_record<P, T>(&self, table: &str, key: &str, value: P, op: &str) -> Result<T>
     where
-        T: Serialize + DeserializeOwned + SurrealValue,
+        P: Clone + Serialize + SurrealValue,
+        T: DeserializeOwned + SurrealValue,
     {
         let table = table.to_string();
         let key = key.to_string();
         let operation = op.to_string();
-        let data_json = serde_json::to_value(&value)
-            .expect("Failed to serialize data to JSON");
+        let payload = value;
 
-        let result = self.retry_operation(&operation, |db| {
+        self.retry_operation(&operation, |db| {
             let table = table.clone();
             let key = key.clone();
             let operation = operation.clone();
-            let data_json = data_json.clone();
+            let payload = payload.clone();
 
             async move {
-                Self::create_record_impl(&db, table, key, data_json, operation).await
+                let mut response = db
+                    .query("CREATE type::record($table, $key) CONTENT $value RETURN AFTER TIMEOUT 30s")
+                    .bind(("table", table))
+                    .bind(("key", key))
+                    .bind(("value", payload))
+                    .await
+                    .with_context(|| format!("{operation}: SurrealDB create query failed"))?;
+                response = response
+                    .check()
+                    .with_context(|| format!("{operation}: SurrealDB rejected the write"))?;
+                let created: Option<T> = response
+                    .take(0)
+                    .with_context(|| format!("{operation}: Failed to deserialize result"))?;
+                created.with_context(|| format!("{operation}: SurrealDB returned no record after write"))
             }
-        }).await?;
-
-        // Deserialize result back to T
-        serde_json::from_value(result)
-            .with_context(|| format!("{}: Failed to deserialize result", op))
+        }).await
     }
 
     /// Core implementation for replace_record (used by retry wrapper)
@@ -521,6 +560,9 @@ impl SurrealStorage {
             .bind(("value", data))
             .await
             .with_context(|| format!("{}: SurrealDB update query failed", operation))?;
+        response = response
+            .check()
+            .with_context(|| format!("{}: SurrealDB rejected the write", operation))?;
 
         let result: Option<serde_json::Value> = response
             .take(0)
@@ -578,7 +620,6 @@ impl SurrealStorage {
         serde_json::from_value(result)
             .with_context(|| format!("{}: Failed to deserialize result", op))
     }
-
     fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
         let norm_a: f32 = a.iter().map(|v| v * v).sum::<f32>().sqrt();
@@ -593,13 +634,146 @@ impl SurrealStorage {
     /// Convert a `RecordId` to its canonical `table:key` string.
     /// Works without requiring `Display` on `RecordIdKey`.
     fn record_id_to_string(id: &surrealdb::types::RecordId) -> String {
-        use surrealdb::types::RecordIdKey;
         let key_str = match &id.key {
             RecordIdKey::String(s) => s.clone(),
             RecordIdKey::Number(i) => i.to_string(),
+            RecordIdKey::Uuid(uuid) => uuid.to_string(),
             k => format!("{k:?}"),
         };
         format!("{}:{}", id.table.as_str(), key_str)
+    }
+
+    fn record_id_parts(id: &RecordId) -> (String, RecordIdKey) {
+        (id.table.as_str().to_string(), id.key.clone())
+    }
+
+    fn parse_record_id_str(id: &str, default_table: &str) -> Result<(String, RecordIdKey)> {
+        let parsed = if id.contains(':') {
+            RecordId::parse_simple(id)?
+        } else {
+            RecordId::new(default_table, id)
+        };
+        Ok(Self::record_id_parts(&parsed))
+    }
+
+    async fn update_mindmap_graph(
+        &self,
+        id: &RecordId,
+        nodes: Vec<MindMapNode>,
+        edges: Vec<MindMapEdge>,
+        updated_at: Datetime,
+        op: &str,
+    ) -> Result<MindMap> {
+        let db = {
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+        let (table, key) = Self::record_id_parts(id);
+        let edge_values = serde_json::to_value(edges)
+            .with_context(|| format!("{op}: edge serialization failed"))?;
+        let mut response = db
+            .query(
+                "UPDATE type::record($table, $key) \
+                 SET nodes = $nodes, edges = $edges, updated_at = $updated_at \
+                 RETURN AFTER",
+            )
+            .bind(("table", table))
+            .bind(("key", key))
+            .bind(("nodes", nodes))
+            .bind(("edges", edge_values))
+            .bind(("updated_at", updated_at))
+            .await
+            .with_context(|| format!("{op}: SurrealDB update query failed"))?;
+        response = response
+            .check()
+            .with_context(|| format!("{op}: SurrealDB rejected the write"))?;
+        let updated: Option<MindMap> = response
+            .take(0)
+            .with_context(|| format!("{op}: Failed to deserialize result"))?;
+        updated.with_context(|| format!("{op}: SurrealDB returned no record after write"))
+    }
+
+    async fn append_mindmap_node(
+        &self,
+        id: &RecordId,
+        node: MindMapNode,
+        updated_at: Datetime,
+        op: &str,
+    ) -> Result<MindMap> {
+        let db = {
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+        let (table, key) = Self::record_id_parts(id);
+        let mut response = db
+            .query(
+                "UPDATE type::record($table, $key) \
+                 SET nodes = array::append(nodes, $node), updated_at = $updated_at \
+                 RETURN AFTER",
+            )
+            .bind(("table", table))
+            .bind(("key", key))
+            .bind(("node", node))
+            .bind(("updated_at", updated_at))
+            .await
+            .with_context(|| format!("{op}: SurrealDB update query failed"))?;
+        response = response
+            .check()
+            .with_context(|| format!("{op}: SurrealDB rejected the write"))?;
+        let updated: Option<MindMap> = response
+            .take(0)
+            .with_context(|| format!("{op}: Failed to deserialize result"))?;
+        updated.with_context(|| format!("{op}: SurrealDB returned no record after write"))
+    }
+
+    async fn append_mindmap_edge(
+        &self,
+        id: &RecordId,
+        edge: MindMapEdge,
+        updated_at: Datetime,
+        op: &str,
+    ) -> Result<MindMap> {
+        let db = {
+            let state = self.connection.read()
+                .expect("Connection lock poisoned - another thread panicked while holding the lock");
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+        let (table, key) = Self::record_id_parts(id);
+        let edge_value = serde_json::to_value(edge)
+            .with_context(|| format!("{op}: edge serialization failed"))?;
+        let mut response = db
+            .query(
+                "UPDATE type::record($table, $key) \
+                 SET edges = array::append(edges, $edge), updated_at = $updated_at \
+                 RETURN AFTER",
+            )
+            .bind(("table", table))
+            .bind(("key", key))
+            .bind(("edge", edge_value))
+            .bind(("updated_at", updated_at))
+            .await
+            .with_context(|| format!("{op}: SurrealDB update query failed"))?;
+        response = response
+            .check()
+            .with_context(|| format!("{op}: SurrealDB rejected the write"))?;
+        let updated: Option<MindMap> = response
+            .take(0)
+            .with_context(|| format!("{op}: Failed to deserialize result"))?;
+        updated.with_context(|| format!("{op}: SurrealDB returned no record after write"))
     }
 
     fn estimate_tokens(text: &str) -> u32 {
@@ -952,9 +1126,11 @@ impl MemoryStorage for SurrealStorage {
                 ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
             }
         };
+        let (table, key) = Self::parse_record_id_str(id, "memory")?;
         let result: Vec<Memory> = db
-            .query("SELECT * FROM $id")
-            .bind(("id", id.to_string()))
+            .query("SELECT * FROM type::record($table, $key)")
+            .bind(("table", table))
+            .bind(("key", key))
             .await?
             .take(0)?;
         Ok(result.into_iter().next())
@@ -978,17 +1154,22 @@ impl MemoryStorage for SurrealStorage {
         let new_version = old.version + 1;
         let token_count = Self::estimate_tokens(&content);
         let now = Datetime::default();
+        let (table, key) = Self::parse_record_id_str(id, "memory")?;
 
-        let mut res = db.query(
-            "UPDATE $id SET content = $content, embedding = $emb, token_count = $tc, version = $v, updated_at = $now RETURN AFTER"
-        )
-        .bind(("id", id.to_string()))
-        .bind(("content", content.clone()))
-        .bind(("emb", new_emb))
-        .bind(("tc", token_count))
-        .bind(("v", new_version))
-        .bind(("now", now.clone()))
-        .await?;
+        let mut res = db
+            .query(
+                "UPDATE type::record($table, $key) \
+                 SET content = $content, embedding = $emb, token_count = $tc, version = $v, updated_at = $now \
+                 RETURN AFTER",
+            )
+            .bind(("table", table))
+            .bind(("key", key))
+            .bind(("content", content.clone()))
+            .bind(("emb", new_emb))
+            .bind(("tc", token_count))
+            .bind(("v", new_version))
+            .bind(("now", now.clone()))
+            .await?;
 
         let updated: Option<Memory> = res.take(0)?;
         let updated = updated.context("Failed to update memory")?;
@@ -1031,8 +1212,11 @@ impl MemoryStorage for SurrealStorage {
                 .await?;
             }
         }
-        db.query("DELETE FROM $id")
-            .bind(("id", id.to_string()))
+        let (table, key) = Self::parse_record_id_str(id, "memory")?;
+        db
+            .query("DELETE type::record($table, $key)")
+            .bind(("table", table))
+            .bind(("key", key))
             .await?;
         Ok(())
     }
@@ -1159,7 +1343,8 @@ impl MemoryStorage for SurrealStorage {
         stream.created_at = now.clone();
         stream.last_active = now;
         let key = Uuid::new_v4().to_string();
-        self.create_record("task_stream", &key, stream, "create_task_stream")
+        let payload = CreateTaskStreamRecord::from(stream);
+        self.create_record("task_stream", &key, payload, "create_task_stream")
             .await
     }
 
@@ -1642,19 +1827,19 @@ impl MemoryStorage for SurrealStorage {
 
         mindmap.created_at = Datetime::default();
         mindmap.updated_at = mindmap.created_at.clone();
-
-        // Use db.create() directly like create_entity() does
-        // This lets SurrealDB auto-assign the ID without conflicts
-        let created: Option<MindMap> = db
-            .create("mindmap")
-            .content(mindmap)
+        let key = Uuid::new_v4().to_string();
+        let payload = CreateMindMapRecord::from(mindmap);
+        self.create_record("mindmap", &key, payload, "create_mindmap")
             .await
-            .context("Failed to create mindmap")?;
-
-        created.ok_or_else(|| anyhow::anyhow!("No mindmap returned after creation"))
+            .context("Failed to create mindmap")
     }
 
-    async fn get_mindmap(&self, name: &str, user_id: Option<&str>) -> Result<Option<MindMap>> {
+    async fn get_mindmap(
+        &self,
+        name: &str,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> Result<Option<MindMap>> {
         let db = {
             let state = self.connection.read()
                 .expect("Connection lock poisoned - another thread panicked while holding the lock");
@@ -1668,9 +1853,15 @@ impl MemoryStorage for SurrealStorage {
         if user_id.is_some() {
             sql.push_str(" AND user_id = $uid");
         }
+        if agent_id.is_some() {
+            sql.push_str(" AND agent_id = $aid");
+        }
         let mut q = db.query(&sql).bind(("name", name.to_string()));
         if let Some(v) = user_id {
             q = q.bind(("uid", v.to_string()));
+        }
+        if let Some(v) = agent_id {
+            q = q.bind(("aid", v.to_string()));
         }
         let mut results: Vec<MindMap> = q.await?.take(0)?;
         Ok(results.pop())
@@ -1680,10 +1871,11 @@ impl MemoryStorage for SurrealStorage {
         &self,
         mindmap_name: &str,
         user_id: Option<&str>,
+        agent_id: Option<&str>,
         node: crate::mindmap::MindMapNode,
     ) -> Result<MindMap> {
         let mut mm = self
-            .get_mindmap(mindmap_name, user_id)
+            .get_mindmap(mindmap_name, user_id, agent_id)
             .await?
             .with_context(|| format!("Mindmap '{}' not found", mindmap_name))?;
 
@@ -1707,32 +1899,21 @@ impl MemoryStorage for SurrealStorage {
             );
         }
 
-        // Performance warning: SurrealDB UPDATE CONTENT is slow with large JSON objects
-        // See: https://github.com/surrealdb/surrealdb/issues/1810
-        let node_count = mm.nodes.len();
-        let edge_count = mm.edges.len();
-
-        if node_count > 500 {
+        if mm.nodes.len() > 500 {
             tracing::warn!(
                 mindmap = mindmap_name,
-                node_count = node_count,
-                edge_count = edge_count,
+                node_count = mm.nodes.len(),
+                edge_count = mm.edges.len(),
                 "Large mindmap detected - updates may be slow. Consider splitting into multiple mindmaps."
             );
         }
 
-        mm.nodes.push(node);
+        mm.nodes.push(node.clone());
         mm.updated_at = Datetime::default();
-
-        // Full structural validation before persisting.
         mm.validate()?;
 
-        let record_key = mm
-            .id
-            .as_ref()
-            .map(Self::record_id_to_string)
-            .context("Mindmap missing id")?;
-        self.replace_record(&record_key, mm, "add_mindmap_node")
+        let record_id = mm.id.as_ref().cloned().context("Mindmap missing id")?;
+        self.append_mindmap_node(&record_id, node, mm.updated_at, "add_mindmap_node")
             .await
     }
 
@@ -1740,14 +1921,14 @@ impl MemoryStorage for SurrealStorage {
         &self,
         mindmap_name: &str,
         user_id: Option<&str>,
+        agent_id: Option<&str>,
         edge: crate::mindmap::MindMapEdge,
     ) -> Result<MindMap> {
         let mut mm = self
-            .get_mindmap(mindmap_name, user_id)
+            .get_mindmap(mindmap_name, user_id, agent_id)
             .await?
             .with_context(|| format!("Mindmap '{}' not found", mindmap_name))?;
 
-        // Performance warning for large mindmaps
         if mm.nodes.len() > 500 {
             tracing::warn!(
                 mindmap = mindmap_name,
@@ -1757,14 +1938,12 @@ impl MemoryStorage for SurrealStorage {
             );
         }
 
-        mm.edges.push(edge);
+        mm.edges.push(edge.clone());
         mm.updated_at = Datetime::default();
-        let record_key = mm
-            .id
-            .as_ref()
-            .map(Self::record_id_to_string)
-            .context("Mindmap missing id")?;
-        self.replace_record(&record_key, mm, "add_mindmap_edge")
+        mm.validate()?;
+
+        let record_id = mm.id.as_ref().cloned().context("Mindmap missing id")?;
+        self.append_mindmap_edge(&record_id, edge, mm.updated_at, "add_mindmap_edge")
             .await
     }
 
@@ -1772,23 +1951,26 @@ impl MemoryStorage for SurrealStorage {
         &self,
         mindmap_name: &str,
         user_id: Option<&str>,
+        agent_id: Option<&str>,
         node_id: &str,
     ) -> Result<MindMap> {
         let mut mm = self
-            .get_mindmap(mindmap_name, user_id)
+            .get_mindmap(mindmap_name, user_id, agent_id)
             .await?
             .with_context(|| format!("Mindmap '{}' not found", mindmap_name))?;
         mm.nodes.retain(|n| n.id != node_id);
         mm.edges
             .retain(|e| e.from_id != node_id && e.to_id != node_id);
         mm.updated_at = Datetime::default();
-        let record_key = mm
-            .id
-            .as_ref()
-            .map(Self::record_id_to_string)
-            .context("Mindmap missing id")?;
-        self.replace_record(&record_key, mm, "delete_mindmap_node")
-            .await
+        let record_id = mm.id.as_ref().cloned().context("Mindmap missing id")?;
+        self.update_mindmap_graph(
+            &record_id,
+            mm.nodes,
+            mm.edges,
+            mm.updated_at,
+            "delete_mindmap_node",
+        )
+        .await
     }
 
     async fn list_mindmaps(
@@ -1827,10 +2009,15 @@ impl MemoryStorage for SurrealStorage {
         if let Some(v) = agent_id {
             q = q.bind(("aid", v.to_string()));
         }
-        Ok(q.await?.take(0).unwrap_or_default())
+        Ok(q.await?.take(0)?)
     }
 
-    async fn delete_mindmap(&self, name: &str, user_id: Option<&str>) -> Result<()> {
+    async fn delete_mindmap(
+        &self,
+        name: &str,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> Result<()> {
         let db = {
             let state = self.connection.read()
                 .expect("Connection lock poisoned - another thread panicked while holding the lock");
@@ -1840,11 +2027,15 @@ impl MemoryStorage for SurrealStorage {
                 ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
             }
         };
-        if let Some(mm) = self.get_mindmap(name, user_id).await? {
+        if let Some(mm) = self.get_mindmap(name, user_id, agent_id).await? {
             if let Some(id) = &mm.id {
-                let s = Self::record_id_to_string(id);
-                let key = s.split(':').nth(1).unwrap_or(&s).to_string();
-                let _: Option<MindMap> = db.delete(("mindmap", key)).await?;
+                let (table, key) = Self::record_id_parts(id);
+                let _: Option<MindMap> = db
+                    .query("DELETE type::record($table, $key) RETURN BEFORE")
+                    .bind(("table", table))
+                    .bind(("key", key))
+                    .await?
+                    .take(0)?;
             }
         }
         Ok(())
@@ -2008,7 +2199,8 @@ impl MemoryStorage for SurrealStorage {
             metadata: None,
         };
 
-        self.add_mindmap_node(&mm.name, Some(user_id), node).await?;
+        self.add_mindmap_node(&mm.name, Some(user_id), None, node)
+            .await?;
         Ok(())
     }
 

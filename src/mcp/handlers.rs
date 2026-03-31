@@ -94,6 +94,8 @@ pub struct CreateTaskStreamParams {
     pub description: Option<String>,
     pub agent_id: Option<String>,
     pub user_id: Option<String>,
+    pub model_id: Option<String>,
+    pub auto_summarize: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -813,12 +815,16 @@ impl MemoryHandler {
             return Err(Self::invalid_params("name cannot be empty"));
         }
         use crate::storage::TaskStream;
-        let stream = TaskStream::new(
+        let mut stream = TaskStream::new(
             params.name,
             params.description,
             params.agent_id,
             params.user_id,
         );
+        stream.model_id = params.model_id;
+        if let Some(auto_summarize) = params.auto_summarize {
+            stream.auto_summarize = auto_summarize;
+        }
         let created = self
             .storage
             .create_task_stream(stream)
@@ -991,18 +997,23 @@ pub struct CreateMindmapParams {
     pub description: Option<String>,
     pub agent_id: Option<String>,
     pub user_id: Option<String>,
+    #[schemars(description = "Optional task stream record id in the form table:key")]
+    pub task_stream_id: Option<String>,
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MindmapNameParams {
     pub name: String,
     pub user_id: Option<String>,
+    pub agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AddMindmapNodeParams {
     pub mindmap_name: String,
     pub user_id: Option<String>,
+    pub agent_id: Option<String>,
     #[schemars(description = "Unique node id within this mindmap")]
     pub node_id: String,
     pub label: String,
@@ -1018,6 +1029,7 @@ pub struct AddMindmapNodeParams {
 pub struct AddMindmapEdgeParams {
     pub mindmap_name: String,
     pub user_id: Option<String>,
+    pub agent_id: Option<String>,
     pub from_id: String,
     pub to_id: String,
     pub label: Option<String>,
@@ -1029,6 +1041,7 @@ pub struct AddMindmapEdgeParams {
 pub struct DeleteMindmapNodeParams {
     pub mindmap_name: String,
     pub user_id: Option<String>,
+    pub agent_id: Option<String>,
     pub node_id: String,
 }
 
@@ -1036,6 +1049,7 @@ pub struct DeleteMindmapNodeParams {
 pub struct ExportMindmapParams {
     pub name: String,
     pub user_id: Option<String>,
+    pub agent_id: Option<String>,
     #[schemars(description = "Export format: json | mermaid | markdown")]
     pub format: String,
 }
@@ -1116,6 +1130,7 @@ impl MemoryHandler {
         params: CreateMindmapParams,
     ) -> Result<CallToolResult, McpError> {
         use surreal_memory::{MapType, MindMap};
+        use surrealdb::types::RecordId;
         let map_type = match params.map_type.to_lowercase().as_str() {
             "concept" => MapType::Concept,
             "argument" => MapType::Argument,
@@ -1123,7 +1138,7 @@ impl MemoryHandler {
             "temporal" => MapType::Temporal,
             _ => MapType::Radial,
         };
-        let mm = MindMap::new(
+        let mut mm = MindMap::new(
             params.name,
             map_type,
             params.root_label,
@@ -1131,6 +1146,13 @@ impl MemoryHandler {
             params.agent_id,
             params.user_id,
         );
+        if let Some(task_stream_id) = params.task_stream_id {
+            mm.task_stream_id = Some(
+                RecordId::parse_simple(&task_stream_id)
+                    .map_err(|e| Self::invalid_params(format!("invalid task_stream_id: {e}")))?,
+            );
+        }
+        mm.tags = params.tags.unwrap_or_default();
         match self.storage.create_mindmap(mm).await {
             Ok(created) => Ok(CallToolResult::success(vec![Content::text(
                 serde_json::to_string_pretty(&created).unwrap_or_default(),
@@ -1142,7 +1164,11 @@ impl MemoryHandler {
     pub async fn get_mindmap(&self, params: MindmapNameParams) -> Result<CallToolResult, McpError> {
         match self
             .storage
-            .get_mindmap(&params.name, params.user_id.as_deref())
+            .get_mindmap(
+                &params.name,
+                params.user_id.as_deref(),
+                params.agent_id.as_deref(),
+            )
             .await
         {
             Ok(Some(mm)) => Ok(CallToolResult::success(vec![Content::text(
@@ -1184,7 +1210,12 @@ impl MemoryHandler {
         };
         match self
             .storage
-            .add_mindmap_node(&params.mindmap_name, params.user_id.as_deref(), node)
+            .add_mindmap_node(
+                &params.mindmap_name,
+                params.user_id.as_deref(),
+                params.agent_id.as_deref(),
+                node,
+            )
             .await
         {
             Ok(mm) => Ok(CallToolResult::success(vec![Content::text(
@@ -1207,7 +1238,12 @@ impl MemoryHandler {
         };
         match self
             .storage
-            .add_mindmap_edge(&params.mindmap_name, params.user_id.as_deref(), edge)
+            .add_mindmap_edge(
+                &params.mindmap_name,
+                params.user_id.as_deref(),
+                params.agent_id.as_deref(),
+                edge,
+            )
             .await
         {
             Ok(mm) => Ok(CallToolResult::success(vec![Content::text(
@@ -1226,6 +1262,7 @@ impl MemoryHandler {
             .delete_mindmap_node(
                 &params.mindmap_name,
                 params.user_id.as_deref(),
+                params.agent_id.as_deref(),
                 &params.node_id,
             )
             .await
@@ -1243,7 +1280,11 @@ impl MemoryHandler {
     ) -> Result<CallToolResult, McpError> {
         match self
             .storage
-            .delete_mindmap(&params.name, params.user_id.as_deref())
+            .delete_mindmap(
+                &params.name,
+                params.user_id.as_deref(),
+                params.agent_id.as_deref(),
+            )
             .await
         {
             Ok(()) => Ok(CallToolResult::success(vec![Content::text(
@@ -1265,7 +1306,11 @@ impl MemoryHandler {
         };
         match self
             .storage
-            .get_mindmap(&params.name, params.user_id.as_deref())
+            .get_mindmap(
+                &params.name,
+                params.user_id.as_deref(),
+                params.agent_id.as_deref(),
+            )
             .await
         {
             Ok(Some(mm)) => Ok(CallToolResult::success(vec![Content::text(

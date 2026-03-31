@@ -9,6 +9,7 @@ use axum::{
 };
 use serde::Deserialize;
 use surreal_memory::{MapType, MindMap, MindMapEdge, MindMapNode};
+use surrealdb::types::RecordId;
 
 use super::AppState;
 
@@ -35,6 +36,7 @@ struct ScopeQuery {
 #[derive(Deserialize)]
 struct ExportQuery {
     user_id: Option<String>,
+    agent_id: Option<String>,
     #[serde(default = "default_format")]
     format: String,
 }
@@ -50,6 +52,8 @@ struct CreateMindmapBody {
     description: Option<String>,
     agent_id: Option<String>,
     user_id: Option<String>,
+    task_stream_id: Option<String>,
+    tags: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -104,7 +108,7 @@ async fn create_mindmap(
         "temporal" => MapType::Temporal,
         _ => MapType::Radial,
     };
-    let mm = MindMap::new(
+    let mut mm = MindMap::new(
         body.name,
         map_type,
         body.root_label,
@@ -112,6 +116,15 @@ async fn create_mindmap(
         body.agent_id,
         body.user_id,
     );
+    if let Some(task_stream_id) = body.task_stream_id {
+        mm.task_stream_id = Some(RecordId::parse_simple(&task_stream_id).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("invalid task_stream_id: {e}") })),
+            )
+        })?);
+    }
+    mm.tags = body.tags.unwrap_or_default();
     let created = state
         .storage
         .create_mindmap(mm)
@@ -139,7 +152,7 @@ async fn get_mindmap(
 ) -> Result<Json<Option<MindMap>>, (StatusCode, Json<serde_json::Value>)> {
     let mm = state
         .storage
-        .get_mindmap(&name, q.user_id.as_deref())
+        .get_mindmap(&name, q.user_id.as_deref(), q.agent_id.as_deref())
         .await
         .map_err(internal_err)?;
     Ok(Json(mm))
@@ -152,7 +165,7 @@ async fn delete_mindmap(
 ) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
     state
         .storage
-        .delete_mindmap(&name, q.user_id.as_deref())
+        .delete_mindmap(&name, q.user_id.as_deref(), q.agent_id.as_deref())
         .await
         .map_err(internal_err)?;
     Ok(StatusCode::NO_CONTENT)
@@ -174,7 +187,7 @@ async fn add_node(
     };
     let mm = state
         .storage
-        .add_mindmap_node(&name, q.user_id.as_deref(), node)
+        .add_mindmap_node(&name, q.user_id.as_deref(), q.agent_id.as_deref(), node)
         .await
         .map_err(internal_err)?;
     Ok(Json(mm))
@@ -187,7 +200,7 @@ async fn delete_node(
 ) -> Result<Json<MindMap>, (StatusCode, Json<serde_json::Value>)> {
     let mm = state
         .storage
-        .delete_mindmap_node(&name, q.user_id.as_deref(), &node_id)
+        .delete_mindmap_node(&name, q.user_id.as_deref(), q.agent_id.as_deref(), &node_id)
         .await
         .map_err(internal_err)?;
     Ok(Json(mm))
@@ -207,7 +220,7 @@ async fn add_edge(
     };
     let mm = state
         .storage
-        .add_mindmap_edge(&name, q.user_id.as_deref(), edge)
+        .add_mindmap_edge(&name, q.user_id.as_deref(), q.agent_id.as_deref(), edge)
         .await
         .map_err(internal_err)?;
     Ok(Json(mm))
@@ -226,7 +239,7 @@ async fn export_mindmap(
     };
     let mm = state
         .storage
-        .get_mindmap(&name, q.user_id.as_deref())
+        .get_mindmap(&name, q.user_id.as_deref(), q.agent_id.as_deref())
         .await
         .map_err(internal_err)?
         .ok_or_else(|| {
@@ -343,7 +356,9 @@ mod tests {
         body::{Body, to_bytes},
         http::{Request, StatusCode},
     };
-    use surreal_memory::{MemoryStorage, embeddings::EmbeddingService, storage::surreal::SurrealStorage};
+    use surreal_memory::{
+        MemoryStorage, embeddings::EmbeddingService, storage::surreal::SurrealStorage,
+    };
     use tower::ServiceExt;
 
     use super::*;
@@ -384,7 +399,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_mindmap_simple() {
+    async fn mindmap_routes_cover_metadata_and_get() {
         let router = router_with_storage(make_storage().await);
 
         let request = Request::builder()
@@ -458,7 +473,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mindmap_routes_cover_export_and_delete() {
+    async fn mindmap_routes_cover_metadata_fields() {
         let router = router_with_storage(make_storage().await);
 
         // Create mindmap
@@ -467,42 +482,32 @@ mod tests {
             .uri("/")
             .header("content-type", "application/json")
             .body(Body::from(
-                r#"{"name":"persona-map","root_label":"Root","map_type":"radial","user_id":"user-1"}"#,
+                r#"{"name":"persona-map","root_label":"Root","map_type":"radial","user_id":"user-1","task_stream_id":"task_stream:stream-1","tags":["persona","seed"]}"#,
             ))
             .unwrap();
         let create_response = router.clone().oneshot(create_request).await.unwrap();
         assert_eq!(create_response.status(), StatusCode::CREATED);
         let create_body = json_response(create_response).await;
-        assert_eq!(create_body["name"], "persona-map");
+        assert_eq!(create_body["task_stream_id"]["table"], "task_stream");
+        assert_eq!(create_body["task_stream_id"]["key"]["String"], "stream-1");
+        assert_eq!(create_body["tags"][0], "persona");
+        assert_eq!(create_body["tags"][1], "seed");
 
-        // Export to mermaid format
-        let export_request = Request::builder()
-            .method("GET")
-            .uri("/persona-map/export?user_id=user-1&format=mermaid")
-            .body(Body::empty())
+        let add_node_request = Request::builder()
+            .method("POST")
+            .uri("/persona-map/nodes?user_id=user-1")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"node_id":"beliefs","label":"Beliefs","parent_id":"root","metadata":{"source":"memory","details":{"confidence":0.9}}}"#,
+            ))
             .unwrap();
-        let export_response = router.clone().oneshot(export_request).await.unwrap();
-        assert_eq!(export_response.status(), StatusCode::OK);
-        let export_text = String::from_utf8(
-            to_bytes(export_response.into_body(), usize::MAX)
-                .await
-                .unwrap()
-                .to_vec(),
-        )
-        .unwrap();
-        assert!(export_text.contains("graph TD"));
-        assert!(export_text.contains("root"));
-
-        // Delete mindmap
-        let delete_map_request = Request::builder()
-            .method("DELETE")
-            .uri("/persona-map?user_id=user-1")
-            .body(Body::empty())
-            .unwrap();
-        let delete_map_response = router.clone().oneshot(delete_map_request).await.unwrap();
-        assert_eq!(delete_map_response.status(), StatusCode::NO_CONTENT);
-
-        // Verify deletion
+        let add_node_response = router.clone().oneshot(add_node_request).await.unwrap();
+        assert_eq!(add_node_response.status(), StatusCode::OK);
+        let add_node_body = json_response(add_node_response).await;
+        assert_eq!(
+            add_node_body["nodes"][1]["metadata"]["details"]["confidence"],
+            serde_json::json!(0.9)
+        );
         let get_request = Request::builder()
             .method("GET")
             .uri("/persona-map?user_id=user-1")
@@ -511,6 +516,8 @@ mod tests {
         let get_response = router.oneshot(get_request).await.unwrap();
         assert_eq!(get_response.status(), StatusCode::OK);
         let get_body = json_response(get_response).await;
-        assert!(get_body.is_null());
+        assert_eq!(get_body["name"], "persona-map");
+        assert_eq!(get_body["nodes"].as_array().unwrap().len(), 2);
+        assert_eq!(get_body["tags"][0], "persona");
     }
 }

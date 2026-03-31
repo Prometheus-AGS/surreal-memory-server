@@ -85,6 +85,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "mindmap_node_element_fields_flexible",
         sql: MIGRATION_V12_SQL,
     },
+    Migration {
+        version: 13,
+        name: "mindmap_edge_nested_fields",
+        sql: MIGRATION_V13_SQL,
+    },
 ];
 
 // ── v1: Baseline entity + relation schema ─────────────────────────────────────
@@ -278,6 +283,20 @@ DEFINE FIELD IF NOT EXISTS nodes.*.metadata ON mindmap TYPE option<object> FLEXI
 DEFINE FIELD IF NOT EXISTS edges.* ON mindmap TYPE object FLEXIBLE;
 ";
 
+// ── v13: Explicit nested schema for mindmap edge objects ─────────────────────
+//
+// Server-mode SCHEMAFULL validation can still reject `edges[*].directed` when
+// only the wildcard element object is marked FLEXIBLE. Define the concrete
+// nested edge fields explicitly so fresh namespaces and upgraded deployments
+// accept the serialized `MindMapEdge` shape.
+
+const MIGRATION_V13_SQL: &str = "
+DEFINE FIELD IF NOT EXISTS edges.*.from_id ON mindmap TYPE string;
+DEFINE FIELD IF NOT EXISTS edges.*.to_id ON mindmap TYPE string;
+DEFINE FIELD IF NOT EXISTS edges.*.label ON mindmap TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS edges.*.directed ON mindmap TYPE bool;
+";
+
 // ── Runner ────────────────────────────────────────────────────────────────────
 
 pub async fn run_migrations(db: &Surreal<Any>) -> Result<()> {
@@ -317,9 +336,13 @@ async fn apply_migration(db: &Surreal<Any>, migration: &Migration) -> Result<()>
         &checksum[..8]
     );
 
-    db.query(migration.sql)
+    let response = db
+        .query(migration.sql)
         .await
         .with_context(|| format!("SQL error in migration v{}", migration.version))?;
+    response
+        .check()
+        .with_context(|| format!("Migration v{} was rejected by SurrealDB", migration.version))?;
 
     let applied_at = Datetime::default();
     db.query(
@@ -343,14 +366,14 @@ struct SchemaVersion {
 
 #[cfg(test)]
 mod tests {
-    use super::{MIGRATION_V11_SQL, MIGRATION_V12_SQL, MIGRATIONS};
+    use super::{MIGRATION_V11_SQL, MIGRATION_V12_SQL, MIGRATION_V13_SQL, MIGRATIONS};
 
     #[test]
-    fn migration_v12_is_registered() {
+    fn migration_v13_is_registered() {
         let last = MIGRATIONS.last().expect("at least one migration");
-        assert_eq!(last.version, 12);
-        assert_eq!(last.name, "mindmap_node_element_fields_flexible");
-        assert_eq!(last.sql, MIGRATION_V12_SQL);
+        assert_eq!(last.version, 13);
+        assert_eq!(last.name, "mindmap_edge_nested_fields");
+        assert_eq!(last.sql, MIGRATION_V13_SQL);
     }
 
     #[test]
@@ -359,5 +382,13 @@ mod tests {
         assert!(MIGRATION_V12_SQL.contains("DEFINE FIELD nodes.* ON mindmap"));
         assert!(MIGRATION_V12_SQL.contains("DEFINE FIELD edges.* ON mindmap"));
         assert!(MIGRATION_V12_SQL.contains("FLEXIBLE"));
+    }
+
+    #[test]
+    fn migration_v13_covers_edge_fields() {
+        assert!(MIGRATION_V13_SQL.contains("DEFINE FIELD IF NOT EXISTS edges.*.from_id"));
+        assert!(MIGRATION_V13_SQL.contains("DEFINE FIELD IF NOT EXISTS edges.*.to_id"));
+        assert!(MIGRATION_V13_SQL.contains("DEFINE FIELD IF NOT EXISTS edges.*.label"));
+        assert!(MIGRATION_V13_SQL.contains("DEFINE FIELD IF NOT EXISTS edges.*.directed"));
     }
 }

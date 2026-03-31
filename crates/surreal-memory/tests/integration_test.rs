@@ -10,6 +10,7 @@ use surreal_memory::{
     storage::surreal::{RetryConfig, SurrealConfig, SurrealMode, SurrealStorage},
     task_stream::TaskStreamStatus,
 };
+use uuid::Uuid;
 
 // ── NoOp Embedder ─────────────────────────────────────────────────────────────
 
@@ -35,6 +36,44 @@ async fn make_storage() -> Arc<SurrealStorage> {
             .await
             .expect("in-memory SurrealStorage"),
     )
+}
+
+async fn make_server_storage() -> Arc<SurrealStorage> {
+    let embedder: Arc<dyn surreal_memory::embeddings::EmbeddingService> = Arc::new(NoOpEmbedder);
+    let suffix = Uuid::new_v4().simple().to_string();
+    let config = SurrealConfig {
+        mode: SurrealMode::Server,
+        endpoint: Some(
+            std::env::var("TEST_SURREAL_ENDPOINT")
+                .unwrap_or_else(|_| "ws://127.0.0.1:28000".to_string()),
+        ),
+        embedded_path: None,
+        username: Some(
+            std::env::var("TEST_SURREAL_USERNAME").unwrap_or_else(|_| "root".to_string()),
+        ),
+        password: Some(
+            std::env::var("TEST_SURREAL_PASSWORD").unwrap_or_else(|_| "root".to_string()),
+        ),
+        namespace: format!("test_{}", suffix),
+        database: "main".to_string(),
+    };
+
+    Arc::new(
+        SurrealStorage::new(&config, embedder)
+            .await
+            .expect("server-mode SurrealStorage"),
+    )
+}
+
+fn record_id_string(id: &surrealdb::types::RecordId) -> String {
+    use surrealdb::types::RecordIdKey;
+    let key = match &id.key {
+        RecordIdKey::String(value) => value.clone(),
+        RecordIdKey::Number(value) => value.to_string(),
+        RecordIdKey::Uuid(value) => value.to_string(),
+        other => format!("{other:?}"),
+    };
+    format!("{}:{}", id.table.as_str(), key)
 }
 
 fn entity(name: &str) -> Entity {
@@ -309,7 +348,7 @@ async fn test_mindmap_crud() {
     assert_eq!(created.name, "persona");
 
     let fetched = s
-        .get_mindmap("persona", Some("u1"))
+        .get_mindmap("persona", Some("u1"), None)
         .await
         .expect("get")
         .expect("exists");
@@ -330,7 +369,7 @@ async fn test_mindmap_crud() {
         })),
     };
     let updated = s
-        .add_mindmap_node("persona", Some("u1"), node)
+        .add_mindmap_node("persona", Some("u1"), None, node)
         .await
         .expect("add_node");
     assert_eq!(updated.nodes.len(), 2);
@@ -347,15 +386,155 @@ async fn test_mindmap_crud() {
     let list = s.list_mindmaps(Some("u1"), None).await.expect("list");
     assert!(!list.is_empty());
 
-    s.delete_mindmap("persona", Some("u1"))
+    s.delete_mindmap("persona", Some("u1"), None)
         .await
         .expect("delete");
     assert!(
-        s.get_mindmap("persona", Some("u1"))
+        s.get_mindmap("persona", Some("u1"), None)
             .await
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn taskstream_server_mode_explicit_create_round_trips_model_settings() {
+    let s = make_server_storage().await;
+    let name = format!("taskstream-{}", Uuid::new_v4().simple());
+
+    let mut ts = TaskStream::new(
+        &name,
+        Some("server-mode regression".to_string()),
+        Some("agent-server".to_string()),
+        Some("user-server".to_string()),
+    );
+    ts.model_id = Some("gpt-4o".to_string());
+    ts.auto_summarize = false;
+
+    let created = s.create_task_stream(ts).await.expect("create_task_stream");
+    assert_eq!(created.name, name);
+    assert_eq!(created.model_id.as_deref(), Some("gpt-4o"));
+    assert!(!created.auto_summarize);
+    assert!(
+        created.id.is_some(),
+        "server-mode create should return an id"
+    );
+
+    let fetched = s
+        .get_task_stream(&name)
+        .await
+        .expect("get_task_stream")
+        .expect("task stream exists");
+    assert_eq!(fetched.model_id.as_deref(), Some("gpt-4o"));
+    assert!(!fetched.auto_summarize);
+}
+
+#[tokio::test]
+async fn mindmap_server_mode_mutations_round_trip_without_decode_failures() {
+    let s = make_server_storage().await;
+    let name = format!("mindmap-{}", Uuid::new_v4().simple());
+    let user_id = format!("user-{}", Uuid::new_v4().simple());
+    let agent_id = format!("agent-{}", Uuid::new_v4().simple());
+
+    let mut mm = MindMap::new(
+        &name,
+        MapType::Radial,
+        "Root",
+        Some("server-mode regression".to_string()),
+        Some(agent_id.clone()),
+        Some(user_id.clone()),
+    );
+    mm.tags = vec!["persona".to_string(), "server".to_string()];
+
+    let created = s.create_mindmap(mm).await.expect("create_mindmap");
+    assert_eq!(
+        created.tags,
+        vec!["persona".to_string(), "server".to_string()]
+    );
+
+    let node = MindMapNode {
+        id: "beliefs".to_string(),
+        label: "Beliefs".to_string(),
+        parent_id: Some("root".to_string()),
+        node_type: Some("branch".to_string()),
+        color: None,
+        metadata: Some(serde_json::json!({
+            "source": {
+                "kind": "memory",
+                "confidence": 0.9
+            }
+        })),
+    };
+
+    let with_node = s
+        .add_mindmap_node(&name, Some(&user_id), Some(&agent_id), node)
+        .await
+        .expect("add_mindmap_node");
+    assert_eq!(with_node.nodes.len(), 2);
+
+    let with_edge = s
+        .add_mindmap_edge(
+            &name,
+            Some(&user_id),
+            Some(&agent_id),
+            surreal_memory::mindmap::MindMapEdge {
+                from_id: "root".to_string(),
+                to_id: "beliefs".to_string(),
+                label: Some("contains".to_string()),
+                directed: true,
+            },
+        )
+        .await
+        .expect("add_mindmap_edge");
+    assert_eq!(with_edge.edges.len(), 1);
+
+    let fetched = s
+        .get_mindmap(&name, Some(&user_id), Some(&agent_id))
+        .await
+        .expect("get_mindmap")
+        .expect("mindmap exists");
+    assert_eq!(fetched.nodes.len(), 2);
+    assert_eq!(fetched.edges.len(), 1);
+    assert_eq!(
+        fetched.nodes[1]
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("source"))
+            .and_then(|source| source.get("kind"))
+            .and_then(serde_json::Value::as_str),
+        Some("memory")
+    );
+
+    let listed = s
+        .list_mindmaps(Some(&user_id), Some(&agent_id))
+        .await
+        .expect("list_mindmaps");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].name, name);
+}
+
+#[tokio::test]
+async fn memory_server_mode_lifecycle_round_trips_record_ids() {
+    let s = make_server_storage().await;
+    let user_id = format!("user-{}", Uuid::new_v4().simple());
+
+    let stored = s
+        .add_memory(memory("server memory", &user_id))
+        .await
+        .expect("add_memory");
+    let id = stored.id.as_ref().map(record_id_string).expect("memory id");
+
+    let fetched = s.get_memory(&id).await.expect("get_memory");
+    assert!(fetched.is_some());
+
+    let updated = s
+        .update_memory(&id, "updated server memory".to_string())
+        .await
+        .expect("update_memory");
+    assert_eq!(updated.content, "updated server memory");
+
+    s.delete_memory(&id).await.expect("delete_memory");
+    assert!(s.get_memory(&id).await.expect("get after delete").is_none());
 }
 
 // ── Graph-RAG ─────────────────────────────────────────────────────────────────
