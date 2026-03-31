@@ -465,7 +465,7 @@ impl SurrealStorage {
         );
 
         let mut response = db
-            .query("UPDATE $id CONTENT $value RETURN AFTER")
+            .query("UPDATE type::record($id) CONTENT $value RETURN AFTER")
             .bind(("id", record_id.clone()))
             .bind(("value", data))
             .await
