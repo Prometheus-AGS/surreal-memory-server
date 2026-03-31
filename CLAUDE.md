@@ -227,6 +227,21 @@ Migrations live in `crates/surreal-memory/src/storage/migrations/mod.rs`.
 - `get_context_for_task` sorts by importance and truncates to token budget — it's the hot path for LLM prompt construction
 - `compress_memories` and `auto_summarize_task_stream` are expensive — they re-embed the summary
 
+### Mindmap Performance Limitations
+
+**Known Issue**: Mindmaps with >500 nodes experience slow updates (timeouts or multi-second delays).
+
+**Root Cause**: SurrealDB has a known performance bottleneck with `UPDATE CONTENT` on large JSON objects (see [SurrealDB #1810](https://github.com/surrealdb/surrealdb/issues/1810)). Mindmaps are stored as single records with nested node/edge arrays, so every node addition rewrites the entire mindmap.
+
+**Mitigation Applied (2026-03-31)**:
+- Added 30-second query timeout to fail fast: `UPDATE ... TIMEOUT 30s`
+- Added warnings when mindmaps exceed 500 nodes
+- Added JSON size monitoring for objects >500KB
+
+**Recommended**: Keep mindmaps under 500 nodes. Split large hierarchies into multiple related mindmaps or use TaskStreams for linear context.
+
+See `docs/MINDMAP_PERFORMANCE.md` for detailed benchmarks and future improvement plans.
+
 ## AI Agent Operational Rules
 
 These rules exist because of real failures observed during the WISC CLI integration (2026-03-17). Follow them.

@@ -54,6 +54,7 @@ services:
       - SURREAL_BASE_RETRY_DELAY_MS=100      # Starting backoff delay
       - SURREAL_MAX_RETRY_DELAY_MS=5000      # Maximum backoff delay
       - SURREAL_RETRY_JITTER_FACTOR=0.25     # Jitter as decimal (0.25 = ±25%)
+      - RUST_LOG=debug                       # Enable debug logging
     depends_on:
       surrealdb:
         condition: service_healthy

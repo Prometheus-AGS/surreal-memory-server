@@ -458,14 +458,33 @@ impl SurrealStorage {
         data: serde_json::Value,
         operation: String,
     ) -> Result<serde_json::Value> {
+        // Estimate JSON size for performance monitoring
+        let json_size = serde_json::to_string(&data)
+            .map(|s| s.len())
+            .unwrap_or(0);
+
         tracing::debug!(
             id = %record_id,
             operation = %operation,
+            json_size_bytes = json_size,
             "Replacing record"
         );
 
+        // Warn about large objects that may cause performance issues
+        // Known SurrealDB issue: UPDATE CONTENT with large JSON (>500KB) can be very slow
+        if json_size > 500_000 {
+            tracing::warn!(
+                id = %record_id,
+                operation = %operation,
+                json_size_kb = json_size / 1024,
+                "Large object update detected - this may be slow (SurrealDB issue #1810)"
+            );
+        }
+
+        // Add 30-second timeout to prevent indefinite hangs on large objects
+        // SurrealDB can take 4+ minutes for large JSON updates without a timeout
         let mut response = db
-            .query("UPDATE type::record($id) CONTENT $value RETURN AFTER")
+            .query("UPDATE type::record($id) CONTENT $value RETURN AFTER TIMEOUT 30s")
             .bind(("id", record_id.clone()))
             .bind(("value", data))
             .await
@@ -1613,6 +1632,20 @@ impl MemoryStorage for SurrealStorage {
             );
         }
 
+        // Performance warning: SurrealDB UPDATE CONTENT is slow with large JSON objects
+        // See: https://github.com/surrealdb/surrealdb/issues/1810
+        let node_count = mm.nodes.len();
+        let edge_count = mm.edges.len();
+
+        if node_count > 500 {
+            tracing::warn!(
+                mindmap = mindmap_name,
+                node_count = node_count,
+                edge_count = edge_count,
+                "Large mindmap detected - updates may be slow. Consider splitting into multiple mindmaps."
+            );
+        }
+
         mm.nodes.push(node);
         mm.updated_at = Datetime::default();
 
@@ -1638,6 +1671,17 @@ impl MemoryStorage for SurrealStorage {
             .get_mindmap(mindmap_name, user_id)
             .await?
             .with_context(|| format!("Mindmap '{}' not found", mindmap_name))?;
+
+        // Performance warning for large mindmaps
+        if mm.nodes.len() > 500 {
+            tracing::warn!(
+                mindmap = mindmap_name,
+                node_count = mm.nodes.len(),
+                edge_count = mm.edges.len(),
+                "Large mindmap detected - updates may be slow"
+            );
+        }
+
         mm.edges.push(edge);
         mm.updated_at = Datetime::default();
         let record_key = mm

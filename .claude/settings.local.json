@@ -26,7 +26,13 @@
       "WebSearch",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:surrealdb.com)",
-      "Bash(python3 -m json.tool)"
+      "Bash(python3 -m json.tool)",
+      "Bash(docker-compose restart:*)",
+      "mcp__surreal-memory__create_mindmap",
+      "mcp__tavily-mcp__tavily_search",
+      "Bash(docker-compose build:*)",
+      "Bash(docker-compose down:*)",
+      "Bash(docker-compose up:*)"
     ]
   }
 }
