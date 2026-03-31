@@ -51,7 +51,9 @@ async fn taskstream_api_server_mode_full_lifecycle_round_trip() {
         .expect("list taskstreams request");
     assert_eq!(list_response.status(), reqwest::StatusCode::OK);
     let listed = read_json(list_response).await;
-    let streams = listed.as_array().expect("task stream list should be an array");
+    let streams = listed
+        .as_array()
+        .expect("task stream list should be an array");
     assert_eq!(streams.len(), 1);
     assert_eq!(streams[0]["name"], name);
 
@@ -91,7 +93,13 @@ async fn taskstream_api_server_mode_full_lifecycle_round_trip() {
     assert_eq!(context_response.status(), reqwest::StatusCode::OK);
     let context = read_json(context_response).await;
     assert_eq!(context["model_name"], "gpt-4o");
-    assert_eq!(context["memories"].as_array().expect("context memories").len(), 1);
+    assert_eq!(
+        context["memories"]
+            .as_array()
+            .expect("context memories")
+            .len(),
+        1
+    );
 
     let pause_response = client
         .post(format!("{base}/api/v1/taskstreams/{name}/pause"))
@@ -119,4 +127,18 @@ async fn taskstream_api_server_mode_full_lifecycle_round_trip() {
     assert_eq!(final_get_response.status(), reqwest::StatusCode::OK);
     let final_taskstream = read_json(final_get_response).await;
     assert_eq!(final_taskstream["status"], "archived");
+
+    let delete_response = client
+        .delete(format!("{base}/api/v1/taskstreams/{name}"))
+        .send()
+        .await
+        .expect("delete taskstream request");
+    assert_eq!(delete_response.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let missing_response = client
+        .get(format!("{base}/api/v1/taskstreams/{name}"))
+        .send()
+        .await
+        .expect("missing taskstream request");
+    assert_eq!(missing_response.status(), reqwest::StatusCode::NOT_FOUND);
 }

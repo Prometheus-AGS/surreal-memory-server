@@ -123,6 +123,7 @@ pub trait MemoryStorage: Send + Sync {
         agent_id: Option<&str>,
         user_id: Option<&str>,
     ) -> Result<Vec<TaskStream>>;
+    async fn delete_task_stream(&self, name: &str) -> Result<()>;
     async fn archive_task_stream(&self, name: &str) -> Result<TaskStream>;
     /// Pause an active `TaskStream`, suspending further additions without archiving it.
     async fn pause_task_stream(&self, name: &str) -> Result<TaskStream>;

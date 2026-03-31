@@ -353,7 +353,7 @@ GET    /api/v1/mindmaps/:name/export Export (json|mermaid|markdown)
 POST   /api/v1/taskstreams                   Create task stream
 GET    /api/v1/taskstreams                   List task streams
 GET    /api/v1/taskstreams/:name             Get task stream
-DELETE /api/v1/taskstreams/:name             Archive task stream
+DELETE /api/v1/taskstreams/:name             Delete task stream
 POST   /api/v1/taskstreams/:name/archive     Archive task stream and return updated record
 POST   /api/v1/taskstreams/:name/memories    Add memory to task stream
 GET    /api/v1/taskstreams/:name/context     Get model-budgeted context window

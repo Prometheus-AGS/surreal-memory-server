@@ -235,7 +235,10 @@ mod tests {
             MemoryType::Procedural,
             MemoryType::Associative,
         ] {
-            assert_eq!(MemoryType::parse_str(memory_type.as_str()).unwrap(), memory_type);
+            assert_eq!(
+                MemoryType::parse_str(memory_type.as_str()).unwrap(),
+                memory_type
+            );
         }
     }
 

@@ -121,8 +121,14 @@ async fn mindmap_api_server_mode_full_lifecycle_round_trip() {
         .expect("delete node request");
     assert_eq!(delete_node_response.status(), reqwest::StatusCode::OK);
     let without_node = read_json(delete_node_response).await;
-    assert_eq!(without_node["nodes"].as_array().expect("nodes array").len(), 1);
-    assert_eq!(without_node["edges"].as_array().expect("edges array").len(), 0);
+    assert_eq!(
+        without_node["nodes"].as_array().expect("nodes array").len(),
+        1
+    );
+    assert_eq!(
+        without_node["edges"].as_array().expect("edges array").len(),
+        0
+    );
 
     let export_response = client
         .get(format!(
@@ -143,7 +149,10 @@ async fn mindmap_api_server_mode_full_lifecycle_round_trip() {
         .send()
         .await
         .expect("delete mindmap request");
-    assert_eq!(delete_map_response.status(), reqwest::StatusCode::NO_CONTENT);
+    assert_eq!(
+        delete_map_response.status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
 
     let final_get_response = client
         .get(format!(
@@ -152,9 +161,7 @@ async fn mindmap_api_server_mode_full_lifecycle_round_trip() {
         .send()
         .await
         .expect("final get mindmap request");
-    assert_eq!(final_get_response.status(), reqwest::StatusCode::OK);
-    let final_get = read_json(final_get_response).await;
-    assert_eq!(final_get, serde_json::Value::Null);
+    assert_eq!(final_get_response.status(), reqwest::StatusCode::NOT_FOUND);
 
     let final_list_response = client
         .get(format!(
@@ -166,6 +173,9 @@ async fn mindmap_api_server_mode_full_lifecycle_round_trip() {
     assert_eq!(final_list_response.status(), reqwest::StatusCode::OK);
     let final_list = read_json(final_list_response).await;
     assert!(
-        final_list.as_array().expect("final list response should be an array").is_empty()
+        final_list
+            .as_array()
+            .expect("final list response should be an array")
+            .is_empty()
     );
 }

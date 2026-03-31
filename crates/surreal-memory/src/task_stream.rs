@@ -148,7 +148,10 @@ mod tests {
             TaskStreamStatus::Paused,
             TaskStreamStatus::Archived,
         ] {
-            assert_eq!(TaskStreamStatus::parse_str(status.as_str()).unwrap(), status);
+            assert_eq!(
+                TaskStreamStatus::parse_str(status.as_str()).unwrap(),
+                status
+            );
         }
     }
 

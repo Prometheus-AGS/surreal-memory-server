@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use std::sync::Arc;
+use surreal_memory::storage::migrations::{inspect_legacy_enum_data, repair_legacy_enum_data};
 use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
 use surrealdb::opt::auth::Root;
-use surreal_memory::storage::migrations::{inspect_legacy_enum_data, repair_legacy_enum_data};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod api;
@@ -229,7 +229,9 @@ fn load_surreal_config_without_embeddings() -> Result<surreal_memory::SurrealCon
     })
 }
 
-async fn connect_surreal_for_repair(config: &surreal_memory::SurrealConfig) -> Result<Surreal<Any>> {
+async fn connect_surreal_for_repair(
+    config: &surreal_memory::SurrealConfig,
+) -> Result<Surreal<Any>> {
     let db = match &config.mode {
         surreal_memory::storage::surreal::SurrealMode::Embedded => {
             let path = config

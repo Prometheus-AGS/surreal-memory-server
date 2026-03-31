@@ -46,7 +46,12 @@ impl Migration {
         }
     }
 
-    const fn repair(version: u32, name: &'static str, repair: RepairFn, checksum_source: &'static str) -> Self {
+    const fn repair(
+        version: u32,
+        name: &'static str,
+        repair: RepairFn,
+        checksum_source: &'static str,
+    ) -> Self {
         Self {
             version,
             name,
@@ -67,9 +72,17 @@ static MIGRATIONS: &[Migration] = &[
     Migration::sql(7, "task_stream_auto_summarization_fields", MIGRATION_V7_SQL),
     Migration::sql(8, "memory_metadata_flexible", MIGRATION_V8_SQL),
     Migration::sql(9, "mindmap_nodes_edges_flexible", MIGRATION_V9_SQL),
-    Migration::sql(10, "mindmap_nodes_edges_flexible_overwrite", MIGRATION_V10_SQL),
+    Migration::sql(
+        10,
+        "mindmap_nodes_edges_flexible_overwrite",
+        MIGRATION_V10_SQL,
+    ),
     Migration::sql(11, "mindmap_nodes_edges_remove_redefine", MIGRATION_V11_SQL),
-    Migration::sql(12, "mindmap_node_element_fields_flexible", MIGRATION_V12_SQL),
+    Migration::sql(
+        12,
+        "mindmap_node_element_fields_flexible",
+        MIGRATION_V12_SQL,
+    ),
     Migration::sql(13, "mindmap_edge_nested_fields", MIGRATION_V13_SQL),
     Migration::repair(
         14,
@@ -520,7 +533,11 @@ async fn apply_repair_change(db: &Surreal<Any>, change: &RepairChange) -> Result
         ("memory", "memory_type") => "UPDATE $record SET memory_type = $value",
         ("task_stream", "status") => "UPDATE $record SET status = $value",
         ("mindmap", "map_type") => "UPDATE $record SET map_type = $value",
-        _ => anyhow::bail!("Unsupported repair target {}.{}", change.table, change.field),
+        _ => anyhow::bail!(
+            "Unsupported repair target {}.{}",
+            change.table,
+            change.field
+        ),
     };
 
     let response = db
@@ -600,9 +617,9 @@ async fn apply_migration(db: &Surreal<Any>, migration: &Migration) -> Result<()>
             .query(migration.sql)
             .await
             .with_context(|| format!("SQL error in migration v{}", migration.version))?;
-        response
-            .check()
-            .with_context(|| format!("Migration v{} was rejected by SurrealDB", migration.version))?;
+        response.check().with_context(|| {
+            format!("Migration v{} was rejected by SurrealDB", migration.version)
+        })?;
     }
 
     if let Some(repair) = migration.repair {
@@ -633,8 +650,8 @@ struct SchemaVersion {
 mod tests {
     use super::{
         MIGRATION_V11_SQL, MIGRATION_V12_SQL, MIGRATION_V13_SQL, MIGRATION_V15_SQL, MIGRATIONS,
-        RawMemoryEnumRecord, RawMindMapEnumRecord, RawTaskStreamEnumRecord,
-        apply_migration, inspect_legacy_enum_data, normalize_enum_value,
+        RawMemoryEnumRecord, RawMindMapEnumRecord, RawTaskStreamEnumRecord, apply_migration,
+        inspect_legacy_enum_data, normalize_enum_value,
     };
     use crate::{MapType, TaskStreamStatus};
     use surrealdb::Surreal;
@@ -696,7 +713,10 @@ mod tests {
     async fn repair_migration_normalizes_legacy_rows() {
         let db = make_test_db().await;
 
-        for migration in MIGRATIONS.iter().filter(|migration| migration.version <= 13) {
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= 13)
+        {
             apply_migration(&db, migration)
                 .await
                 .expect("apply setup migration");
@@ -710,7 +730,10 @@ mod tests {
         assert_eq!(report.planned_repairs(), 4);
         assert!(!report.has_issues());
 
-        for migration in MIGRATIONS.iter().filter(|migration| migration.version >= 14) {
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version >= 14)
+        {
             apply_migration(&db, migration)
                 .await
                 .expect("apply repair migration");
@@ -723,7 +746,10 @@ mod tests {
             .take(0)
             .unwrap_or_default();
         assert_eq!(repaired_memory.len(), 1);
-        assert_eq!(repaired_memory[0].scope, serde_json::Value::String("global".to_string()));
+        assert_eq!(
+            repaired_memory[0].scope,
+            serde_json::Value::String("global".to_string())
+        );
         assert_eq!(
             repaired_memory[0].memory_type,
             serde_json::Value::String("semantic".to_string())
@@ -786,7 +812,7 @@ mod tests {
                     version: 1,
                     created_at: $now,
                     updated_at: $now
-                }"
+                }",
             )
             .bind(("content", "legacy memory"))
             .bind(("user_id", "user-1"))
@@ -809,7 +835,7 @@ mod tests {
                     model_id: NONE,
                     created_at: $now,
                     last_active: $now
-                }"
+                }",
             )
             .bind(("name", "legacy-stream"))
             .bind(("description", "legacy stream"))
@@ -834,7 +860,7 @@ mod tests {
                     edges: [],
                     created_at: $now,
                     updated_at: $now
-                }"
+                }",
             )
             .bind(("name", "legacy-map"))
             .bind(("description", "legacy map"))

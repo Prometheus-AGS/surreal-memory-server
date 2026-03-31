@@ -3,9 +3,6 @@
 //! All tests use `mem://` SurrealDB — zero external dependencies, runs with just `cargo test`.
 
 use std::sync::Arc;
-use surrealdb::Surreal;
-use surrealdb::engine::any::{Any, connect};
-use surrealdb::opt::auth::Root;
 use surreal_memory::mindmap::{MapType, MindMap, MindMapNode};
 use surreal_memory::{
     Entity, Memory, MemoryStorage, Relation, TaskStream,
@@ -13,6 +10,9 @@ use surreal_memory::{
     storage::surreal::{RetryConfig, SurrealConfig, SurrealMode, SurrealStorage},
     task_stream::TaskStreamStatus,
 };
+use surrealdb::Surreal;
+use surrealdb::engine::any::{Any, connect};
+use surrealdb::opt::auth::Root;
 use uuid::Uuid;
 
 // ── NoOp Embedder ─────────────────────────────────────────────────────────────
@@ -74,8 +74,8 @@ async fn make_server_storage_with_namespace(namespace: String) -> Arc<SurrealSto
 }
 
 async fn connect_server_db(namespace: &str) -> Surreal<Any> {
-    let endpoint =
-        std::env::var("TEST_SURREAL_ENDPOINT").unwrap_or_else(|_| "ws://127.0.0.1:28000".to_string());
+    let endpoint = std::env::var("TEST_SURREAL_ENDPOINT")
+        .unwrap_or_else(|_| "ws://127.0.0.1:28000".to_string());
     let username = std::env::var("TEST_SURREAL_USERNAME").unwrap_or_else(|_| "root".to_string());
     let password = std::env::var("TEST_SURREAL_PASSWORD").unwrap_or_else(|_| "root".to_string());
 
@@ -232,11 +232,7 @@ async fn test_memory_lifecycle() {
         .expect("add_memory");
     assert_eq!(stored.content, "Test content");
 
-    let id_str = stored
-        .id
-        .as_ref()
-        .map(record_id_string)
-        .expect("id string");
+    let id_str = stored.id.as_ref().map(record_id_string).expect("id string");
 
     let fetched = s.get_memory(&id_str).await.expect("get_memory");
     assert!(fetched.is_some());
@@ -338,6 +334,67 @@ async fn test_task_stream_lifecycle() {
     assert_eq!(archived.status, TaskStreamStatus::Archived);
 }
 
+#[tokio::test]
+async fn delete_task_stream_removes_linked_memories_and_detaches_mindmaps() {
+    let s = make_storage().await;
+
+    let stream = s
+        .create_task_stream(TaskStream::new(
+            "cleanup-task",
+            Some("cleanup".to_string()),
+            Some("agent-cleanup".to_string()),
+            Some("user-cleanup".to_string()),
+        ))
+        .await
+        .expect("create task stream");
+    s.add_to_task_stream(
+        "cleanup-task",
+        Memory::new(
+            "delete me".to_string(),
+            Some("user-cleanup".to_string()),
+            Some("agent-cleanup".to_string()),
+            None,
+            vec!["cleanup".to_string()],
+        ),
+    )
+    .await
+    .expect("add task memory");
+
+    let mut map = MindMap::new(
+        "cleanup-map",
+        MapType::Radial,
+        "Cleanup",
+        Some("linked map".to_string()),
+        Some("agent-cleanup".to_string()),
+        Some("user-cleanup".to_string()),
+    );
+    map.task_stream_id = stream.id.clone();
+    s.create_mindmap(map).await.expect("create linked mindmap");
+
+    s.delete_task_stream("cleanup-task")
+        .await
+        .expect("delete task stream");
+
+    assert!(
+        s.get_task_stream("cleanup-task")
+            .await
+            .expect("get task stream after delete")
+            .is_none()
+    );
+    assert!(
+        s.get_all_memories(Some("user-cleanup"), Some("agent-cleanup"), None)
+            .await
+            .expect("get memories after delete")
+            .is_empty()
+    );
+    let linked_map = s
+        .get_mindmap("cleanup-map", Some("user-cleanup"), Some("agent-cleanup"))
+        .await
+        .expect("get linked mindmap after delete")
+        .expect("linked mindmap should survive task deletion");
+    assert!(linked_map.task_stream_id.is_none());
+}
+
 // ── Mindmaps ──────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -435,7 +492,10 @@ async fn test_long_running_project_lifecycle_embedded() {
         .expect("create task stream");
 
     let kickoff = s
-        .add_to_task_stream(&stream_name, memory("Kickoff decision: use shared memory", user_id))
+        .add_to_task_stream(
+            &stream_name,
+            memory("Kickoff decision: use shared memory", user_id),
+        )
         .await
         .expect("add kickoff memory");
     let kickoff_id = kickoff
@@ -445,7 +505,10 @@ async fn test_long_running_project_lifecycle_embedded() {
         .expect("kickoff memory id");
 
     let milestone = s
-        .add_to_task_stream(&stream_name, memory("Milestone: schema repair landed", user_id))
+        .add_to_task_stream(
+            &stream_name,
+            memory("Milestone: schema repair landed", user_id),
+        )
         .await
         .expect("add milestone memory");
     let milestone_id = milestone
@@ -502,7 +565,10 @@ async fn test_long_running_project_lifecycle_embedded() {
     assert_eq!(with_details.nodes.len(), 3);
 
     let updated_memory = s
-        .update_memory(&milestone_id, "Milestone: validation passed across tools".to_string())
+        .update_memory(
+            &milestone_id,
+            "Milestone: validation passed across tools".to_string(),
+        )
         .await
         .expect("update milestone");
     assert_eq!(
@@ -515,10 +581,12 @@ async fn test_long_running_project_lifecycle_embedded() {
         .await
         .expect("context for task");
     assert_eq!(context.memories.len(), 2);
-    assert!(context
-        .memories
-        .iter()
-        .any(|memory| memory.content.contains("validation passed")));
+    assert!(
+        context
+            .memories
+            .iter()
+            .any(|memory| memory.content.contains("validation passed"))
+    );
 
     let fetched_map = s
         .get_mindmap(&created_map.name, Some(user_id), None)
@@ -782,7 +850,10 @@ async fn shared_project_server_mode_continuity_across_storage_instances() {
         Some(user_id.clone()),
     );
     map.task_stream_id = created_stream.id.clone();
-    writer_a.create_mindmap(map).await.expect("writer A create map");
+    writer_a
+        .create_mindmap(map)
+        .await
+        .expect("writer A create map");
 
     let listed_streams = writer_b
         .list_task_streams(None, Some(&user_id))
@@ -847,10 +918,12 @@ async fn shared_project_server_mode_continuity_across_storage_instances() {
         .await
         .expect("writer A updated context");
     assert_eq!(context_after.memories.len(), 2);
-    assert!(context_after
-        .memories
-        .iter()
-        .any(|memory| memory.content.contains("Validation finished")));
+    assert!(
+        context_after
+            .memories
+            .iter()
+            .any(|memory| memory.content.contains("Validation finished"))
+    );
 
     let map_after = writer_a
         .get_mindmap(&map_name, Some(&user_id), None)
@@ -936,7 +1009,7 @@ async fn legacy_enum_rows_are_repaired_on_server_mode_startup() {
             DEFINE FIELD last_active ON task_stream TYPE datetime;
 
             DEFINE TABLE mindmap SCHEMALESS;
-            "
+            ",
         )
         .await
         .expect("define legacy schema");
@@ -993,7 +1066,7 @@ async fn legacy_enum_rows_are_repaired_on_server_mode_startup() {
                 created_at: $now,
                 updated_at: $now
             };
-            "
+            ",
         )
         .bind(("stream_name", "legacy-stream"))
         .bind(("map_name", "legacy-map"))
@@ -1018,7 +1091,10 @@ async fn legacy_enum_rows_are_repaired_on_server_mode_startup() {
         .expect("get memories after repair");
     assert_eq!(memories.len(), 1);
     assert_eq!(memories[0].scope, surreal_memory::MemoryScope::Global);
-    assert_eq!(memories[0].memory_type, surreal_memory::MemoryType::Semantic);
+    assert_eq!(
+        memories[0].memory_type,
+        surreal_memory::MemoryType::Semantic
+    );
 
     let mindmaps = storage
         .list_mindmaps(Some("legacy-user"), None)
@@ -1034,7 +1110,10 @@ async fn legacy_enum_rows_are_repaired_on_server_mode_startup() {
         .expect("query raw status")
         .take(0)
         .unwrap_or_default();
-    assert_eq!(raw_status[0]["status"], serde_json::Value::String("active".to_string()));
+    assert_eq!(
+        raw_status[0]["status"],
+        serde_json::Value::String("active".to_string())
+    );
 }
 
 // ── Graph-RAG ─────────────────────────────────────────────────────────────────
@@ -1121,7 +1200,7 @@ async fn test_operation_survives_transient_failure() {
     let retry_config = RetryConfig {
         max_connect_retries: 5,
         max_operation_retries: 3,
-        base_retry_delay_ms: 10,  // Short delays for test speed
+        base_retry_delay_ms: 10, // Short delays for test speed
         max_retry_delay_ms: 100,
         jitter_factor: 0.1,
     };
@@ -1156,7 +1235,10 @@ async fn test_operation_survives_transient_failure() {
     };
 
     let result = storage.create_entity(entity).await;
-    assert!(result.is_ok(), "create_entity should succeed with retry logic");
+    assert!(
+        result.is_ok(),
+        "create_entity should succeed with retry logic"
+    );
     let created_entity = result.unwrap();
     assert_eq!(created_entity.name, "RetryTestEntity");
 
@@ -1170,7 +1252,10 @@ async fn test_operation_survives_transient_failure() {
         updated_at: Default::default(),
         embedding: None,
     };
-    storage.create_entity(entity2).await.expect("create second entity");
+    storage
+        .create_entity(entity2)
+        .await
+        .expect("create second entity");
 
     let relation = Relation {
         id: None,
@@ -1181,12 +1266,18 @@ async fn test_operation_survives_transient_failure() {
     };
 
     let result = storage.create_relation(relation).await;
-    assert!(result.is_ok(), "create_relation should succeed with retry logic");
+    assert!(
+        result.is_ok(),
+        "create_relation should succeed with retry logic"
+    );
 
     // Test 3: Verify the entities and relations were actually stored
     let fetched = storage.get_entity("RetryTestEntity").await;
     assert!(fetched.is_ok(), "get_entity should succeed");
-    assert!(fetched.unwrap().is_some(), "Entity should exist in database");
+    assert!(
+        fetched.unwrap().is_some(),
+        "Entity should exist in database"
+    );
 
     let relations = storage.get_relations("RetryTestEntity").await;
     assert!(relations.is_ok(), "get_relations should succeed");

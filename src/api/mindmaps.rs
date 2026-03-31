@@ -11,7 +11,7 @@ use serde::Deserialize;
 use surreal_memory::{MapType, MindMap, MindMapEdge, MindMapNode};
 use surrealdb::types::RecordId;
 
-use super::AppState;
+use super::{ApiFailure, AppState, api_error, bad_request, not_found};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -90,24 +90,15 @@ struct GenerateIdeationMindmapBody {
     user_id: Option<String>,
 }
 
-fn internal_err(e: impl ToString) -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(serde_json::json!({ "error": e.to_string() })),
-    )
+fn parse_map_type(raw: &str) -> Result<MapType, ApiFailure> {
+    MapType::parse_str(raw).map_err(|_| bad_request(format!("invalid map_type '{}'", raw)))
 }
 
 async fn create_mindmap(
     State(state): State<AppState>,
     Json(body): Json<CreateMindmapBody>,
-) -> Result<(StatusCode, Json<MindMap>), (StatusCode, Json<serde_json::Value>)> {
-    let map_type = match body.map_type.as_deref().unwrap_or("radial") {
-        "concept" => MapType::Concept,
-        "argument" => MapType::Argument,
-        "tree" => MapType::Tree,
-        "temporal" => MapType::Temporal,
-        _ => MapType::Radial,
-    };
+) -> Result<(StatusCode, Json<MindMap>), ApiFailure> {
+    let map_type = parse_map_type(body.map_type.as_deref().unwrap_or("radial"))?;
     let mut mm = MindMap::new(
         body.name,
         map_type,
@@ -117,31 +108,25 @@ async fn create_mindmap(
         body.user_id,
     );
     if let Some(task_stream_id) = body.task_stream_id {
-        mm.task_stream_id = Some(RecordId::parse_simple(&task_stream_id).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": format!("invalid task_stream_id: {e}") })),
-            )
-        })?);
+        mm.task_stream_id = Some(
+            RecordId::parse_simple(&task_stream_id)
+                .map_err(|e| bad_request(format!("invalid task_stream_id: {e}")))?,
+        );
     }
     mm.tags = body.tags.unwrap_or_default();
-    let created = state
-        .storage
-        .create_mindmap(mm)
-        .await
-        .map_err(internal_err)?;
+    let created = state.storage.create_mindmap(mm).await.map_err(api_error)?;
     Ok((StatusCode::CREATED, Json(created)))
 }
 
 async fn list_mindmaps(
     State(state): State<AppState>,
     Query(q): Query<ScopeQuery>,
-) -> Result<Json<Vec<MindMap>>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<Vec<MindMap>>, ApiFailure> {
     let maps = state
         .storage
         .list_mindmaps(q.user_id.as_deref(), q.agent_id.as_deref())
         .await
-        .map_err(internal_err)?;
+        .map_err(api_error)?;
     Ok(Json(maps))
 }
 
@@ -149,12 +134,13 @@ async fn get_mindmap(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Query(q): Query<ScopeQuery>,
-) -> Result<Json<Option<MindMap>>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<MindMap>, ApiFailure> {
     let mm = state
         .storage
         .get_mindmap(&name, q.user_id.as_deref(), q.agent_id.as_deref())
         .await
-        .map_err(internal_err)?;
+        .map_err(api_error)?
+        .ok_or_else(|| not_found("Mindmap not found"))?;
     Ok(Json(mm))
 }
 
@@ -162,12 +148,18 @@ async fn delete_mindmap(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Query(q): Query<ScopeQuery>,
-) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<StatusCode, ApiFailure> {
+    state
+        .storage
+        .get_mindmap(&name, q.user_id.as_deref(), q.agent_id.as_deref())
+        .await
+        .map_err(api_error)?
+        .ok_or_else(|| not_found("Mindmap not found"))?;
     state
         .storage
         .delete_mindmap(&name, q.user_id.as_deref(), q.agent_id.as_deref())
         .await
-        .map_err(internal_err)?;
+        .map_err(api_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -176,7 +168,7 @@ async fn add_node(
     Path(name): Path<String>,
     Query(q): Query<ScopeQuery>,
     Json(body): Json<AddNodeBody>,
-) -> Result<Json<MindMap>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<MindMap>, ApiFailure> {
     let node = MindMapNode {
         id: body.node_id,
         label: body.label,
@@ -189,7 +181,7 @@ async fn add_node(
         .storage
         .add_mindmap_node(&name, q.user_id.as_deref(), q.agent_id.as_deref(), node)
         .await
-        .map_err(internal_err)?;
+        .map_err(api_error)?;
     Ok(Json(mm))
 }
 
@@ -197,12 +189,21 @@ async fn delete_node(
     State(state): State<AppState>,
     Path((name, node_id)): Path<(String, String)>,
     Query(q): Query<ScopeQuery>,
-) -> Result<Json<MindMap>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<MindMap>, ApiFailure> {
+    let mindmap = state
+        .storage
+        .get_mindmap(&name, q.user_id.as_deref(), q.agent_id.as_deref())
+        .await
+        .map_err(api_error)?
+        .ok_or_else(|| not_found("Mindmap not found"))?;
+    if !mindmap.nodes.iter().any(|node| node.id == node_id) {
+        return Err(not_found(format!("Mindmap node '{}' not found", node_id)));
+    }
     let mm = state
         .storage
         .delete_mindmap_node(&name, q.user_id.as_deref(), q.agent_id.as_deref(), &node_id)
         .await
-        .map_err(internal_err)?;
+        .map_err(api_error)?;
     Ok(Json(mm))
 }
 
@@ -211,7 +212,7 @@ async fn add_edge(
     Path(name): Path<String>,
     Query(q): Query<ScopeQuery>,
     Json(body): Json<AddEdgeBody>,
-) -> Result<Json<MindMap>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<MindMap>, ApiFailure> {
     let edge = MindMapEdge {
         from_id: body.from_id,
         to_id: body.to_id,
@@ -222,7 +223,7 @@ async fn add_edge(
         .storage
         .add_mindmap_edge(&name, q.user_id.as_deref(), q.agent_id.as_deref(), edge)
         .await
-        .map_err(internal_err)?;
+        .map_err(api_error)?;
     Ok(Json(mm))
 }
 
@@ -230,7 +231,7 @@ async fn export_mindmap(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Query(q): Query<ExportQuery>,
-) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<String, ApiFailure> {
     use surreal_memory::ExportFormat;
     let fmt = match q.format.to_lowercase().as_str() {
         "mermaid" => ExportFormat::Mermaid,
@@ -241,20 +242,15 @@ async fn export_mindmap(
         .storage
         .get_mindmap(&name, q.user_id.as_deref(), q.agent_id.as_deref())
         .await
-        .map_err(internal_err)?
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": "not found" })),
-            )
-        })?;
+        .map_err(api_error)?
+        .ok_or_else(|| not_found("Mindmap not found"))?;
     Ok(mm.export(&fmt))
 }
 
 async fn generate_persona_mindmap(
     State(state): State<AppState>,
     Json(body): Json<GeneratePersonaMindmapBody>,
-) -> Result<(StatusCode, Json<MindMap>), (StatusCode, Json<serde_json::Value>)> {
+) -> Result<(StatusCode, Json<MindMap>), ApiFailure> {
     use std::collections::HashMap;
 
     // Fetch all memories for this user and cluster by category
@@ -262,7 +258,7 @@ async fn generate_persona_mindmap(
         .storage
         .get_all_memories(Some(&body.user_id), None, None)
         .await
-        .map_err(internal_err)?;
+        .map_err(api_error)?;
 
     let mut mm = MindMap::new(
         body.name.clone(),
@@ -312,25 +308,15 @@ async fn generate_persona_mindmap(
         }
     }
 
-    let created = state
-        .storage
-        .create_mindmap(mm)
-        .await
-        .map_err(internal_err)?;
+    let created = state.storage.create_mindmap(mm).await.map_err(api_error)?;
     Ok((StatusCode::CREATED, Json(created)))
 }
 
 async fn generate_ideation_mindmap(
     State(state): State<AppState>,
     Json(body): Json<GenerateIdeationMindmapBody>,
-) -> Result<(StatusCode, Json<MindMap>), (StatusCode, Json<serde_json::Value>)> {
-    let map_type = match body.map_type.to_lowercase().as_str() {
-        "concept" => MapType::Concept,
-        "argument" => MapType::Argument,
-        "tree" => MapType::Tree,
-        "temporal" => MapType::Temporal,
-        _ => MapType::Radial,
-    };
+) -> Result<(StatusCode, Json<MindMap>), ApiFailure> {
+    let map_type = parse_map_type(&body.map_type)?;
     let mm = MindMap::new(
         format!("ideation_{}", body.topic.replace(' ', "_").to_lowercase()),
         map_type,
@@ -339,11 +325,7 @@ async fn generate_ideation_mindmap(
         body.agent_id,
         body.user_id,
     );
-    let created = state
-        .storage
-        .create_mindmap(mm)
-        .await
-        .map_err(internal_err)?;
+    let created = state.storage.create_mindmap(mm).await.map_err(api_error)?;
     Ok((StatusCode::CREATED, Json(created)))
 }
 
@@ -406,9 +388,7 @@ mod tests {
             .method("POST")
             .uri("/")
             .header("content-type", "application/json")
-            .body(Body::from(
-                r#"{"name":"test-map","root_label":"Root"}"#,
-            ))
+            .body(Body::from(r#"{"name":"test-map","root_label":"Root"}"#))
             .unwrap();
         let response = router.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
@@ -470,6 +450,60 @@ mod tests {
         let body = json_response(generate_response).await;
         assert_eq!(body["map_type"], "tree");
         assert_eq!(body["nodes"][0]["label"], "Feature Planning");
+    }
+
+    #[tokio::test]
+    async fn get_mindmap_returns_404_for_missing_record() {
+        let router = router_with_storage(make_storage().await);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/missing-map?user_id=user-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn create_mindmap_rejects_invalid_map_type() {
+        let router = router_with_storage(make_storage().await);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"name":"bad-map","root_label":"Root","map_type":"invalid"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn ideation_mindmap_rejects_invalid_map_type() {
+        let router = router_with_storage(make_storage().await);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/generate/ideation")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"topic":"Feature Planning","map_type":"invalid"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
