@@ -38,7 +38,7 @@ For FLEXIBLE (arbitrary nested JSON) fields, use: `DEFINE FIELD IF NOT EXISTS fi
 │         ▼                  ▼                  ▼          │
 │  ┌──────────────────────────────────────────────────┐   │
 │  │   surreal-memory-server (MCP stdio/HTTP)          │   │
-│  │   40+ tools: add_memory, search, graph-RAG, etc.  │   │
+│  │   42+ tools: memory, graph-RAG, palace, etc.      │   │
 │  └──────────────────────┬───────────────────────────┘   │
 │                         │ uses                           │
 │  ┌──────────────────────▼───────────────────────────┐   │
@@ -47,6 +47,7 @@ For FLEXIBLE (arbitrary nested JSON) fields, use: `DEFINE FIELD IF NOT EXISTS fi
 │  │  Knowledge Graph     │ Scoped Memory (mem0)        │   │
 │  │  TaskStreams          │ Mindmaps                    │   │
 │  │  Hybrid BM25+HNSW    │ Model Profiles              │   │
+│  │  Memory Palace (opt)  │ RRF Hybrid Search           │   │
 │  └──────────────────────┬───────────────────────────┘   │
 │                         │ also used by                   │
 │  ┌──────────────────────▼───────────────────────────┐   │
@@ -74,6 +75,12 @@ pub use model_profiles::{MODEL_PROFILES, ModelProfile, profile_for};
 pub use storage::MemoryStorage;
 pub use storage::surreal::SurrealStorage;
 pub use task_stream::{ContextWindow, TaskStream, TaskStreamStatus};
+
+// With `palace` feature:
+#[cfg(feature = "palace")]
+pub use palace::{PalaceStorage, PalaceStatus, UnifiedHit, HitSource};
+#[cfg(feature = "palace")]
+pub use palace::{PalaceAdapter, PalaceContext, FastEmbedService};
 ```
 
 ### MemoryStorage Trait (35+ methods)
@@ -85,6 +92,7 @@ Key method groups:
 - **Knowledge Graph**: `create_entity`, `semantic_search`, `find_path`, `expand_neighbors`, `get_related`
 - **TaskStreams**: `create_task_stream`, `add_to_task_stream`, `get_context_for_task`, `auto_summarize_task_stream`
 - **Mindmaps**: `create_mindmap`, `add_mindmap_node`, `export_mindmap`, `generate_persona_mindmap`
+- **Palace** (opt-in `palace` feature): `palace_wake_up`, `palace_recall`, `palace_search`, `palace_ingest`, `palace_delete`, `palace_status`, `palace_compress`, `palace_hybrid_search`
 
 ### Memory Scoping Model
 
@@ -131,6 +139,8 @@ cargo build --release                                    # Standard
 cargo build --release --features cuda                    # CUDA GPU
 cargo build --release --features metal                   # Metal GPU (macOS)
 cargo build --release --features server-only             # No embedded DB
+cargo build --release --features palace                  # With Memory Palace
+cargo build --release --features server-only,palace      # Server + Palace (Docker default)
 ./build.sh                                               # Recommended for Apple Silicon
 ```
 
@@ -157,20 +167,26 @@ EMBEDDING_PROVIDER=openai OPENAI_API_KEY=sk-... ./target/release/surreal-memory-
 | `crates/surreal-memory/src/lib.rs` | Library public API — all re-exports |
 | `crates/surreal-memory/src/storage/mod.rs` | `MemoryStorage` trait (35+ methods) |
 | `crates/surreal-memory/src/storage/surreal.rs` | `SurrealStorage` implementation |
-| `crates/surreal-memory/src/storage/migrations/mod.rs` | Schema migrations (v1–v8) |
+| `crates/surreal-memory/src/storage/migrations/mod.rs` | Schema migrations (v1–v16) |
 | `crates/surreal-memory/src/memory.rs` | `Memory`, `MemoryScope`, `MemoryType` structs |
 | `crates/surreal-memory/src/entity.rs` | `Entity`, `Relation`, `KnowledgeGraph` |
 | `crates/surreal-memory/src/task_stream.rs` | `TaskStream`, `ContextWindow` |
 | `crates/surreal-memory/src/mindmap.rs` | `MindMap`, `MindMapNode`, `MindMapEdge` |
 | `crates/surreal-memory/src/model_profiles.rs` | Token budget registry |
-| `src/mcp/mod.rs` | MCP server tool definitions (40+ tools) |
+| `crates/surreal-memory/src/palace/mod.rs` | `PalaceStorage` trait, `UnifiedHit`, `HitSource` (palace feature) |
+| `crates/surreal-memory/src/palace/adapter.rs` | `PalaceAdapter` — `StorageBackend` over SurrealDB (palace feature) |
+| `crates/surreal-memory/src/palace/context.rs` | `PalaceContext` — MemoryStack facade (palace feature) |
+| `crates/surreal-memory/src/palace/embedding.rs` | `FastEmbedService` — 384-dim embedder (palace feature) |
+| `src/mcp/mod.rs` | MCP server tool definitions (42+ tools) |
 | `src/mcp/handlers.rs` | MCP tool handler implementations |
+| `src/api/palace.rs` | Palace REST endpoints (palace feature) |
+| `docs/PALACE.md` | Memory Palace architecture and usage guide |
 
 ## Configuration
 
 **Database**: `SURREAL_MODE=embedded|server`, `SURREAL_PATH`, `SURREAL_ENDPOINT`
-**Embeddings**: `EMBEDDING_PROVIDER=local|openai|cohere`, `LOCAL_EMBEDDING_MODEL`, `MODEL_CACHE_DIR`
-**Features**: `embedded` (default), `server-only`, `cuda`, `metal`, `local-embeddings`
+**Embeddings**: `EMBEDDING_PROVIDER=local|openai|cohere|fast`, `LOCAL_EMBEDDING_MODEL`, `MODEL_CACHE_DIR`
+**Features**: `embedded` (default), `server-only`, `palace`, `cuda`, `metal`, `local-embeddings`
 
 ## Migration System
 
@@ -187,10 +203,14 @@ Migrations live in `crates/surreal-memory/src/storage/migrations/mod.rs`.
 - v2: Memory table (scoped, mem0-compatible)
 - v3: TaskStream table
 - v4: MemoryHistory audit log
-- v5: HNSW vector indexes (entity + memory)
+- v5: HNSW vector indexes (entity + memory, 1536d)
 - v6: Mindmap table + BM25 full-text indexes
 - v7: TaskStream auto-summarization fields (`auto_summarize`, `summary_count`, `model_id`)
 - v8: Memory metadata FLEXIBLE (allows arbitrary nested JSON)
+- v9-v13: Mindmap schema refinements (flexible nodes/edges, nested fields)
+- v14: Legacy enum string normalization (repair migration)
+- v15: Enum fields as strings for portability
+- v16: Palace `drawers` table with 384d HNSW, BM25, wing/room/hall taxonomy indexes
 
 ## Common Patterns
 
@@ -216,7 +236,7 @@ Migrations live in `crates/surreal-memory/src/storage/migrations/mod.rs`.
 
 1. **SCHEMAFULL rejects unknown fields** — If a Rust struct has a field not in the schema, INSERT/CREATE fails silently with "Found field X, but no such field exists". Always check migrations match structs.
 2. **`option<object>` is NOT flexible** — It accepts `None` or a flat `{}`, but rejects nested JSON like `{"key": {"nested": "value"}}`. Use `FLEXIBLE TYPE option<object>` for arbitrary JSON.
-3. **HNSW index dimensions must match embeddings** — The v5 migration hardcodes `DIMENSION 1536`. If you switch to a model with different dimensions, you need a new migration to recreate the index.
+3. **HNSW index dimensions must match embeddings** — The v5 migration hardcodes `DIMENSION 1536` for memory/entity tables. The v16 palace migration uses `DIMENSION 384` for drawers. These are independent vector spaces — do not mix them.
 4. **`IF NOT EXISTS` is idempotent** — All DDL uses this, so migrations are safe to re-run.
 5. **Embedded mode creates RocksDB files** — Multiple processes CANNOT share the same embedded DB path simultaneously. For multi-process access, use server mode (`SURREAL_MODE=server`).
 
@@ -226,6 +246,8 @@ Migrations live in `crates/surreal-memory/src/storage/migrations/mod.rs`.
 - Hybrid search (BM25+HNSW) is the primary retrieval path — both indexes must exist
 - `get_context_for_task` sorts by importance and truncates to token budget — it's the hot path for LLM prompt construction
 - `compress_memories` and `auto_summarize_task_stream` are expensive — they re-embed the summary
+- Palace `PalaceContext` is lazily initialized via `OnceCell` — first palace call downloads the FastEmbed model (~25-80 MB) and takes ~300ms. Subsequent calls are instant.
+- `palace_hybrid_search` runs 3 concurrent searches (memory, entity, drawers) and merges via RRF — it is the most comprehensive but also the most expensive search operation
 
 ### Mindmap Performance Limitations
 
