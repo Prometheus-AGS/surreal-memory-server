@@ -91,6 +91,7 @@ static MIGRATIONS: &[Migration] = &[
         "legacy_enum_string_normalization_v14",
     ),
     Migration::sql(15, "enum_fields_as_strings", MIGRATION_V15_SQL),
+    Migration::sql(16, "palace_drawers_table", MIGRATION_V16_SQL),
 ];
 
 // ── v1: Baseline entity + relation schema ─────────────────────────────────────
@@ -306,6 +307,35 @@ DEFINE FIELD OVERWRITE scope ON memory TYPE string DEFAULT 'global';
 DEFINE FIELD OVERWRITE memory_type ON memory TYPE string DEFAULT 'semantic';
 DEFINE FIELD OVERWRITE status ON task_stream TYPE string DEFAULT 'active';
 DEFINE FIELD OVERWRITE map_type ON mindmap TYPE string DEFAULT 'radial';
+";
+
+// ── v16: MemPalace drawers table ────────────────────────────────────────────
+
+const MIGRATION_V16_SQL: &str = "
+DEFINE TABLE IF NOT EXISTS drawers SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS content      ON drawers TYPE string;
+DEFINE FIELD IF NOT EXISTS wing         ON drawers TYPE string;
+DEFINE FIELD IF NOT EXISTS room         ON drawers TYPE string;
+DEFINE FIELD IF NOT EXISTS hall         ON drawers TYPE string;
+DEFINE FIELD IF NOT EXISTS source_file  ON drawers TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS date         ON drawers TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS importance   ON drawers TYPE float DEFAULT 1.0;
+DEFINE FIELD IF NOT EXISTS embedding    ON drawers TYPE option<array<float>>;
+DEFINE FIELD IF NOT EXISTS embedding.*  ON drawers TYPE float;
+DEFINE FIELD IF NOT EXISTS content_hash ON drawers TYPE option<string>;
+
+DEFINE INDEX IF NOT EXISTS drawer_embedding_idx
+  ON drawers FIELDS embedding
+  MTREE DIMENSION 384 DIST COSINE;
+
+DEFINE INDEX IF NOT EXISTS drawer_content_idx
+  ON drawers FIELDS content SEARCH ANALYZER unicode BM25;
+
+DEFINE INDEX IF NOT EXISTS drawer_hash_idx
+  ON drawers FIELDS content_hash;
+
+DEFINE INDEX IF NOT EXISTS drawer_wing_idx ON drawers FIELDS wing;
+DEFINE INDEX IF NOT EXISTS drawer_room_idx ON drawers FIELDS room;
 ";
 
 #[derive(Debug, Clone)]
