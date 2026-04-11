@@ -31,7 +31,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        CARGO_BUILD_FLAGS: --no-default-features --features server-only
+        CARGO_BUILD_FLAGS: --no-default-features --features server-only,palace
     env_file:
       - .env
     container_name: surreal-memory-server

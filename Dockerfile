@@ -2,7 +2,7 @@
 # ── Stage 1: Build ─────────────────────────────────────────────────────────────
 FROM rust:1.93-slim AS builder
 
-ARG CARGO_BUILD_FLAGS="--no-default-features --features server-only"
+ARG CARGO_BUILD_FLAGS="--no-default-features --features server-only,palace"
 ARG PREBUILD_DEPS="1"
 
 RUN apt-get update && apt-get install -y \
