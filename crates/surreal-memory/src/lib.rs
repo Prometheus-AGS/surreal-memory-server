@@ -13,6 +13,8 @@ pub mod entity;
 pub mod memory;
 pub mod mindmap;
 pub mod model_profiles;
+#[cfg(feature = "palace")]
+pub mod palace;
 pub mod storage;
 pub mod task_stream;
 
@@ -25,3 +27,9 @@ pub use model_profiles::{MODEL_PROFILES, ModelProfile, profile_for};
 pub use storage::MemoryStorage;
 pub use storage::surreal::{RetryConfig, SurrealConfig, SurrealStorage};
 pub use task_stream::{ContextWindow, TaskStream, TaskStreamStatus};
+
+#[cfg(feature = "palace")]
+pub use palace::{
+    FastEmbedService, HitSource, PalaceAdapter, PalaceContext, PalaceStatus, PalaceStorage,
+    UnifiedHit,
+};

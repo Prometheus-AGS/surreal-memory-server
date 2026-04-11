@@ -95,7 +95,7 @@ struct ConnectionInfo {
 }
 
 /// Tracks the lifecycle state of the SurrealDB connection.
-enum ConnectionState {
+pub(crate) enum ConnectionState {
     /// Active connection, ready to use.
     Connected(Surreal<Any>),
     /// Mid-reconnect; callers should wait or fail fast.
@@ -507,6 +507,15 @@ impl SurrealStorage {
             self.connection_info.config.namespace.as_str(),
             self.connection_info.config.database.as_str(),
         )
+    }
+
+    /// Return a cloneable reference to the connection state lock.
+    ///
+    /// Used by `PalaceAdapter` to build a closure that yields the live
+    /// `Surreal<Any>` handle on each operation (resilient to reconnection).
+    #[cfg(feature = "palace")]
+    pub(crate) fn connection_arc(&self) -> Arc<std::sync::RwLock<ConnectionState>> {
+        Arc::clone(&self.connection)
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────

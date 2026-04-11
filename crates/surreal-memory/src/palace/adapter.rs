@@ -16,7 +16,8 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
-use surrealdb::types::RecordId;
+use surrealdb::types::{RecordId, RecordIdKey};
+use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
 /// Closure type that yields a live DB handle (resilient to reconnection).
@@ -44,11 +45,8 @@ impl PalaceAdapter {
 }
 
 // ── SurrealDB helper: raw drawer for deserialization ─────────────────────────
-//
-// SurrealDB returns record IDs as objects (`{ tb: "drawers", id: { String: "..." } }`)
-// so we deserialize via a helper and convert to the flat `Drawer` type.
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct RawDrawer {
     id: Option<RecordId>,
     content: String,
@@ -62,12 +60,19 @@ struct RawDrawer {
     content_hash: Option<String>,
 }
 
+/// Extract the key part of a `RecordId` as a plain string.
+fn record_id_key_string(id: &RecordId) -> String {
+    match &id.key {
+        RecordIdKey::String(s) => s.clone(),
+        RecordIdKey::Number(i) => i.to_string(),
+        RecordIdKey::Uuid(uuid) => uuid.to_string(),
+        k => format!("{k:?}"),
+    }
+}
+
 impl RawDrawer {
     fn into_drawer(self) -> Drawer {
-        let id = self
-            .id
-            .map(|r| r.key().to_string())
-            .unwrap_or_default();
+        let id = self.id.as_ref().map(record_id_key_string).unwrap_or_default();
         Drawer {
             id,
             content: self.content,
@@ -80,6 +85,26 @@ impl RawDrawer {
             embedding: self.embedding,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
+struct HitRow {
+    id: Option<RecordId>,
+    content: String,
+    wing: String,
+    room: String,
+    hall: String,
+    source_file: Option<String>,
+    date: Option<String>,
+    importance: f32,
+    embedding: Option<Vec<f32>>,
+    content_hash: Option<String>,
+    similarity: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
+struct CountRow {
+    cnt: u64,
 }
 
 /// Compute SHA-256 content hash for deduplication.
@@ -116,16 +141,16 @@ impl StorageBackend for PalaceAdapter {
                 content_hash: $content_hash
             }",
         )
-        .bind(("id", &id))
-        .bind(("content", &drawer.content))
-        .bind(("wing", &drawer.wing))
-        .bind(("room", &drawer.room))
-        .bind(("hall", &drawer.hall))
-        .bind(("source_file", &drawer.source_file))
-        .bind(("date", &drawer.date))
+        .bind(("id", id.clone()))
+        .bind(("content", drawer.content))
+        .bind(("wing", drawer.wing))
+        .bind(("room", drawer.room))
+        .bind(("hall", drawer.hall))
+        .bind(("source_file", drawer.source_file))
+        .bind(("date", drawer.date))
         .bind(("importance", drawer.importance))
-        .bind(("embedding", &drawer.embedding))
-        .bind(("content_hash", &content_hash))
+        .bind(("embedding", drawer.embedding))
+        .bind(("content_hash", content_hash))
         .await
         .context("PalaceAdapter::add_drawer CREATE failed")?;
 
@@ -134,8 +159,9 @@ impl StorageBackend for PalaceAdapter {
 
     async fn delete_drawer(&self, id: &str) -> Result<()> {
         let db = self.db()?;
+        let id_owned = id.to_string();
         db.query("DELETE type::thing('drawers', $id)")
-            .bind(("id", id))
+            .bind(("id", id_owned))
             .await
             .context("PalaceAdapter::delete_drawer failed")?;
         Ok(())
@@ -145,9 +171,10 @@ impl StorageBackend for PalaceAdapter {
 
     async fn get_drawer(&self, id: &str) -> Result<Option<Drawer>> {
         let db = self.db()?;
+        let id_owned = id.to_string();
         let mut resp = db
             .query("SELECT * FROM type::thing('drawers', $id)")
-            .bind(("id", id))
+            .bind(("id", id_owned))
             .await
             .context("PalaceAdapter::get_drawer failed")?;
         let rows: Vec<RawDrawer> = resp.take(0)?;
@@ -226,41 +253,45 @@ impl StorageBackend for PalaceAdapter {
              ORDER BY similarity DESC"
         );
 
+        let vec_owned = query_embedding.to_vec();
         let mut resp = db
             .query(&sql)
-            .bind(("vec", query_embedding.to_vec()))
+            .bind(("vec", vec_owned))
             .await
             .context("PalaceAdapter::search_drawers KNN query failed")?;
-
-        #[derive(Deserialize)]
-        struct HitRow {
-            #[serde(flatten)]
-            drawer: RawDrawer,
-            similarity: f32,
-        }
 
         let rows: Vec<HitRow> = resp.take(0)?;
         Ok(rows
             .into_iter()
-            .map(|r| DrawerHit {
-                drawer: r.drawer.into_drawer(),
-                similarity: r.similarity,
+            .map(|r| {
+                let raw = RawDrawer {
+                    id: r.id,
+                    content: r.content,
+                    wing: r.wing,
+                    room: r.room,
+                    hall: r.hall,
+                    source_file: r.source_file,
+                    date: r.date,
+                    importance: r.importance,
+                    embedding: r.embedding,
+                    content_hash: r.content_hash,
+                };
+                DrawerHit {
+                    drawer: raw.into_drawer(),
+                    similarity: r.similarity,
+                }
             })
             .collect())
     }
 
     async fn check_duplicate(&self, content_hash: &str) -> Result<bool> {
         let db = self.db()?;
+        let hash_owned = content_hash.to_string();
         let mut resp = db
             .query("SELECT count() AS cnt FROM drawers WHERE content_hash = $hash GROUP ALL")
-            .bind(("hash", content_hash))
+            .bind(("hash", hash_owned))
             .await
             .context("PalaceAdapter::check_duplicate failed")?;
-
-        #[derive(Deserialize)]
-        struct CountRow {
-            cnt: u64,
-        }
 
         let rows: Vec<CountRow> = resp.take(0)?;
         Ok(rows.first().map(|r| r.cnt > 0).unwrap_or(false))
@@ -277,8 +308,21 @@ impl StorageBackend for PalaceAdapter {
             )
             .await
             .context("PalaceAdapter::list_wings failed")?;
-        let rows: Vec<WingStats> = resp.take(0)?;
-        Ok(rows)
+
+        // Deserialize into our own type since WingStats may not impl SurrealValue
+        #[derive(Debug, Deserialize, SurrealValue)]
+        struct WingRow {
+            name: String,
+            count: usize,
+        }
+        let rows: Vec<WingRow> = resp.take(0)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| WingStats {
+                name: r.name,
+                count: r.count,
+            })
+            .collect())
     }
 
     async fn list_rooms(&self, wing: Option<&str>) -> Result<Vec<RoomStats>> {
@@ -298,8 +342,22 @@ impl StorageBackend for PalaceAdapter {
             .query(&sql)
             .await
             .context("PalaceAdapter::list_rooms failed")?;
-        let rows: Vec<RoomStats> = resp.take(0)?;
-        Ok(rows)
+
+        #[derive(Debug, Deserialize, SurrealValue)]
+        struct RoomRow {
+            name: String,
+            wing: String,
+            count: usize,
+        }
+        let rows: Vec<RoomRow> = resp.take(0)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| RoomStats {
+                name: r.name,
+                wing: r.wing,
+                count: r.count,
+            })
+            .collect())
     }
 
     async fn drawer_count(&self) -> Result<usize> {
@@ -308,11 +366,6 @@ impl StorageBackend for PalaceAdapter {
             .query("SELECT count() AS cnt FROM drawers GROUP ALL")
             .await
             .context("PalaceAdapter::drawer_count failed")?;
-
-        #[derive(Deserialize)]
-        struct CountRow {
-            cnt: u64,
-        }
 
         let rows: Vec<CountRow> = resp.take(0)?;
         Ok(rows.first().map(|r| r.cnt as usize).unwrap_or(0))
