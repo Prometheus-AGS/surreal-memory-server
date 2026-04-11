@@ -8,6 +8,8 @@ pub mod a2a;
 pub mod entities;
 pub mod memory;
 pub mod mindmaps;
+#[cfg(feature = "palace")]
+pub mod palace;
 pub mod search;
 pub mod taskstreams;
 
@@ -87,13 +89,18 @@ pub fn build_router(storage: Arc<dyn MemoryStorage>) -> Router {
     let mcp_sub: Router<AppState> =
         crate::mcp::http::mcp_http_router(Arc::clone(&storage), "/mcp").with_state(());
 
-    Router::new()
+    let router = Router::new()
         .route("/health", get(health_handler))
         .nest("/api/v1/memory", memory::router())
         .nest("/api/v1/entities", entities::router())
         .nest("/api/v1/taskstreams", taskstreams::router())
         .nest("/api/v1/mindmaps", mindmaps::router())
-        .nest("/api/v1/search", search::router())
+        .nest("/api/v1/search", search::router());
+
+    #[cfg(feature = "palace")]
+    let router = router.nest("/api/v1/palace", palace::router());
+
+    router
         .merge(a2a::router())
         .merge(mcp_sub)
         .layer(CorsLayer::permissive())
