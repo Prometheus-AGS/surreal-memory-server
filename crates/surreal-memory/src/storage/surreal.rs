@@ -486,6 +486,19 @@ impl SurrealStorage {
             .context("SurrealDB health check failed")
     }
 
+    /// Clone the live `Surreal<Any>` handle for shared use by subsystems (e.g. PalaceAdapter).
+    ///
+    /// `Surreal<Any>` is internally `Arc`-wrapped — cloning is cheap.
+    /// Returns `Err` if the connection is in `Reconnecting` or `Failed` state.
+    pub fn db(&self) -> Result<Surreal<Any>> {
+        let state = self.connection.read().expect("Connection lock poisoned");
+        match &*state {
+            ConnectionState::Connected(db) => Ok(db.clone()),
+            ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+            ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+        }
+    }
+
     /// Return the namespace and database this storage instance is connected to.
     ///
     /// Useful for diagnostics, logging, and multi-tenant routing.
