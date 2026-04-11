@@ -48,6 +48,8 @@ impl Config {
                     .unwrap_or_else(|_| "embed-english-v3.0".to_string());
                 EmbeddingProvider::Cohere { api_key, model }
             }
+            #[cfg(feature = "palace")]
+            "fast" => EmbeddingProvider::Fast,
             _ => {
                 // Default to local embeddings
                 let model_id = env::var("LOCAL_EMBEDDING_MODEL")
