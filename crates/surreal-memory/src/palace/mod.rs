@@ -6,7 +6,7 @@
 //! # Key types
 //!
 //! - [`PalaceAdapter`] — `StorageBackend` implementation over SurrealDB
-//! - [`PalaceContext`] — high-level façade (ingest, compress, search)
+//! - [`PalaceContext`] — high-level facade (ingest, compress, search)
 //! - [`FastEmbedService`] — `EmbeddingService` backed by fastembed (384-dim)
 //! - [`PalaceStorage`] — trait defining the async palace API surface
 
@@ -19,7 +19,7 @@ pub use context::PalaceContext;
 pub use embedding::FastEmbedService;
 
 use async_trait::async_trait;
-use mempalace_core::storage::types::{DrawerHit, RoomStats, WingStats};
+use crate::memory::{MemoryScope, MemoryType};
 use serde::{Deserialize, Serialize};
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -34,26 +34,33 @@ pub struct PalaceStatus {
 }
 
 /// Source discriminator for hits returned by unified search.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum HitSource {
     /// Hit came from surreal-memory's existing `Memory` table.
-    Memory,
+    Memory {
+        scope: MemoryScope,
+        memory_type: MemoryType,
+    },
+    /// Hit came from the knowledge graph `Entity` table.
+    Entity {
+        entity_type: String,
+    },
     /// Hit came from the mempalace `drawers` table.
-    Palace,
+    Palace {
+        wing: String,
+        room: String,
+    },
 }
 
-/// A search hit from either the palace or the legacy memory system,
-/// used for RRF (Reciprocal Rank Fusion) merging.
+/// A search hit from either the palace, the legacy memory system, or the
+/// knowledge graph, used for RRF (Reciprocal Rank Fusion) merging.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnifiedHit {
     pub id: String,
     pub content: String,
-    pub score: f32,
     pub source: HitSource,
-    /// Spatial metadata (palace only).
-    pub wing: Option<String>,
-    pub room: Option<String>,
+    pub score: f32,
 }
 
 // ── PalaceStorage trait ──────────────────────────────────────────────────────
@@ -64,37 +71,6 @@ pub struct UnifiedHit {
 /// call palace operations through the same storage handle they already hold.
 #[async_trait]
 pub trait PalaceStorage: Send + Sync {
-    /// Ingest content into the palace. Returns drawer ID, or `None` if duplicate.
-    async fn palace_ingest(
-        &self,
-        content: &str,
-        wing: &str,
-        room: &str,
-        hall: &str,
-        source_file: Option<&str>,
-        date: Option<&str>,
-        importance: f32,
-    ) -> anyhow::Result<Option<String>>;
-
-    /// Compress text using AAAK Dialect.
-    fn palace_compress(
-        &self,
-        text: &str,
-        wing: Option<&str>,
-        room: Option<&str>,
-        date: Option<&str>,
-        source_file: Option<&str>,
-    ) -> anyhow::Result<String>;
-
-    /// Structured vector search returning hits with similarity scores.
-    async fn palace_search(
-        &self,
-        query: &str,
-        wing: Option<&str>,
-        room: Option<&str>,
-        n: usize,
-    ) -> anyhow::Result<Vec<DrawerHit>>;
-
     /// Wake-up context (L0 identity + L1 essential story).
     async fn palace_wake_up(&self, wing: Option<&str>) -> anyhow::Result<String>;
 
@@ -106,12 +82,42 @@ pub trait PalaceStorage: Send + Sync {
         limit: usize,
     ) -> anyhow::Result<String>;
 
+    /// Deep search (L3) returning formatted context text from MemoryStack.
+    async fn palace_search(
+        &self,
+        query: &str,
+        wing: Option<&str>,
+        room: Option<&str>,
+        n: usize,
+    ) -> anyhow::Result<String>;
+
+    /// Ingest content into the palace. Returns drawer ID.
+    /// Bails with an error on duplicate content.
+    async fn palace_ingest(
+        &self,
+        content: &str,
+        wing: &str,
+        room: &str,
+        hall: &str,
+        importance: f32,
+    ) -> anyhow::Result<String>;
+
+    /// Delete a drawer by ID.
+    async fn palace_delete(&self, id: &str) -> anyhow::Result<()>;
+
     /// Palace status summary.
     async fn palace_status(&self) -> anyhow::Result<PalaceStatus>;
 
-    /// List all wings with drawer counts.
-    async fn palace_list_wings(&self) -> anyhow::Result<Vec<WingStats>>;
+    /// Compress text using AAAK Dialect.
+    fn palace_compress(&self, text: &str) -> String;
 
-    /// List rooms, optionally filtered by wing.
-    async fn palace_list_rooms(&self, wing: Option<&str>) -> anyhow::Result<Vec<RoomStats>>;
+    /// Hybrid search across memories, entities, and palace drawers.
+    /// Results are merged via Reciprocal Rank Fusion.
+    async fn palace_hybrid_search(
+        &self,
+        query: &str,
+        scope: Option<MemoryScope>,
+        wing: Option<&str>,
+        n: usize,
+    ) -> anyhow::Result<Vec<UnifiedHit>>;
 }

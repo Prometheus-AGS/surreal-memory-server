@@ -9,7 +9,7 @@ use crate::palace::embedding::FastEmbedService;
 use crate::storage::surreal::{ConnectionState, SurrealStorage};
 use anyhow::{Context, Result};
 use mempalace_core::{
-    dialect::compress::{CompressMetadata, Dialect, DialectConfig},
+    dialect::compress::{Dialect, DialectConfig},
     embedder::Embedder,
     layers::{MemoryStack, StackStatus},
     storage::{StorageBackend, types::{Drawer, DrawerFilter, DrawerHit}},
@@ -112,21 +112,19 @@ impl PalaceContext {
     // ── Ingest ───────────────────────────────────────────────────────────────
 
     /// Embed content, check for duplicates via SHA-256 content hash, and store
-    /// as a `Drawer`. Returns the drawer ID, or `None` if duplicate.
+    /// as a `Drawer`. Returns the drawer ID. Bails with an error on duplicate.
     pub async fn ingest(
         &self,
         content: &str,
         wing: &str,
         room: &str,
         hall: &str,
-        source_file: Option<&str>,
-        date: Option<&str>,
         importance: f32,
-    ) -> Result<Option<String>> {
+    ) -> Result<String> {
         // Dedup check
         let hash = sha256_hex(content);
         if self.adapter.check_duplicate(&hash).await? {
-            return Ok(None);
+            anyhow::bail!("Duplicate content: drawer with identical content hash already exists");
         }
 
         // Embed
@@ -138,34 +136,28 @@ impl PalaceContext {
             wing: wing.to_string(),
             room: room.to_string(),
             hall: hall.to_string(),
-            source_file: source_file.map(String::from),
-            date: date.map(String::from),
+            source_file: None,
+            date: None,
             importance,
             embedding: Some(embedding),
         };
 
         let id = self.adapter.add_drawer(drawer).await?;
-        Ok(Some(id))
+        Ok(id)
     }
 
     // ── Compress ─────────────────────────────────────────────────────────────
 
     /// Compress text into AAAK Dialect format for token-efficient storage.
-    pub fn compress(
-        &self,
-        text: &str,
-        wing: Option<&str>,
-        room: Option<&str>,
-        date: Option<&str>,
-        source_file: Option<&str>,
-    ) -> String {
-        let meta = CompressMetadata {
-            wing,
-            room,
-            date,
-            source_file,
-        };
-        self.dialect.compress(text, Some(&meta))
+    pub fn compress(&self, text: &str) -> String {
+        self.dialect.compress(text, None)
+    }
+
+    // ── Delete ────────────────────────────────────────────────────────────────
+
+    /// Delete a drawer by ID.
+    pub async fn delete(&self, id: &str) -> Result<()> {
+        self.adapter.delete_drawer(id).await
     }
 
     // ── Search ───────────────────────────────────────────────────────────────

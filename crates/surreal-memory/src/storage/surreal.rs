@@ -10,7 +10,7 @@ use crate::{
     task_stream::{ContextWindow, TaskStream, TaskStreamStatus},
 };
 #[cfg(feature = "palace")]
-use crate::palace::{PalaceContext, PalaceStatus, PalaceStorage};
+use crate::palace::{HitSource, PalaceContext, PalaceStatus, PalaceStorage, UnifiedHit};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -2740,60 +2740,6 @@ impl SurrealStorage {
 #[cfg(feature = "palace")]
 #[async_trait]
 impl PalaceStorage for SurrealStorage {
-    async fn palace_ingest(
-        &self,
-        content: &str,
-        wing: &str,
-        room: &str,
-        hall: &str,
-        source_file: Option<&str>,
-        date: Option<&str>,
-        importance: f32,
-    ) -> anyhow::Result<Option<String>> {
-        self.palace_context()
-            .await?
-            .ingest(content, wing, room, hall, source_file, date, importance)
-            .await
-    }
-
-    fn palace_compress(
-        &self,
-        text: &str,
-        wing: Option<&str>,
-        room: Option<&str>,
-        date: Option<&str>,
-        source_file: Option<&str>,
-    ) -> anyhow::Result<String> {
-        use mempalace_core::dialect::compress::{CompressMetadata, Dialect, DialectConfig};
-        use std::sync::OnceLock;
-
-        // Static dialect — zero-cost after first init; DialectConfig::default()
-        // is deterministic, so this is safe.
-        static DIALECT: OnceLock<Dialect> = OnceLock::new();
-        let dialect = DIALECT.get_or_init(|| Dialect::new(DialectConfig::default()));
-
-        let meta = CompressMetadata {
-            wing,
-            room,
-            date,
-            source_file,
-        };
-        Ok(dialect.compress(text, Some(&meta)))
-    }
-
-    async fn palace_search(
-        &self,
-        query: &str,
-        wing: Option<&str>,
-        room: Option<&str>,
-        n: usize,
-    ) -> anyhow::Result<Vec<mempalace_core::storage::types::DrawerHit>> {
-        self.palace_context()
-            .await?
-            .search_drawers_structured(query, wing, room, n)
-            .await
-    }
-
     async fn palace_wake_up(&self, wing: Option<&str>) -> anyhow::Result<String> {
         self.palace_context().await?.wake_up(wing).await
     }
@@ -2807,6 +2753,37 @@ impl PalaceStorage for SurrealStorage {
         self.palace_context().await?.recall(wing, room, limit).await
     }
 
+    async fn palace_search(
+        &self,
+        query: &str,
+        wing: Option<&str>,
+        room: Option<&str>,
+        n: usize,
+    ) -> anyhow::Result<String> {
+        self.palace_context()
+            .await?
+            .search(query, wing, room, n)
+            .await
+    }
+
+    async fn palace_ingest(
+        &self,
+        content: &str,
+        wing: &str,
+        room: &str,
+        hall: &str,
+        importance: f32,
+    ) -> anyhow::Result<String> {
+        self.palace_context()
+            .await?
+            .ingest(content, wing, room, hall, importance)
+            .await
+    }
+
+    async fn palace_delete(&self, id: &str) -> anyhow::Result<()> {
+        self.palace_context().await?.delete(id).await
+    }
+
     async fn palace_status(&self) -> anyhow::Result<PalaceStatus> {
         let stack_status = self.palace_context().await?.status().await?;
         Ok(PalaceStatus {
@@ -2817,73 +2794,133 @@ impl PalaceStorage for SurrealStorage {
         })
     }
 
-    async fn palace_list_wings(
-        &self,
-    ) -> anyhow::Result<Vec<mempalace_core::storage::types::WingStats>> {
-        // mempalace-core's WingStats doesn't derive SurrealValue, so we use a
-        // local mirror struct for deserialization and convert.
-        #[derive(Clone, Debug, Serialize, Deserialize, SurrealValue)]
-        struct DbWingStats {
-            name: String,
-            count: usize,
-        }
+    fn palace_compress(&self, text: &str) -> String {
+        use mempalace_core::dialect::compress::{Dialect, DialectConfig};
+        use std::sync::OnceLock;
 
-        let db = self.db()?;
-        let rows: Vec<DbWingStats> = db
-            .query(
-                "SELECT wing AS name, count() AS count FROM drawers GROUP BY wing ORDER BY count DESC",
-            )
-            .await
-            .context("palace_list_wings query failed")?
-            .take(0)
-            .context("palace_list_wings take(0) failed")?;
-        Ok(rows
-            .into_iter()
-            .map(|r| mempalace_core::storage::types::WingStats {
-                name: r.name,
-                count: r.count,
-            })
-            .collect())
+        static DIALECT: OnceLock<Dialect> = OnceLock::new();
+        let dialect = DIALECT.get_or_init(|| Dialect::new(DialectConfig::default()));
+        dialect.compress(text, None)
     }
 
-    async fn palace_list_rooms(
+    async fn palace_hybrid_search(
         &self,
+        query: &str,
+        scope: Option<crate::memory::MemoryScope>,
         wing: Option<&str>,
-    ) -> anyhow::Result<Vec<mempalace_core::storage::types::RoomStats>> {
-        #[derive(Clone, Debug, Serialize, Deserialize, SurrealValue)]
-        struct DbRoomStats {
-            name: String,
-            wing: String,
-            count: usize,
+        n: usize,
+    ) -> anyhow::Result<Vec<UnifiedHit>> {
+        use mempalace_core::reranker::ReciprocRankFusion;
+        use mempalace_core::storage::types::DrawerHit;
+
+        // Determine scope-based filters for memory search
+        let (user_id, agent_id, session_id) = match &scope {
+            Some(crate::memory::MemoryScope::Agent) => (None, Some(""), None),
+            Some(crate::memory::MemoryScope::User) => (Some(""), None, None),
+            Some(crate::memory::MemoryScope::Session) => (None, None, Some("")),
+            _ => (None, None, None),
+        };
+
+        // Run all three searches concurrently
+        let memory_fut = self.hybrid_search_memories(query, user_id, agent_id, session_id, n, 0.7, 0.3);
+        let entity_fut = self.semantic_search(query, n, 0.0);
+        let palace_ctx = self.palace_context().await?;
+        let palace_fut = palace_ctx.search_drawers_structured(query, wing, None, n);
+
+        let (memories, entities, palace_hits) = tokio::join!(memory_fut, entity_fut, palace_fut);
+
+        let mut rrf_lists: Vec<Vec<DrawerHit>> = Vec::new();
+
+        // Convert memory hits to DrawerHits
+        if let Ok(mems) = memories {
+            let hits: Vec<DrawerHit> = mems
+                .iter()
+                .enumerate()
+                .map(|(i, m)| {
+                    let id_str = m
+                        .id
+                        .as_ref()
+                        .map(|r| Self::record_id_to_string(r))
+                        .unwrap_or_else(|| format!("memory_{i}"));
+                    DrawerHit {
+                        drawer: mempalace_core::storage::types::Drawer {
+                            id: id_str,
+                            content: m.content.clone(),
+                            wing: "memory".to_string(),
+                            room: m.memory_type.as_str().to_string(),
+                            hall: String::new(),
+                            source_file: None,
+                            date: Some(m.created_at.to_string()),
+                            importance: m.importance,
+                            embedding: None,
+                        },
+                        similarity: m.importance,
+                    }
+                })
+                .collect();
+            rrf_lists.push(hits);
         }
 
-        let db = self.db()?;
-        let rows: Vec<DbRoomStats> = if let Some(wing) = wing {
-            db.query(
-                "SELECT room AS name, wing, count() AS count FROM drawers WHERE wing = $wing GROUP BY room, wing ORDER BY count DESC",
-            )
-            .bind(("wing", wing.to_string()))
-            .await
-            .context("palace_list_rooms query failed")?
-            .take(0)
-            .context("palace_list_rooms take(0) failed")?
-        } else {
-            db.query(
-                "SELECT room AS name, wing, count() AS count FROM drawers GROUP BY room, wing ORDER BY count DESC",
-            )
-            .await
-            .context("palace_list_rooms query failed")?
-            .take(0)
-            .context("palace_list_rooms take(0) failed")?
-        };
-        Ok(rows
+        // Convert entity hits to DrawerHits
+        if let Ok(ents) = entities {
+            let hits: Vec<DrawerHit> = ents
+                .iter()
+                .map(|e| DrawerHit {
+                    drawer: mempalace_core::storage::types::Drawer {
+                        id: e.entity.name.clone(),
+                        content: e.entity.observations.join("; "),
+                        wing: "entity".to_string(),
+                        room: e.entity.entity_type.clone(),
+                        hall: String::new(),
+                        source_file: None,
+                        date: None,
+                        importance: 1.0,
+                        embedding: None,
+                    },
+                    similarity: e.similarity,
+                })
+                .collect();
+            rrf_lists.push(hits);
+        }
+
+        // Palace drawer hits (already in DrawerHit format)
+        rrf_lists.push(palace_hits.unwrap_or_default());
+
+        // Merge with RRF
+        let rrf = ReciprocRankFusion::new(60);
+        let merged = rrf.merge(rrf_lists);
+
+        // Convert to UnifiedHit
+        let unified: Vec<UnifiedHit> = merged
             .into_iter()
-            .map(|r| mempalace_core::storage::types::RoomStats {
-                name: r.name,
-                wing: r.wing,
-                count: r.count,
+            .map(|hit| {
+                let source = match hit.drawer.wing.as_str() {
+                    "memory" => {
+                        let memory_type = crate::memory::MemoryType::parse_str(&hit.drawer.room)
+                            .unwrap_or_default();
+                        HitSource::Memory {
+                            scope: scope.clone().unwrap_or_default(),
+                            memory_type,
+                        }
+                    }
+                    "entity" => HitSource::Entity {
+                        entity_type: hit.drawer.room.clone(),
+                    },
+                    _ => HitSource::Palace {
+                        wing: hit.drawer.wing.clone(),
+                        room: hit.drawer.room.clone(),
+                    },
+                };
+                UnifiedHit {
+                    id: hit.drawer.id,
+                    content: hit.drawer.content,
+                    source,
+                    score: hit.similarity,
+                }
             })
-            .collect())
+            .collect();
+
+        Ok(unified)
     }
 }
 

@@ -37,7 +37,10 @@
       "Bash(wait 75015)",
       "Bash(pkill -f \"docker-compose build\")",
       "Bash(git checkout:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(find ~/.cargo/git/checkouts/mempalace-rs-9d7c98ba1173cba4/c028be1 -path */core/* -name *.rs)",
+      "Bash(find /home/gqadonis/.cargo/git/checkouts -path */mempalace* -name lib.rs)",
+      "Bash(find /home/gqadonis/.cargo/git/checkouts/mempalace-rs-9d7c98ba1173cba4/c028be1/crates/mempalace-core/src/reranker* -type f)"
     ]
   }
 }
