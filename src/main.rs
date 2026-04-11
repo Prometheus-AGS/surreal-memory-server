@@ -329,6 +329,10 @@ async fn load_config() -> Result<Config> {
         embeddings::EmbeddingProvider::Local { model_id, .. } => {
             tracing::info!("   Embedding: Local ({})", model_id);
         }
+        #[cfg(feature = "palace")]
+        embeddings::EmbeddingProvider::Fast => {
+            tracing::info!("   Embedding: FastEmbed (palace)");
+        }
     }
     Ok(config)
 }

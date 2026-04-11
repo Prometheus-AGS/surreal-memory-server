@@ -26,6 +26,11 @@ use handlers::{
     UpdateMemoryParams,
 };
 
+use handlers::{
+    PalaceDeleteParams, PalaceHybridSearchParams, PalaceIngestParams, PalaceRecallParams,
+    PalaceSearchParams, PalaceWakeUpParams,
+};
+
 #[derive(Clone)]
 pub struct MemoryMcpServer {
     handler: Arc<MemoryHandler>,
@@ -481,6 +486,75 @@ impl MemoryMcpServer {
         Parameters(params): Parameters<GetRelatedParams>,
     ) -> Result<CallToolResult, McpError> {
         self.handler.get_related(params).await
+    }
+
+    // ── Palace (Memory Palace) ───────────────────────────────────────────────
+
+    #[tool(
+        description = "Load palace identity context (L0 identity + L1 essential story). Call at conversation start to prime the agent with persistent identity."
+    )]
+    async fn palace_wake_up(
+        &self,
+        Parameters(params): Parameters<PalaceWakeUpParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.handler.palace_wake_up(params).await
+    }
+
+    #[tool(
+        description = "On-demand recall of palace drawers (L2 layer). Returns formatted context filtered by wing/room."
+    )]
+    async fn palace_recall(
+        &self,
+        Parameters(params): Parameters<PalaceRecallParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.handler.palace_recall(params).await
+    }
+
+    #[tool(
+        description = "Deep semantic search across palace drawers (L3 layer). Returns formatted context text matching the query."
+    )]
+    async fn palace_search(
+        &self,
+        Parameters(params): Parameters<PalaceSearchParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.handler.palace_search(params).await
+    }
+
+    #[tool(
+        description = "Ingest content into the memory palace. Stores it as a drawer in the specified wing/room/hall with importance weighting."
+    )]
+    async fn palace_ingest(
+        &self,
+        Parameters(params): Parameters<PalaceIngestParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.handler.palace_ingest(params).await
+    }
+
+    #[tool(
+        description = "Delete a drawer from the memory palace by its record ID."
+    )]
+    async fn palace_delete(
+        &self,
+        Parameters(params): Parameters<PalaceDeleteParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.handler.palace_delete(params).await
+    }
+
+    #[tool(
+        description = "Get palace status: total drawers, wings, rooms, and identity loading state."
+    )]
+    async fn palace_status(&self) -> Result<CallToolResult, McpError> {
+        self.handler.palace_status().await
+    }
+
+    #[tool(
+        description = "Unified hybrid search across memories, entities, and palace drawers. Results are merged via Reciprocal Rank Fusion scoring."
+    )]
+    async fn palace_hybrid_search(
+        &self,
+        Parameters(params): Parameters<PalaceHybridSearchParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.handler.palace_hybrid_search(params).await
     }
 }
 

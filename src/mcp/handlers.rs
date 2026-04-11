@@ -1635,3 +1635,301 @@ pub struct GetRelatedParams {
     #[schemars(description = "Maximum results (default 20)")]
     pub limit: Option<usize>,
 }
+
+// ── Palace param structs ──────────────────────────────────────────────────────
+// Always compiled so the #[tool_router] macro can reference them unconditionally.
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PalaceWakeUpParams {
+    #[schemars(description = "Optional wing to scope the wake-up context")]
+    pub wing: Option<String>,
+    #[schemars(description = "If true, compress output using AAAK Dialect")]
+    pub compress: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PalaceRecallParams {
+    #[schemars(description = "Optional wing to filter by")]
+    pub wing: Option<String>,
+    #[schemars(description = "Optional room to filter by")]
+    pub room: Option<String>,
+    #[schemars(description = "Maximum drawers to recall (default: 20)")]
+    pub limit: Option<u32>,
+    #[schemars(description = "If true, compress output using AAAK Dialect")]
+    pub compress: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PalaceSearchParams {
+    #[schemars(description = "Natural language search query")]
+    pub query: String,
+    #[schemars(description = "Optional wing to filter by")]
+    pub wing: Option<String>,
+    #[schemars(description = "Optional room to filter by")]
+    pub room: Option<String>,
+    #[schemars(description = "Number of results (default: 10)")]
+    pub n: Option<u32>,
+    #[schemars(description = "If true, compress output using AAAK Dialect")]
+    pub compress: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PalaceIngestParams {
+    #[schemars(description = "Content to store")]
+    pub content: String,
+    #[schemars(description = "Wing (top-level category)")]
+    pub wing: String,
+    #[schemars(description = "Room within the wing")]
+    pub room: String,
+    #[schemars(description = "Hall within the room (default: 'general')")]
+    pub hall: Option<String>,
+    #[schemars(description = "Importance 0.0-1.0 (default: 1.0)")]
+    pub importance: Option<f32>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PalaceDeleteParams {
+    #[schemars(description = "Drawer record ID (e.g. 'drawers:abc123')")]
+    pub id: String,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PalaceHybridSearchParams {
+    #[schemars(description = "Natural language search query")]
+    pub query: String,
+    #[schemars(description = "Memory scope filter ('global', 'agent', 'user', 'session')")]
+    pub scope: Option<String>,
+    #[schemars(description = "Optional wing to filter palace drawers")]
+    pub wing: Option<String>,
+    #[schemars(description = "Number of results per source (default: 10)")]
+    pub n: Option<u32>,
+    #[schemars(description = "If true, compress content using AAAK Dialect")]
+    pub compress: Option<bool>,
+}
+
+// ── Palace handler methods ────────────────────────────────────────────────────
+
+#[cfg(feature = "palace")]
+impl MemoryHandler {
+    fn get_palace_storage(
+        &self,
+    ) -> Result<&surreal_memory::SurrealStorage, McpError> {
+        self.storage
+            .as_any()
+            .downcast_ref::<surreal_memory::SurrealStorage>()
+            .ok_or_else(|| {
+                Self::internal_error(anyhow::anyhow!(
+                    "Palace features require SurrealStorage backend"
+                ))
+            })
+    }
+
+    pub async fn palace_wake_up(
+        &self,
+        params: PalaceWakeUpParams,
+    ) -> Result<CallToolResult, McpError> {
+        use surreal_memory::PalaceStorage;
+        let storage = self.get_palace_storage()?;
+        let result = storage
+            .palace_wake_up(params.wing.as_deref())
+            .await
+            .map_err(Self::internal_error)?;
+        let output = if params.compress.unwrap_or(false) {
+            storage.palace_compress(&result)
+        } else {
+            result
+        };
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    pub async fn palace_recall(
+        &self,
+        params: PalaceRecallParams,
+    ) -> Result<CallToolResult, McpError> {
+        use surreal_memory::PalaceStorage;
+        let storage = self.get_palace_storage()?;
+        let limit = params.limit.unwrap_or(20) as usize;
+        let result = storage
+            .palace_recall(params.wing.as_deref(), params.room.as_deref(), limit)
+            .await
+            .map_err(Self::internal_error)?;
+        let output = if params.compress.unwrap_or(false) {
+            storage.palace_compress(&result)
+        } else {
+            result
+        };
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    pub async fn palace_search(
+        &self,
+        params: PalaceSearchParams,
+    ) -> Result<CallToolResult, McpError> {
+        use surreal_memory::PalaceStorage;
+        if params.query.trim().is_empty() {
+            return Err(Self::invalid_params("query cannot be empty"));
+        }
+        let storage = self.get_palace_storage()?;
+        let n = params.n.unwrap_or(10) as usize;
+        let result = storage
+            .palace_search(
+                &params.query,
+                params.wing.as_deref(),
+                params.room.as_deref(),
+                n,
+            )
+            .await
+            .map_err(Self::internal_error)?;
+        let output = if params.compress.unwrap_or(false) {
+            storage.palace_compress(&result)
+        } else {
+            result
+        };
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    pub async fn palace_ingest(
+        &self,
+        params: PalaceIngestParams,
+    ) -> Result<CallToolResult, McpError> {
+        use surreal_memory::PalaceStorage;
+        if params.content.trim().is_empty() {
+            return Err(Self::invalid_params("content cannot be empty"));
+        }
+        if params.wing.trim().is_empty() {
+            return Err(Self::invalid_params("wing cannot be empty"));
+        }
+        if params.room.trim().is_empty() {
+            return Err(Self::invalid_params("room cannot be empty"));
+        }
+        let storage = self.get_palace_storage()?;
+        let hall = params.hall.as_deref().unwrap_or("general");
+        let importance = params.importance.unwrap_or(1.0);
+        let drawer_id = storage
+            .palace_ingest(&params.content, &params.wing, &params.room, hall, importance)
+            .await
+            .map_err(Self::internal_error)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({ "drawer_id": drawer_id }).to_string(),
+        )]))
+    }
+
+    pub async fn palace_delete(
+        &self,
+        params: PalaceDeleteParams,
+    ) -> Result<CallToolResult, McpError> {
+        use surreal_memory::PalaceStorage;
+        if params.id.trim().is_empty() {
+            return Err(Self::invalid_params("id cannot be empty"));
+        }
+        let storage = self.get_palace_storage()?;
+        storage
+            .palace_delete(&params.id)
+            .await
+            .map_err(Self::internal_error)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({ "deleted": true, "id": params.id }).to_string(),
+        )]))
+    }
+
+    pub async fn palace_status(&self) -> Result<CallToolResult, McpError> {
+        use surreal_memory::PalaceStorage;
+        let storage = self.get_palace_storage()?;
+        let status = storage
+            .palace_status()
+            .await
+            .map_err(Self::internal_error)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&status).unwrap_or_default(),
+        )]))
+    }
+
+    pub async fn palace_hybrid_search(
+        &self,
+        params: PalaceHybridSearchParams,
+    ) -> Result<CallToolResult, McpError> {
+        use surreal_memory::PalaceStorage;
+        if params.query.trim().is_empty() {
+            return Err(Self::invalid_params("query cannot be empty"));
+        }
+        let storage = self.get_palace_storage()?;
+        let scope = params.scope.as_deref().and_then(|s| match s {
+            "global" => Some(surreal_memory::MemoryScope::Global),
+            "agent" => Some(surreal_memory::MemoryScope::Agent),
+            "user" => Some(surreal_memory::MemoryScope::User),
+            "session" => Some(surreal_memory::MemoryScope::Session),
+            _ => None,
+        });
+        let n = params.n.unwrap_or(10) as usize;
+        let hits = storage
+            .palace_hybrid_search(&params.query, scope, params.wing.as_deref(), n)
+            .await
+            .map_err(Self::internal_error)?;
+        let output = if params.compress.unwrap_or(false) {
+            let json = serde_json::to_string_pretty(&hits).unwrap_or_default();
+            storage.palace_compress(&json)
+        } else {
+            serde_json::to_string_pretty(&hits).unwrap_or_default()
+        };
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+}
+
+/// Fallback palace handlers when the `palace` feature is not enabled.
+/// Returns an error explaining the feature is not compiled in.
+#[cfg(not(feature = "palace"))]
+impl MemoryHandler {
+    fn palace_not_enabled() -> McpError {
+        McpError::new(
+            ErrorCode::INTERNAL_ERROR,
+            "Palace features are not enabled. Rebuild with --features palace".to_string(),
+            None,
+        )
+    }
+
+    pub async fn palace_wake_up(
+        &self,
+        _params: PalaceWakeUpParams,
+    ) -> Result<CallToolResult, McpError> {
+        Err(Self::palace_not_enabled())
+    }
+
+    pub async fn palace_recall(
+        &self,
+        _params: PalaceRecallParams,
+    ) -> Result<CallToolResult, McpError> {
+        Err(Self::palace_not_enabled())
+    }
+
+    pub async fn palace_search(
+        &self,
+        _params: PalaceSearchParams,
+    ) -> Result<CallToolResult, McpError> {
+        Err(Self::palace_not_enabled())
+    }
+
+    pub async fn palace_ingest(
+        &self,
+        _params: PalaceIngestParams,
+    ) -> Result<CallToolResult, McpError> {
+        Err(Self::palace_not_enabled())
+    }
+
+    pub async fn palace_delete(
+        &self,
+        _params: PalaceDeleteParams,
+    ) -> Result<CallToolResult, McpError> {
+        Err(Self::palace_not_enabled())
+    }
+
+    pub async fn palace_status(&self) -> Result<CallToolResult, McpError> {
+        Err(Self::palace_not_enabled())
+    }
+
+    pub async fn palace_hybrid_search(
+        &self,
+        _params: PalaceHybridSearchParams,
+    ) -> Result<CallToolResult, McpError> {
+        Err(Self::palace_not_enabled())
+    }
+}
