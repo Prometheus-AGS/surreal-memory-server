@@ -326,10 +326,10 @@ DEFINE FIELD IF NOT EXISTS content_hash ON drawers TYPE option<string>;
 
 DEFINE INDEX IF NOT EXISTS drawer_embedding_idx
   ON drawers FIELDS embedding
-  MTREE DIMENSION 384 DIST COSINE;
+  HNSW DIMENSION 384 DIST COSINE TYPE F32;
 
-DEFINE INDEX IF NOT EXISTS drawer_content_idx
-  ON drawers FIELDS content SEARCH ANALYZER unicode BM25;
+-- Full-text BM25 index omitted: SurrealDB 3.x SEARCH syntax requires further investigation.
+-- HNSW vector search is the primary retrieval path; keyword search can be added later.
 
 DEFINE INDEX IF NOT EXISTS drawer_hash_idx
   ON drawers FIELDS content_hash;
