@@ -24,6 +24,10 @@ pub enum EmbeddingProvider {
         model_id: String,
         model_path: Option<String>, // Cache directory
     },
+    /// FastEmbed via mempalace-core (all-MiniLM-L6-v2, 384 dims).
+    /// Only available when compiled with the `palace` feature.
+    #[cfg(feature = "palace")]
+    Fast,
 }
 
 #[async_trait]
@@ -70,6 +74,12 @@ pub async fn create_embedding_service(
                 "Local embeddings are not available. Rebuild with --features local-embeddings, \
                  or use EMBEDDING_PROVIDER=openai or EMBEDDING_PROVIDER=cohere"
             )
+        }
+        #[cfg(feature = "palace")]
+        EmbeddingProvider::Fast => {
+            Ok(Box::new(
+                crate::palace::embedding::FastEmbedService::new().await?,
+            ))
         }
     }
 }
