@@ -18,6 +18,7 @@ path = "src/lib.rs"
 [features]
 default = ["embedded"]
 embedded = ["surrealdb/kv-rocksdb"]
+palace = ["dep:mempalace-core"]
 local-embeddings = [
     "candle-core",
     "candle-nn",
@@ -39,6 +40,8 @@ metal = [
 ]
 
 [dependencies]
+mempalace-core = { workspace = true, optional = true }
+
 # Workspace
 tokio = { workspace = true }
 serde = { workspace = true }

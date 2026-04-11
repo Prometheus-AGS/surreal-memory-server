@@ -6,6 +6,7 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
+mempalace-core = { git = "https://github.com/GQAdonis/mempalace-rs.git", branch = "main" }
 tokio = { version = "1.50.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -72,6 +73,8 @@ uuid = { workspace = true }
 dotenvy = "0.15"
 dirs = "6"
 
+mempalace-core = { workspace = true, optional = true }
+
 # Candle for local embeddings (optional)
 candle-core = { version = "0.9.2", optional = true }
 candle-nn = { version = "0.9.2", optional = true }
@@ -83,6 +86,7 @@ hf-hub = { version = "0.5.0", features = ["tokio"], optional = true }
 default = ["embedded"]
 embedded = ["surreal-memory/embedded"]
 server-only = []
+palace = ["surreal-memory/palace"]
 local-embeddings = [
     "candle-core",
     "candle-nn",
