@@ -9,6 +9,8 @@ use crate::{
     storage::migrations::run_migrations,
     task_stream::{ContextWindow, TaskStream, TaskStreamStatus},
 };
+#[cfg(feature = "palace")]
+use crate::palace::{PalaceContext, PalaceStatus, PalaceStorage};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -34,6 +36,8 @@ pub struct SurrealStorage {
     connection: Arc<std::sync::RwLock<ConnectionState>>,
     connection_info: ConnectionInfo,
     embedding_service: Arc<dyn EmbeddingService>,
+    #[cfg(feature = "palace")]
+    palace: tokio::sync::OnceCell<PalaceContext>,
 }
 
 // ── Retry Configuration ───────────────────────────────────────────────────────
@@ -395,6 +399,8 @@ impl SurrealStorage {
             connection: Arc::new(std::sync::RwLock::new(ConnectionState::Connected(db))),
             connection_info,
             embedding_service,
+            #[cfg(feature = "palace")]
+            palace: tokio::sync::OnceCell::new(),
         })
     }
 
@@ -2664,6 +2670,10 @@ impl MemoryStorage for SurrealStorage {
             relations,
         })
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// Simple monotonic node ID for mindmap auto-update leaves.
@@ -2708,7 +2718,172 @@ impl SurrealStorage {
             connection: Arc::new(std::sync::RwLock::new(ConnectionState::Connected(db))),
             connection_info,
             embedding_service,
+            #[cfg(feature = "palace")]
+            palace: tokio::sync::OnceCell::new(),
         })
+    }
+}
+
+// ── PalaceStorage implementation ─────────────────────────────────────────────
+
+#[cfg(feature = "palace")]
+impl SurrealStorage {
+    /// Lazily initialise the `PalaceContext`, reusing the existing SurrealDB
+    /// connection. Subsequent calls return the cached reference.
+    async fn palace_context(&self) -> Result<&PalaceContext> {
+        self.palace
+            .get_or_try_init(|| async { PalaceContext::from_storage(self).await })
+            .await
+    }
+}
+
+#[cfg(feature = "palace")]
+#[async_trait]
+impl PalaceStorage for SurrealStorage {
+    async fn palace_ingest(
+        &self,
+        content: &str,
+        wing: &str,
+        room: &str,
+        hall: &str,
+        source_file: Option<&str>,
+        date: Option<&str>,
+        importance: f32,
+    ) -> anyhow::Result<Option<String>> {
+        self.palace_context()
+            .await?
+            .ingest(content, wing, room, hall, source_file, date, importance)
+            .await
+    }
+
+    fn palace_compress(
+        &self,
+        text: &str,
+        wing: Option<&str>,
+        room: Option<&str>,
+        date: Option<&str>,
+        source_file: Option<&str>,
+    ) -> anyhow::Result<String> {
+        use mempalace_core::dialect::compress::{CompressMetadata, Dialect, DialectConfig};
+        use std::sync::OnceLock;
+
+        // Static dialect — zero-cost after first init; DialectConfig::default()
+        // is deterministic, so this is safe.
+        static DIALECT: OnceLock<Dialect> = OnceLock::new();
+        let dialect = DIALECT.get_or_init(|| Dialect::new(DialectConfig::default()));
+
+        let meta = CompressMetadata {
+            wing,
+            room,
+            date,
+            source_file,
+        };
+        Ok(dialect.compress(text, Some(&meta)))
+    }
+
+    async fn palace_search(
+        &self,
+        query: &str,
+        wing: Option<&str>,
+        room: Option<&str>,
+        n: usize,
+    ) -> anyhow::Result<Vec<mempalace_core::storage::types::DrawerHit>> {
+        self.palace_context()
+            .await?
+            .search_drawers_structured(query, wing, room, n)
+            .await
+    }
+
+    async fn palace_wake_up(&self, wing: Option<&str>) -> anyhow::Result<String> {
+        self.palace_context().await?.wake_up(wing).await
+    }
+
+    async fn palace_recall(
+        &self,
+        wing: Option<&str>,
+        room: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<String> {
+        self.palace_context().await?.recall(wing, room, limit).await
+    }
+
+    async fn palace_status(&self) -> anyhow::Result<PalaceStatus> {
+        let stack_status = self.palace_context().await?.status().await?;
+        Ok(PalaceStatus {
+            total_drawers: stack_status.total_drawers,
+            total_wings: stack_status.total_wings,
+            total_rooms: stack_status.total_rooms,
+            identity_loaded: stack_status.identity_loaded,
+        })
+    }
+
+    async fn palace_list_wings(
+        &self,
+    ) -> anyhow::Result<Vec<mempalace_core::storage::types::WingStats>> {
+        // mempalace-core's WingStats doesn't derive SurrealValue, so we use a
+        // local mirror struct for deserialization and convert.
+        #[derive(Clone, Debug, Serialize, Deserialize, SurrealValue)]
+        struct DbWingStats {
+            name: String,
+            count: usize,
+        }
+
+        let db = self.db()?;
+        let rows: Vec<DbWingStats> = db
+            .query(
+                "SELECT wing AS name, count() AS count FROM drawers GROUP BY wing ORDER BY count DESC",
+            )
+            .await
+            .context("palace_list_wings query failed")?
+            .take(0)
+            .context("palace_list_wings take(0) failed")?;
+        Ok(rows
+            .into_iter()
+            .map(|r| mempalace_core::storage::types::WingStats {
+                name: r.name,
+                count: r.count,
+            })
+            .collect())
+    }
+
+    async fn palace_list_rooms(
+        &self,
+        wing: Option<&str>,
+    ) -> anyhow::Result<Vec<mempalace_core::storage::types::RoomStats>> {
+        #[derive(Clone, Debug, Serialize, Deserialize, SurrealValue)]
+        struct DbRoomStats {
+            name: String,
+            wing: String,
+            count: usize,
+        }
+
+        let db = self.db()?;
+        let rows: Vec<DbRoomStats> = if let Some(wing) = wing {
+            db.query(
+                "SELECT room AS name, wing, count() AS count FROM drawers WHERE wing = $wing GROUP BY room, wing ORDER BY count DESC",
+            )
+            .bind(("wing", wing.to_string()))
+            .await
+            .context("palace_list_rooms query failed")?
+            .take(0)
+            .context("palace_list_rooms take(0) failed")?
+        } else {
+            db.query(
+                "SELECT room AS name, wing, count() AS count FROM drawers GROUP BY room, wing ORDER BY count DESC",
+            )
+            .await
+            .context("palace_list_rooms query failed")?
+            .take(0)
+            .context("palace_list_rooms take(0) failed")?
+        };
+        Ok(rows
+            .into_iter()
+            .map(|r| mempalace_core::storage::types::RoomStats {
+                name: r.name,
+                wing: r.wing,
+                count: r.count,
+            })
+            .collect())
     }
 }
 

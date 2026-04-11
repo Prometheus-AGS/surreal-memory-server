@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use std::any::Any;
 
 pub mod migrations;
 pub mod surreal;
@@ -217,4 +218,8 @@ pub trait MemoryStorage: Send + Sync {
     /// Return the knowledge graph as it existed at or before `before_rfc3339`.
     /// `before_rfc3339` must be an RFC-3339 timestamp string (e.g. "2025-01-01T00:00:00Z").
     async fn get_graph_at_time(&self, before_rfc3339: &str) -> Result<KnowledgeGraph>;
+
+    /// Downcast helper — allows MCP handlers to recover concrete types
+    /// (e.g. `SurrealStorage`) from `Arc<dyn MemoryStorage>`.
+    fn as_any(&self) -> &dyn Any;
 }
