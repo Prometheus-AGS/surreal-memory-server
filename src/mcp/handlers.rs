@@ -1,4 +1,10 @@
-use crate::storage::{Entity, MemoryStorage, Relation};
+use crate::{
+    contracts::{
+        AddMemoryRequest, AddMindmapEdgeRequest, AddMindmapNodeRequest, CreateEntityRequest,
+        CreateMindmapRequest, CreateRelationRequest, UpdateMemoryRequest,
+    },
+    storage::MemoryStorage,
+};
 use rmcp::{
     ErrorData as McpError,
     model::{CallToolResult, Content, ErrorCode},
@@ -56,23 +62,14 @@ pub struct MemoryIdParams {
     pub id: String,
 }
 
-#[derive(Serialize, Deserialize, schemars::JsonSchema)]
-pub struct AddMemoryParams {
-    #[schemars(description = "Content to store as a memory")]
-    pub content: String,
-    pub user_id: Option<String>,
-    pub agent_id: Option<String>,
-    pub session_id: Option<String>,
-    #[schemars(description = "Optional taxonomy categories")]
-    pub categories: Option<Vec<String>>,
-}
+pub type AddMemoryParams = AddMemoryRequest;
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct UpdateMemoryParams {
     #[schemars(description = "The full record ID of the memory to update")]
     pub id: String,
-    #[schemars(description = "New content for the memory")]
-    pub content: String,
+    #[serde(flatten)]
+    pub update: UpdateMemoryRequest,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -138,21 +135,7 @@ pub struct CreateRelationsParams {
 
 // ── Knowledge graph param structs ─────────────────────────────────────────────
 
-#[derive(Serialize, Deserialize, schemars::JsonSchema)]
-pub struct CreateEntityParams {
-    #[schemars(
-        description = "Unique name identifying the entity (e.g., 'Alice Smith', 'Project Nimbus')"
-    )]
-    pub name: String,
-    #[schemars(
-        description = "Category or type of entity (e.g., 'Person', 'Project', 'Organization', 'Concept')"
-    )]
-    pub entity_type: String,
-    #[schemars(
-        description = "List of facts or observations about the entity (e.g., ['Works at Acme Corp', 'Expert in Rust'])"
-    )]
-    pub observations: Vec<String>,
-}
+pub type CreateEntityParams = CreateEntityRequest;
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AddObservationsParams {
@@ -162,17 +145,7 @@ pub struct AddObservationsParams {
     pub observations: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize, schemars::JsonSchema)]
-pub struct CreateRelationParams {
-    #[schemars(description = "Name of the source entity (must exist)")]
-    pub from: String,
-    #[schemars(description = "Name of the target entity (must exist)")]
-    pub to: String,
-    #[schemars(
-        description = "Type of relationship in SCREAMING_SNAKE_CASE (e.g., 'WORKS_AT', 'KNOWS', 'MANAGES', 'PART_OF')"
-    )]
-    pub relation_type: String,
-}
+pub type CreateRelationParams = CreateRelationRequest;
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EntityNameParams {
@@ -238,28 +211,6 @@ pub struct DeleteRelationParams {
     pub relation_type: String,
 }
 
-impl CreateEntityParams {
-    fn validate(&self) -> Result<(), McpError> {
-        if self.name.trim().is_empty() {
-            return Err(MemoryHandler::invalid_params("Entity name cannot be empty"));
-        }
-        if self.entity_type.trim().is_empty() {
-            return Err(MemoryHandler::invalid_params("Entity type cannot be empty"));
-        }
-        if self.observations.is_empty() {
-            return Err(MemoryHandler::invalid_params(
-                "At least one observation is required",
-            ));
-        }
-        if self.observations.iter().any(|obs| obs.trim().is_empty()) {
-            return Err(MemoryHandler::invalid_params(
-                "Observations cannot be empty",
-            ));
-        }
-        Ok(())
-    }
-}
-
 impl AddObservationsParams {
     fn validate(&self) -> Result<(), McpError> {
         if self.entity_name.trim().is_empty() {
@@ -273,32 +224,6 @@ impl AddObservationsParams {
         if self.observations.iter().any(|obs| obs.trim().is_empty()) {
             return Err(MemoryHandler::invalid_params(
                 "Observations cannot be empty",
-            ));
-        }
-        Ok(())
-    }
-}
-
-impl CreateRelationParams {
-    fn validate(&self) -> Result<(), McpError> {
-        if self.from.trim().is_empty() {
-            return Err(MemoryHandler::invalid_params(
-                "Source entity name cannot be empty",
-            ));
-        }
-        if self.to.trim().is_empty() {
-            return Err(MemoryHandler::invalid_params(
-                "Target entity name cannot be empty",
-            ));
-        }
-        if self.relation_type.trim().is_empty() {
-            return Err(MemoryHandler::invalid_params(
-                "Relation type cannot be empty",
-            ));
-        }
-        if self.from == self.to {
-            return Err(MemoryHandler::invalid_params(
-                "Source and target entities must be different",
             ));
         }
         Ok(())
@@ -395,13 +320,13 @@ impl MemoryHandler {
         &self,
         params: CreateEntityParams,
     ) -> Result<CallToolResult, McpError> {
-        params.validate()?;
-
-        let entity = Entity::new(params.name, params.entity_type, params.observations);
+        params
+            .validate()
+            .map_err(|error| Self::invalid_params(error.to_string()))?;
 
         let created = self
             .storage
-            .create_entity(entity)
+            .create_entity(params.into_entity())
             .await
             .map_err(Self::internal_error)?;
 
@@ -432,13 +357,13 @@ impl MemoryHandler {
         &self,
         params: CreateRelationParams,
     ) -> Result<CallToolResult, McpError> {
-        params.validate()?;
-
-        let relation = Relation::new(params.from, params.to, params.relation_type);
+        params
+            .validate()
+            .map_err(|error| Self::invalid_params(error.to_string()))?;
 
         let created = self
             .storage
-            .create_relation(relation)
+            .create_relation(params.into_relation())
             .await
             .map_err(Self::internal_error)?;
 
@@ -464,11 +389,12 @@ impl MemoryHandler {
         &self,
         params: CreateEntityParams,
     ) -> Result<CallToolResult, McpError> {
-        params.validate()?;
-        let entity = Entity::new(params.name, params.entity_type, params.observations);
+        params
+            .validate()
+            .map_err(|error| Self::invalid_params(error.to_string()))?;
         let updated = self
             .storage
-            .update_entity(entity)
+            .update_entity(params.into_entity())
             .await
             .map_err(Self::internal_error)?;
         Ok(CallToolResult::success(vec![Content::text(
@@ -629,10 +555,15 @@ impl MemoryHandler {
         if params.entities.is_empty() {
             return Err(Self::invalid_params("entities list cannot be empty"));
         }
+        for entity in &params.entities {
+            entity
+                .validate()
+                .map_err(|error| Self::invalid_params(error.to_string()))?;
+        }
         let entities = params
             .entities
             .into_iter()
-            .map(|p| Entity::new(p.name, p.entity_type, p.observations))
+            .map(CreateEntityParams::into_entity)
             .collect();
         let created = self
             .storage
@@ -651,10 +582,15 @@ impl MemoryHandler {
         if params.relations.is_empty() {
             return Err(Self::invalid_params("relations list cannot be empty"));
         }
+        for relation in &params.relations {
+            relation
+                .validate()
+                .map_err(|error| Self::invalid_params(error.to_string()))?;
+        }
         let relations = params
             .relations
             .into_iter()
-            .map(|p| Relation::new(p.from, p.to, p.relation_type))
+            .map(CreateRelationParams::into_relation)
             .collect();
         let created = self
             .storage
@@ -669,20 +605,12 @@ impl MemoryHandler {
     // ── Scoped Memory ────────────────────────────────────────────────────────
 
     pub async fn add_memory(&self, params: AddMemoryParams) -> Result<CallToolResult, McpError> {
-        if params.content.trim().is_empty() {
-            return Err(Self::invalid_params("content cannot be empty"));
-        }
-        use crate::storage::Memory;
-        let memory = Memory::new(
-            params.content,
-            params.user_id,
-            params.agent_id,
-            params.session_id,
-            params.categories.unwrap_or_default(),
-        );
+        params
+            .validate()
+            .map_err(|error| Self::invalid_params(error.to_string()))?;
         let stored = self
             .storage
-            .add_memory(memory)
+            .add_memory(params.into_memory())
             .await
             .map_err(Self::internal_error)?;
         Ok(CallToolResult::success(vec![Content::text(
@@ -705,12 +633,13 @@ impl MemoryHandler {
         &self,
         params: UpdateMemoryParams,
     ) -> Result<CallToolResult, McpError> {
-        if params.content.trim().is_empty() {
-            return Err(Self::invalid_params("content cannot be empty"));
-        }
+        params
+            .update
+            .validate()
+            .map_err(|error| Self::invalid_params(error.to_string()))?;
         let updated = self
             .storage
-            .update_memory(&params.id, params.content)
+            .update_memory(&params.id, params.update.content)
             .await
             .map_err(Self::internal_error)?;
         Ok(CallToolResult::success(vec![Content::text(
@@ -1000,21 +929,7 @@ mod tests {
 
 // ── Mindmap param structs ────────────────────────────────────────────────────
 
-#[derive(Serialize, Deserialize, schemars::JsonSchema)]
-pub struct CreateMindmapParams {
-    #[schemars(description = "Unique name for the mindmap")]
-    pub name: String,
-    #[schemars(description = "Map type: radial | concept | argument | tree | temporal")]
-    pub map_type: String,
-    #[schemars(description = "Label for the root node")]
-    pub root_label: String,
-    pub description: Option<String>,
-    pub agent_id: Option<String>,
-    pub user_id: Option<String>,
-    #[schemars(description = "Optional task stream record id in the form table:key")]
-    pub task_stream_id: Option<String>,
-    pub tags: Option<Vec<String>>,
-}
+pub type CreateMindmapParams = CreateMindmapRequest;
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MindmapNameParams {
@@ -1143,30 +1058,9 @@ impl MemoryHandler {
         &self,
         params: CreateMindmapParams,
     ) -> Result<CallToolResult, McpError> {
-        use surreal_memory::{MapType, MindMap};
-        use surrealdb::types::RecordId;
-        let map_type = match params.map_type.to_lowercase().as_str() {
-            "concept" => MapType::Concept,
-            "argument" => MapType::Argument,
-            "tree" => MapType::Tree,
-            "temporal" => MapType::Temporal,
-            _ => MapType::Radial,
-        };
-        let mut mm = MindMap::new(
-            params.name,
-            map_type,
-            params.root_label,
-            params.description,
-            params.agent_id,
-            params.user_id,
-        );
-        if let Some(task_stream_id) = params.task_stream_id {
-            mm.task_stream_id = Some(
-                RecordId::parse_simple(&task_stream_id)
-                    .map_err(|e| Self::invalid_params(format!("invalid task_stream_id: {e}")))?,
-            );
-        }
-        mm.tags = params.tags.unwrap_or_default();
+        let mm = params
+            .into_mindmap()
+            .map_err(|error| Self::invalid_params(error.to_string()))?;
         match self.storage.create_mindmap(mm).await {
             Ok(created) => Ok(CallToolResult::success(vec![Content::text(
                 serde_json::to_string_pretty(&created).unwrap_or_default(),
@@ -1213,22 +1107,24 @@ impl MemoryHandler {
         &self,
         params: AddMindmapNodeParams,
     ) -> Result<CallToolResult, McpError> {
-        use surreal_memory::MindMapNode;
-        let node = MindMapNode {
-            id: params.node_id,
+        let node_request = AddMindmapNodeRequest {
+            node_id: params.node_id,
             label: params.label,
             parent_id: params.parent_id,
             node_type: params.node_type,
             color: params.color,
             metadata: params.metadata,
         };
+        node_request
+            .validate()
+            .map_err(|error| Self::invalid_params(error.to_string()))?;
         match self
             .storage
             .add_mindmap_node(
                 &params.mindmap_name,
                 params.user_id.as_deref(),
                 params.agent_id.as_deref(),
-                node,
+                node_request.into_node(),
             )
             .await
         {
@@ -1243,20 +1139,22 @@ impl MemoryHandler {
         &self,
         params: AddMindmapEdgeParams,
     ) -> Result<CallToolResult, McpError> {
-        use surreal_memory::MindMapEdge;
-        let edge = MindMapEdge {
+        let edge_request = AddMindmapEdgeRequest {
             from_id: params.from_id,
             to_id: params.to_id,
             label: params.label,
             directed: params.directed,
         };
+        edge_request
+            .validate()
+            .map_err(|error| Self::invalid_params(error.to_string()))?;
         match self
             .storage
             .add_mindmap_edge(
                 &params.mindmap_name,
                 params.user_id.as_deref(),
                 params.agent_id.as_deref(),
-                edge,
+                edge_request.into_edge(),
             )
             .await
         {
@@ -1711,9 +1609,7 @@ pub struct PalaceHybridSearchParams {
 
 #[cfg(feature = "palace")]
 impl MemoryHandler {
-    fn get_palace_storage(
-        &self,
-    ) -> Result<&surreal_memory::SurrealStorage, McpError> {
+    fn get_palace_storage(&self) -> Result<&surreal_memory::SurrealStorage, McpError> {
         self.storage
             .as_any()
             .downcast_ref::<surreal_memory::SurrealStorage>()
@@ -1806,7 +1702,13 @@ impl MemoryHandler {
         let hall = params.hall.as_deref().unwrap_or("general");
         let importance = params.importance.unwrap_or(1.0);
         let drawer_id = storage
-            .palace_ingest(&params.content, &params.wing, &params.room, hall, importance)
+            .palace_ingest(
+                &params.content,
+                &params.wing,
+                &params.room,
+                hall,
+                importance,
+            )
             .await
             .map_err(Self::internal_error)?;
         Ok(CallToolResult::success(vec![Content::text(

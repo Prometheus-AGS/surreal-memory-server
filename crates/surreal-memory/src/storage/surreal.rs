@@ -1,6 +1,8 @@
 //! SurrealDB-backed implementation of `MemoryStorage`.
 
 use super::MemoryStorage;
+#[cfg(feature = "palace")]
+use crate::palace::{HitSource, PalaceContext, PalaceStatus, PalaceStorage, UnifiedHit};
 use crate::{
     embeddings::EmbeddingService,
     entity::{Entity, KnowledgeGraph, Relation, SemanticSearchResult},
@@ -9,8 +11,6 @@ use crate::{
     storage::migrations::run_migrations,
     task_stream::{ContextWindow, TaskStream, TaskStreamStatus},
 };
-#[cfg(feature = "palace")]
-use crate::palace::{HitSource, PalaceContext, PalaceStatus, PalaceStorage, UnifiedHit};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -2822,7 +2822,8 @@ impl PalaceStorage for SurrealStorage {
         };
 
         // Run all three searches concurrently
-        let memory_fut = self.hybrid_search_memories(query, user_id, agent_id, session_id, n, 0.7, 0.3);
+        let memory_fut =
+            self.hybrid_search_memories(query, user_id, agent_id, session_id, n, 0.7, 0.3);
         let entity_fut = self.semantic_search(query, n, 0.0);
         let palace_ctx = self.palace_context().await?;
         let palace_fut = palace_ctx.search_drawers_structured(query, wing, None, n);
@@ -2837,11 +2838,10 @@ impl PalaceStorage for SurrealStorage {
                 .iter()
                 .enumerate()
                 .map(|(i, m)| {
-                    let id_str = m
-                        .id
-                        .as_ref()
-                        .map(|r| Self::record_id_to_string(r))
-                        .unwrap_or_else(|| format!("memory_{i}"));
+                    let id_str =
+                        m.id.as_ref()
+                            .map(|r| Self::record_id_to_string(r))
+                            .unwrap_or_else(|| format!("memory_{i}"));
                     DrawerHit {
                         drawer: mempalace_core::storage::types::Drawer {
                             id: id_str,

@@ -18,8 +18,8 @@ pub use adapter::PalaceAdapter;
 pub use context::PalaceContext;
 pub use embedding::FastEmbedService;
 
-use async_trait::async_trait;
 use crate::memory::{MemoryScope, MemoryType};
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -43,14 +43,9 @@ pub enum HitSource {
         memory_type: MemoryType,
     },
     /// Hit came from the knowledge graph `Entity` table.
-    Entity {
-        entity_type: String,
-    },
+    Entity { entity_type: String },
     /// Hit came from the mempalace `drawers` table.
-    Palace {
-        wing: String,
-        room: String,
-    },
+    Palace { wing: String, room: String },
 }
 
 /// A search hit from either the palace, the legacy memory system, or the

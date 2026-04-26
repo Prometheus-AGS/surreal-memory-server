@@ -1,0 +1,349 @@
+{
+  "enums": {
+    "map_type": [
+      "radial",
+      "concept",
+      "argument",
+      "tree",
+      "temporal"
+    ]
+  },
+  "routes": [
+    {
+      "method": "POST",
+      "path": "/api/v1/entities",
+      "request_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Request body for creating an entity.",
+        "properties": {
+          "entity_type": {
+            "description": "Category or type of entity",
+            "type": "string"
+          },
+          "name": {
+            "description": "Unique name identifying the entity",
+            "type": "string"
+          },
+          "observations": {
+            "description": "Facts or observations about the entity",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "entity_type",
+          "observations"
+        ],
+        "title": "CreateEntityRequest",
+        "type": "object"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/entities/batch",
+      "request_schema": {
+        "items": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "description": "Request body for creating an entity.",
+          "properties": {
+            "entity_type": {
+              "description": "Category or type of entity",
+              "type": "string"
+            },
+            "name": {
+              "description": "Unique name identifying the entity",
+              "type": "string"
+            },
+            "observations": {
+              "description": "Facts or observations about the entity",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "name",
+            "entity_type",
+            "observations"
+          ],
+          "title": "CreateEntityRequest",
+          "type": "object"
+        },
+        "type": "array"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/entities/relations",
+      "request_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Request body for creating a relation.",
+        "properties": {
+          "from": {
+            "description": "Name of the source entity",
+            "type": "string"
+          },
+          "relation_type": {
+            "description": "Type of relationship, for example WORKS_AT",
+            "type": "string"
+          },
+          "to": {
+            "description": "Name of the target entity",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "relation_type"
+        ],
+        "title": "CreateRelationRequest",
+        "type": "object"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/entities/relations/batch",
+      "request_schema": {
+        "items": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "description": "Request body for creating a relation.",
+          "properties": {
+            "from": {
+              "description": "Name of the source entity",
+              "type": "string"
+            },
+            "relation_type": {
+              "description": "Type of relationship, for example WORKS_AT",
+              "type": "string"
+            },
+            "to": {
+              "description": "Name of the target entity",
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to",
+            "relation_type"
+          ],
+          "title": "CreateRelationRequest",
+          "type": "object"
+        },
+        "type": "array"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/memory",
+      "request_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Request body for adding a scoped memory.",
+        "properties": {
+          "agent_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "categories": {
+            "description": "Optional taxonomy categories",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "content": {
+            "description": "Content to store as a memory",
+            "type": "string"
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "user_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "title": "AddMemoryRequest",
+        "type": "object"
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/memory/{id}",
+      "request_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Request body for updating memory content.",
+        "properties": {
+          "content": {
+            "description": "New content for the memory",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "title": "UpdateMemoryRequest",
+        "type": "object"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/mindmaps",
+      "request_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Request body for creating a mindmap.",
+        "properties": {
+          "agent_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "map_type": {
+            "description": "Map type: radial | concept | argument | tree | temporal",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "Unique name for the mindmap",
+            "type": "string"
+          },
+          "root_label": {
+            "description": "Label for the root node",
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "task_stream_id": {
+            "description": "Optional task stream record id in the form table:key",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "user_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "root_label"
+        ],
+        "title": "CreateMindmapRequest",
+        "type": "object"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/mindmaps/{name}/nodes",
+      "request_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Request body for adding a mindmap node.",
+        "properties": {
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "metadata": {
+            "description": "Optional arbitrary JSON metadata for the node"
+          },
+          "node_id": {
+            "type": "string"
+          },
+          "node_type": {
+            "description": "For argument maps: claim | evidence | rebuttal | idea",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parent_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "node_id",
+          "label"
+        ],
+        "title": "AddMindmapNodeRequest",
+        "type": "object"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/mindmaps/{name}/edges",
+      "request_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Request body for adding a mindmap edge.",
+        "properties": {
+          "directed": {
+            "default": false,
+            "type": "boolean"
+          },
+          "from_id": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "to_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "from_id",
+          "to_id"
+        ],
+        "title": "AddMindmapEdgeRequest",
+        "type": "object"
+      }
+    }
+  ],
+  "version": 1
+}

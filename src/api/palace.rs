@@ -31,9 +31,7 @@ pub fn router() -> Router<AppState> {
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-fn get_palace(
-    state: &AppState,
-) -> Result<&surreal_memory::SurrealStorage, ApiFailure> {
+fn get_palace(state: &AppState) -> Result<&surreal_memory::SurrealStorage, ApiFailure> {
     state
         .storage
         .as_any()
@@ -218,10 +216,7 @@ async fn delete_drawer(
     }
     let storage = get_palace(&state)?;
     storage.palace_delete(&id).await.map_err(api_error)?;
-    Ok(Json(DeleteResponse {
-        deleted: true,
-        id,
-    }))
+    Ok(Json(DeleteResponse { deleted: true, id }))
 }
 
 async fn status(

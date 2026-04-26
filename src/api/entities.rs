@@ -8,9 +8,10 @@ use axum::{
     routing::{delete, get, post},
 };
 use serde::Deserialize;
-use surreal_memory::{Entity, Relation};
 
-use super::AppState;
+use crate::contracts::{CreateEntityRequest, CreateRelationRequest};
+
+use super::{ApiFailure, AppState, api_error, bad_request};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -33,88 +34,59 @@ struct SearchQuery {
 }
 
 #[derive(Deserialize)]
-struct CreateEntityBody {
-    name: String,
-    entity_type: String,
-    observations: Vec<String>,
-}
-
-#[derive(Deserialize)]
 struct AddObservationsBody {
     observations: Vec<String>,
 }
 
-#[derive(Deserialize)]
-struct CreateRelationBody {
-    from: String,
-    to: String,
-    relation_type: String,
-}
-
-fn internal_err(e: impl ToString) -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(serde_json::json!({ "error": e.to_string() })),
-    )
-}
-
 async fn create_entity(
     State(state): State<AppState>,
-    Json(body): Json<CreateEntityBody>,
-) -> Result<(StatusCode, Json<Entity>), (StatusCode, Json<serde_json::Value>)> {
-    let e = Entity {
-        id: None,
-        name: body.name,
-        entity_type: body.entity_type,
-        observations: body.observations,
-        created_at: surrealdb::types::Datetime::default(),
-        updated_at: surrealdb::types::Datetime::default(),
-        embedding: None,
-    };
-    let created = state.storage.create_entity(e).await.map_err(internal_err)?;
+    Json(body): Json<CreateEntityRequest>,
+) -> Result<(StatusCode, Json<surreal_memory::Entity>), ApiFailure> {
+    body.validate().map_err(|e| bad_request(e.to_string()))?;
+    let created = state
+        .storage
+        .create_entity(body.into_entity())
+        .await
+        .map_err(api_error)?;
     Ok((StatusCode::CREATED, Json(created)))
 }
 
 async fn create_entities_batch(
     State(state): State<AppState>,
-    Json(bodies): Json<Vec<CreateEntityBody>>,
-) -> Result<Json<Vec<Entity>>, (StatusCode, Json<serde_json::Value>)> {
+    Json(bodies): Json<Vec<CreateEntityRequest>>,
+) -> Result<Json<Vec<surreal_memory::Entity>>, ApiFailure> {
+    if bodies.is_empty() {
+        return Err(bad_request("entities list cannot be empty"));
+    }
+    for body in &bodies {
+        body.validate().map_err(|e| bad_request(e.to_string()))?;
+    }
     let entities = bodies
         .into_iter()
-        .map(|b| Entity {
-            id: None,
-            name: b.name,
-            entity_type: b.entity_type,
-            observations: b.observations,
-            created_at: surrealdb::types::Datetime::default(),
-            updated_at: surrealdb::types::Datetime::default(),
-            embedding: None,
-        })
+        .map(CreateEntityRequest::into_entity)
         .collect();
     let created = state
         .storage
         .create_entities(entities)
         .await
-        .map_err(internal_err)?;
+        .map_err(api_error)?;
     Ok(Json(created))
 }
 
-async fn get_graph(
-    State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let graph = state.storage.get_graph().await.map_err(internal_err)?;
+async fn get_graph(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiFailure> {
+    let graph = state.storage.get_graph().await.map_err(api_error)?;
     Ok(Json(serde_json::json!(graph)))
 }
 
 async fn delete_entity(
     State(state): State<AppState>,
     Path(name): Path<String>,
-) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<StatusCode, ApiFailure> {
     state
         .storage
         .delete_entity(&name)
         .await
-        .map_err(internal_err)?;
+        .map_err(api_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -122,66 +94,69 @@ async fn add_observations(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Json(body): Json<AddObservationsBody>,
-) -> Result<Json<Entity>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<surreal_memory::Entity>, ApiFailure> {
+    if name.trim().is_empty() {
+        return Err(bad_request("Entity name cannot be empty"));
+    }
+    if body.observations.is_empty() {
+        return Err(bad_request("At least one observation is required"));
+    }
+    if body.observations.iter().any(|obs| obs.trim().is_empty()) {
+        return Err(bad_request("Observations cannot be empty"));
+    }
     let updated = state
         .storage
         .add_observations(&name, body.observations)
         .await
-        .map_err(internal_err)?;
+        .map_err(api_error)?;
     Ok(Json(updated))
 }
 
 async fn create_relation(
     State(state): State<AppState>,
-    Json(body): Json<CreateRelationBody>,
-) -> Result<(StatusCode, Json<Relation>), (StatusCode, Json<serde_json::Value>)> {
-    let r = Relation {
-        id: None,
-        from: body.from,
-        to: body.to,
-        relation_type: body.relation_type,
-        created_at: surrealdb::types::Datetime::default(),
-    };
+    Json(body): Json<CreateRelationRequest>,
+) -> Result<(StatusCode, Json<surreal_memory::Relation>), ApiFailure> {
+    body.validate().map_err(|e| bad_request(e.to_string()))?;
     let created = state
         .storage
-        .create_relation(r)
+        .create_relation(body.into_relation())
         .await
-        .map_err(internal_err)?;
+        .map_err(api_error)?;
     Ok((StatusCode::CREATED, Json(created)))
 }
 
 async fn create_relations_batch(
     State(state): State<AppState>,
-    Json(bodies): Json<Vec<CreateRelationBody>>,
-) -> Result<Json<Vec<Relation>>, (StatusCode, Json<serde_json::Value>)> {
+    Json(bodies): Json<Vec<CreateRelationRequest>>,
+) -> Result<Json<Vec<surreal_memory::Relation>>, ApiFailure> {
+    if bodies.is_empty() {
+        return Err(bad_request("relations list cannot be empty"));
+    }
+    for body in &bodies {
+        body.validate().map_err(|e| bad_request(e.to_string()))?;
+    }
     let relations = bodies
         .into_iter()
-        .map(|b| Relation {
-            id: None,
-            from: b.from,
-            to: b.to,
-            relation_type: b.relation_type,
-            created_at: surrealdb::types::Datetime::default(),
-        })
+        .map(CreateRelationRequest::into_relation)
         .collect();
     let created = state
         .storage
         .create_relations(relations)
         .await
-        .map_err(internal_err)?;
+        .map_err(api_error)?;
     Ok(Json(created))
 }
 
 async fn search_entities(
     State(state): State<AppState>,
     Query(q): Query<SearchQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<serde_json::Value>, ApiFailure> {
     let query = q.q.unwrap_or_default();
     let results = state
         .storage
         .search_entities(&query)
         .await
-        .map_err(internal_err)?;
+        .map_err(api_error)?;
     Ok(Json(serde_json::json!(results)))
 }
 
@@ -211,12 +186,12 @@ async fn expand_neighbors(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Query(q): Query<NeighborsQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<serde_json::Value>, ApiFailure> {
     let graph = state
         .storage
         .expand_neighbors(&name, q.depth.unwrap_or(2), q.limit.unwrap_or(50))
         .await
-        .map_err(internal_err)?;
+        .map_err(api_error)?;
     Ok(Json(serde_json::json!(graph)))
 }
 
@@ -226,7 +201,7 @@ async fn get_related(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Query(q): Query<RelatedQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<serde_json::Value>, ApiFailure> {
     let entities = state
         .storage
         .get_related(
@@ -236,7 +211,7 @@ async fn get_related(
             q.limit.unwrap_or(20),
         )
         .await
-        .map_err(internal_err)?;
+        .map_err(api_error)?;
     Ok(Json(serde_json::json!(entities)))
 }
 
@@ -246,12 +221,12 @@ async fn find_path(
     State(state): State<AppState>,
     Path((from, to)): Path<(String, String)>,
     Query(q): Query<PathQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<serde_json::Value>, ApiFailure> {
     let paths = state
         .storage
         .find_path(&from, &to, q.max_depth.unwrap_or(4))
         .await
-        .map_err(internal_err)?;
+        .map_err(api_error)?;
     Ok(Json(
         serde_json::json!({ "paths": paths, "from": from, "to": to }),
     ))

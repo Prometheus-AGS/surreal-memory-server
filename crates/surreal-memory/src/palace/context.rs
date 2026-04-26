@@ -12,7 +12,10 @@ use mempalace_core::{
     dialect::compress::{Dialect, DialectConfig},
     embedder::Embedder,
     layers::{MemoryStack, StackStatus},
-    storage::{StorageBackend, types::{Drawer, DrawerFilter, DrawerHit}},
+    storage::{
+        StorageBackend,
+        types::{Drawer, DrawerFilter, DrawerHit},
+    },
 };
 use sha2::{Digest, Sha256};
 use std::sync::Arc;

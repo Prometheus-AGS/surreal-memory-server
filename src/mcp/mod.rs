@@ -34,6 +34,10 @@ use handlers::{
 #[derive(Clone)]
 pub struct MemoryMcpServer {
     handler: Arc<MemoryHandler>,
+    #[expect(
+        dead_code,
+        reason = "rmcp's tool_handler macro consumes this field from generated code"
+    )]
     tool_router: ToolRouter<MemoryMcpServer>,
 }
 
@@ -530,9 +534,7 @@ impl MemoryMcpServer {
         self.handler.palace_ingest(params).await
     }
 
-    #[tool(
-        description = "Delete a drawer from the memory palace by its record ID."
-    )]
+    #[tool(description = "Delete a drawer from the memory palace by its record ID.")]
     async fn palace_delete(
         &self,
         Parameters(params): Parameters<PalaceDeleteParams>,

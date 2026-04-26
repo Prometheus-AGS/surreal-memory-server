@@ -1,22 +1,18 @@
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use surreal_memory::storage::migrations::{inspect_legacy_enum_data, repair_legacy_enum_data};
+use surreal_memory_server::{
+    api,
+    config::Config,
+    embeddings::{self, EmbeddingService, create_embedding_service},
+    mcp::MemoryMcpServer,
+    storage::{MemoryStorage, create_storage},
+    workers,
+};
 use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
 use surrealdb::opt::auth::Root;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-mod api;
-mod config;
-mod embeddings;
-mod mcp;
-mod storage;
-mod workers;
-
-use config::Config;
-use embeddings::{EmbeddingService, create_embedding_service};
-use mcp::MemoryMcpServer;
-use storage::{MemoryStorage, create_storage};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {

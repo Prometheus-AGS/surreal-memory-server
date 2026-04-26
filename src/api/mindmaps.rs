@@ -8,8 +8,9 @@ use axum::{
     routing::{delete, get, post},
 };
 use serde::Deserialize;
-use surreal_memory::{MapType, MindMap, MindMapEdge, MindMapNode};
-use surrealdb::types::RecordId;
+use surreal_memory::{MapType, MindMap, MindMapNode};
+
+use crate::contracts::{AddMindmapEdgeRequest, AddMindmapNodeRequest, CreateMindmapRequest};
 
 use super::{ApiFailure, AppState, api_error, bad_request, not_found};
 
@@ -45,37 +46,6 @@ fn default_format() -> String {
 }
 
 #[derive(Deserialize)]
-struct CreateMindmapBody {
-    name: String,
-    map_type: Option<String>,
-    root_label: String,
-    description: Option<String>,
-    agent_id: Option<String>,
-    user_id: Option<String>,
-    task_stream_id: Option<String>,
-    tags: Option<Vec<String>>,
-}
-
-#[derive(Deserialize)]
-struct AddNodeBody {
-    node_id: String,
-    label: String,
-    parent_id: Option<String>,
-    node_type: Option<String>,
-    color: Option<String>,
-    metadata: Option<serde_json::Value>,
-}
-
-#[derive(Deserialize)]
-struct AddEdgeBody {
-    from_id: String,
-    to_id: String,
-    label: Option<String>,
-    #[serde(default)]
-    directed: bool,
-}
-
-#[derive(Deserialize)]
 struct GeneratePersonaMindmapBody {
     user_id: String,
     name: String,
@@ -96,24 +66,11 @@ fn parse_map_type(raw: &str) -> Result<MapType, ApiFailure> {
 
 async fn create_mindmap(
     State(state): State<AppState>,
-    Json(body): Json<CreateMindmapBody>,
+    Json(body): Json<CreateMindmapRequest>,
 ) -> Result<(StatusCode, Json<MindMap>), ApiFailure> {
-    let map_type = parse_map_type(body.map_type.as_deref().unwrap_or("radial"))?;
-    let mut mm = MindMap::new(
-        body.name,
-        map_type,
-        body.root_label,
-        body.description,
-        body.agent_id,
-        body.user_id,
-    );
-    if let Some(task_stream_id) = body.task_stream_id {
-        mm.task_stream_id = Some(
-            RecordId::parse_simple(&task_stream_id)
-                .map_err(|e| bad_request(format!("invalid task_stream_id: {e}")))?,
-        );
-    }
-    mm.tags = body.tags.unwrap_or_default();
+    let mm = body
+        .into_mindmap()
+        .map_err(|error| bad_request(error.to_string()))?;
     let created = state.storage.create_mindmap(mm).await.map_err(api_error)?;
     Ok((StatusCode::CREATED, Json(created)))
 }
@@ -167,19 +124,18 @@ async fn add_node(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Query(q): Query<ScopeQuery>,
-    Json(body): Json<AddNodeBody>,
+    Json(body): Json<AddMindmapNodeRequest>,
 ) -> Result<Json<MindMap>, ApiFailure> {
-    let node = MindMapNode {
-        id: body.node_id,
-        label: body.label,
-        parent_id: body.parent_id,
-        node_type: body.node_type,
-        color: body.color,
-        metadata: body.metadata,
-    };
+    body.validate()
+        .map_err(|error| bad_request(error.to_string()))?;
     let mm = state
         .storage
-        .add_mindmap_node(&name, q.user_id.as_deref(), q.agent_id.as_deref(), node)
+        .add_mindmap_node(
+            &name,
+            q.user_id.as_deref(),
+            q.agent_id.as_deref(),
+            body.into_node(),
+        )
         .await
         .map_err(api_error)?;
     Ok(Json(mm))
@@ -211,17 +167,18 @@ async fn add_edge(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Query(q): Query<ScopeQuery>,
-    Json(body): Json<AddEdgeBody>,
+    Json(body): Json<AddMindmapEdgeRequest>,
 ) -> Result<Json<MindMap>, ApiFailure> {
-    let edge = MindMapEdge {
-        from_id: body.from_id,
-        to_id: body.to_id,
-        label: body.label,
-        directed: body.directed,
-    };
+    body.validate()
+        .map_err(|error| bad_request(error.to_string()))?;
     let mm = state
         .storage
-        .add_mindmap_edge(&name, q.user_id.as_deref(), q.agent_id.as_deref(), edge)
+        .add_mindmap_edge(
+            &name,
+            q.user_id.as_deref(),
+            q.agent_id.as_deref(),
+            body.into_edge(),
+        )
         .await
         .map_err(api_error)?;
     Ok(Json(mm))

@@ -10,7 +10,9 @@ use axum::{
 use serde::Deserialize;
 use surreal_memory::Memory;
 
-use super::{ApiFailure, AppState, api_error, not_found};
+use crate::contracts::{AddMemoryRequest, UpdateMemoryRequest};
+
+use super::{ApiFailure, AppState, api_error, bad_request, not_found};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -30,32 +32,16 @@ struct ScopeQuery {
     session_id: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct AddMemoryBody {
-    content: String,
-    user_id: Option<String>,
-    agent_id: Option<String>,
-    session_id: Option<String>,
-    categories: Option<Vec<String>>,
-}
-
-#[derive(Deserialize)]
-struct UpdateMemoryBody {
-    content: String,
-}
-
 async fn add_memory(
     State(state): State<AppState>,
-    Json(body): Json<AddMemoryBody>,
+    Json(body): Json<AddMemoryRequest>,
 ) -> Result<(StatusCode, Json<Memory>), ApiFailure> {
-    let memory = Memory::new(
-        body.content,
-        body.user_id,
-        body.agent_id,
-        body.session_id,
-        body.categories.unwrap_or_default(),
-    );
-    let created = state.storage.add_memory(memory).await.map_err(api_error)?;
+    body.validate().map_err(|e| bad_request(e.to_string()))?;
+    let created = state
+        .storage
+        .add_memory(body.into_memory())
+        .await
+        .map_err(api_error)?;
     Ok((StatusCode::CREATED, Json(created)))
 }
 
@@ -91,8 +77,9 @@ async fn get_memory(
 async fn update_memory(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(body): Json<UpdateMemoryBody>,
+    Json(body): Json<UpdateMemoryRequest>,
 ) -> Result<Json<Memory>, ApiFailure> {
+    body.validate().map_err(|e| bad_request(e.to_string()))?;
     let updated = state
         .storage
         .update_memory(&id, body.content)

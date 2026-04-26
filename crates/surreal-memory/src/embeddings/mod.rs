@@ -76,10 +76,8 @@ pub async fn create_embedding_service(
             )
         }
         #[cfg(feature = "palace")]
-        EmbeddingProvider::Fast => {
-            Ok(Box::new(
-                crate::palace::embedding::FastEmbedService::new().await?,
-            ))
-        }
+        EmbeddingProvider::Fast => Ok(Box::new(
+            crate::palace::embedding::FastEmbedService::new().await?,
+        )),
     }
 }

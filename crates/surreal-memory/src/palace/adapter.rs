@@ -8,8 +8,8 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use mempalace_core::storage::{
-    types::{Drawer, DrawerFilter, DrawerHit, RoomStats, WingStats},
     StorageBackend,
+    types::{Drawer, DrawerFilter, DrawerHit, RoomStats, WingStats},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -72,7 +72,11 @@ fn record_id_key_string(id: &RecordId) -> String {
 
 impl RawDrawer {
     fn into_drawer(self) -> Drawer {
-        let id = self.id.as_ref().map(record_id_key_string).unwrap_or_default();
+        let id = self
+            .id
+            .as_ref()
+            .map(record_id_key_string)
+            .unwrap_or_default();
         Drawer {
             id,
             content: self.content,
@@ -181,11 +185,7 @@ impl StorageBackend for PalaceAdapter {
         Ok(rows.into_iter().next().map(RawDrawer::into_drawer))
     }
 
-    async fn list_drawers(
-        &self,
-        filter: DrawerFilter,
-        limit: usize,
-    ) -> Result<Vec<Drawer>> {
+    async fn list_drawers(&self, filter: DrawerFilter, limit: usize) -> Result<Vec<Drawer>> {
         let db = self.db()?;
 
         // Build dynamic WHERE clause
