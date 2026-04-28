@@ -951,7 +951,7 @@ pub struct AddMindmapNodeParams {
     pub node_type: Option<String>,
     pub color: Option<String>,
     #[schemars(description = "Optional arbitrary JSON metadata for the node")]
-    pub metadata: Option<serde_json::Value>,
+    pub metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -1035,9 +1035,17 @@ pub struct CompressMemoriesParams {
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ConversationMessage {
+    #[schemars(description = "Role of the speaker: 'user' or 'assistant'")]
+    pub role: String,
+    #[schemars(description = "Text content of the message")]
+    pub content: String,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ConversationParams {
-    #[schemars(description = "Array of {role, content} objects")]
-    pub messages: Vec<serde_json::Value>,
+    #[schemars(description = "Array of role+content message objects")]
+    pub messages: Vec<ConversationMessage>,
     pub user_id: Option<String>,
     pub agent_id: Option<String>,
     pub session_id: Option<String>,
@@ -1113,7 +1121,9 @@ impl MemoryHandler {
             parent_id: params.parent_id,
             node_type: params.node_type,
             color: params.color,
-            metadata: params.metadata,
+            metadata: params
+                .metadata
+                .map(|m| serde_json::Value::Object(m.into_iter().collect())),
         };
         node_request
             .validate()
@@ -1390,7 +1400,11 @@ impl MemoryHandler {
         match self
             .storage
             .add_memories_from_conversation(
-                params.messages,
+                params
+                    .messages
+                    .into_iter()
+                    .map(|m| serde_json::json!({"role": m.role, "content": m.content}))
+                    .collect(),
                 params.user_id.as_deref(),
                 params.agent_id.as_deref(),
                 params.session_id.as_deref(),
