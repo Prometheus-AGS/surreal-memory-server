@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     build-essential \
     cmake \
+    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Use lld linker — significantly lower peak RAM than GNU ld during link step
