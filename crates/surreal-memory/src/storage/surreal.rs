@@ -271,6 +271,19 @@ struct DbMemory {
     updated_at: Datetime,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, SurrealValue)]
+struct SchemaMetadataRecord {
+    name: String,
+    int_value: Option<i64>,
+    updated_at: Datetime,
+}
+
+#[derive(Clone, Debug, Deserialize, SurrealValue)]
+struct EmbeddingDimensionRecord {
+    id: Option<RecordId>,
+    embedding: Option<Vec<f32>>,
+}
+
 impl From<Memory> for DbMemory {
     fn from(memory: Memory) -> Self {
         Self {
@@ -394,6 +407,7 @@ impl SurrealStorage {
 
         // Run migrations on initial connection
         run_migrations(&db).await?;
+        Self::ensure_embedding_indexes(&db, embedding_service.dimensions()).await?;
 
         Ok(Self {
             connection: Arc::new(std::sync::RwLock::new(ConnectionState::Connected(db))),
@@ -471,6 +485,127 @@ impl SurrealStorage {
             .context("Failed to use namespace/database")?;
 
         Ok(db)
+    }
+
+    async fn ensure_embedding_indexes(db: &Surreal<Any>, expected_dimension: usize) -> Result<()> {
+        if expected_dimension == 0 {
+            anyhow::bail!("Embedding provider reported zero dimensions");
+        }
+
+        Self::validate_existing_embedding_dimensions(db, "entity", expected_dimension).await?;
+        Self::validate_existing_embedding_dimensions(db, "memory", expected_dimension).await?;
+
+        let metadata: Option<SchemaMetadataRecord> = db
+            .select(("schema_metadata", "embedding_index_dimension"))
+            .await
+            .context("Failed to read embedding index metadata")?;
+
+        if metadata.as_ref().and_then(|record| record.int_value) == Some(expected_dimension as i64)
+        {
+            Self::define_embedding_indexes(db, expected_dimension).await?;
+            tracing::info!(
+                dimension = expected_dimension,
+                "Embedding HNSW indexes already match provider dimensions"
+            );
+            return Ok(());
+        }
+
+        Self::rebuild_embedding_indexes(db, expected_dimension).await?;
+
+        let metadata = SchemaMetadataRecord {
+            name: "embedding_index_dimension".to_string(),
+            int_value: Some(expected_dimension as i64),
+            updated_at: Datetime::default(),
+        };
+        let _: Option<SchemaMetadataRecord> = db
+            .upsert(("schema_metadata", "embedding_index_dimension"))
+            .content(metadata)
+            .await
+            .context("Failed to write embedding index metadata")?;
+
+        tracing::info!(
+            dimension = expected_dimension,
+            "Embedding HNSW indexes configured for provider dimensions"
+        );
+        Ok(())
+    }
+
+    async fn validate_existing_embedding_dimensions(
+        db: &Surreal<Any>,
+        table: &str,
+        expected_dimension: usize,
+    ) -> Result<()> {
+        let query = match table {
+            "entity" => "SELECT id, embedding FROM entity WHERE embedding IS NOT NONE",
+            "memory" => "SELECT id, embedding FROM memory WHERE embedding IS NOT NONE",
+            _ => anyhow::bail!("Unsupported embedding table: {}", table),
+        };
+
+        let rows: Vec<EmbeddingDimensionRecord> = db
+            .query(query)
+            .await
+            .with_context(|| format!("Failed to inspect {} embedding dimensions", table))?
+            .take(0)
+            .unwrap_or_default();
+
+        for row in rows {
+            let Some(embedding) = row.embedding else {
+                continue;
+            };
+            let actual_dimension = embedding.len();
+            if actual_dimension != expected_dimension {
+                let record_id = row
+                    .id
+                    .as_ref()
+                    .map(Self::record_id_to_string)
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                anyhow::bail!(
+                    "{} record {} has a {}-dimensional embedding, but the active embedding provider expects {} dimensions. Use a separate database, re-embed existing records, or configure a provider with matching dimensions.",
+                    table,
+                    record_id,
+                    actual_dimension,
+                    expected_dimension
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn rebuild_embedding_indexes(db: &Surreal<Any>, dimension: usize) -> Result<()> {
+        let response = db
+            .query(
+                "
+REMOVE INDEX IF EXISTS entity_embedding_hnsw ON entity;
+REMOVE INDEX IF EXISTS memory_embedding_hnsw ON memory;
+",
+            )
+            .await
+            .context("Failed to remove existing embedding HNSW indexes")?;
+        response
+            .check()
+            .context("SurrealDB rejected embedding HNSW index removal")?;
+
+        Self::define_embedding_indexes(db, dimension).await
+    }
+
+    async fn define_embedding_indexes(db: &Surreal<Any>, dimension: usize) -> Result<()> {
+        let ddl = format!(
+            "
+DEFINE INDEX IF NOT EXISTS entity_embedding_hnsw
+  ON entity FIELDS embedding HNSW DIMENSION {dimension} DIST COSINE TYPE F32;
+DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
+  ON memory FIELDS embedding HNSW DIMENSION {dimension} DIST COSINE TYPE F32;
+"
+        );
+        let response = db
+            .query(ddl)
+            .await
+            .with_context(|| format!("Failed to define {dimension}-dimensional HNSW indexes"))?;
+        response
+            .check()
+            .with_context(|| format!("SurrealDB rejected {dimension}-dimensional HNSW indexes"))?;
+        Ok(())
     }
 
     /// Ping the database to verify the connection is alive.
@@ -2713,6 +2848,7 @@ impl SurrealStorage {
 
         let db = Self::connect_with_config(&config).await?;
         run_migrations(&db).await?;
+        Self::ensure_embedding_indexes(&db, embedding_service.dimensions()).await?;
 
         Ok(Self {
             connection: Arc::new(std::sync::RwLock::new(ConnectionState::Connected(db))),

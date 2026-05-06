@@ -31,22 +31,23 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        CARGO_BUILD_FLAGS: --no-default-features --features server-only,palace
-    env_file:
-      - .env
+        CARGO_BUILD_FLAGS: --no-default-features --features server-only,palace,local-embeddings
     container_name: surreal-memory-server
     restart: unless-stopped
     ports:
       - "23001:3001"
+    volumes:
+      - ${HOME}/.cache/huggingface/hub:/home/smserver/.cache/huggingface/hub:rw
     environment:
       - SURREAL_MODE=server
       - SURREAL_ENDPOINT=ws://surrealdb:8000
       - SURREAL_USERNAME=root
       - SURREAL_PASSWORD=root
       - SURREAL_NAMESPACE=memory
-      - SURREAL_DATABASE=main
-      - EMBEDDING_PROVIDER=openai
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SURREAL_DATABASE=main_local_384
+      - EMBEDDING_PROVIDER=local
+      - LOCAL_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
+      - MODEL_CACHE_DIR=/home/smserver/.cache/huggingface
       - MCP_STDIO=false
       # Retry/Reconnection Configuration (defaults shown)
       - SURREAL_MAX_CONNECT_RETRIES=10       # Initial connection attempts

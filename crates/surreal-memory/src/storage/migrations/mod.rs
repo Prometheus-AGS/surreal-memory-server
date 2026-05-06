@@ -92,6 +92,7 @@ static MIGRATIONS: &[Migration] = &[
     ),
     Migration::sql(15, "enum_fields_as_strings", MIGRATION_V15_SQL),
     Migration::sql(16, "palace_drawers_table", MIGRATION_V16_SQL),
+    Migration::sql(17, "dynamic_embedding_index_metadata", MIGRATION_V17_SQL),
 ];
 
 // ── v1: Baseline entity + relation schema ─────────────────────────────────────
@@ -336,6 +337,23 @@ DEFINE INDEX IF NOT EXISTS drawer_hash_idx
 
 DEFINE INDEX IF NOT EXISTS drawer_wing_idx ON drawers FIELDS wing;
 DEFINE INDEX IF NOT EXISTS drawer_room_idx ON drawers FIELDS room;
+";
+
+// ── v17: Dynamic embedding index metadata ───────────────────────────────────
+//
+// v5 hardcoded HNSW indexes to OpenAI's 1536 dimensions. Local models such as
+// BAAI/bge-small-en-v1.5 emit 384-dimensional vectors, so startup now recreates
+// the vector indexes from the active embedding provider dimensions.
+
+const MIGRATION_V17_SQL: &str = "
+REMOVE INDEX IF EXISTS entity_embedding_hnsw ON entity;
+REMOVE INDEX IF EXISTS memory_embedding_hnsw ON memory;
+
+DEFINE TABLE IF NOT EXISTS schema_metadata SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS name ON schema_metadata TYPE string;
+DEFINE FIELD IF NOT EXISTS int_value ON schema_metadata TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS updated_at ON schema_metadata TYPE datetime;
+DEFINE INDEX IF NOT EXISTS schema_metadata_name ON schema_metadata FIELDS name UNIQUE;
 ";
 
 #[derive(Debug, Clone)]
@@ -679,9 +697,9 @@ struct SchemaVersion {
 #[cfg(test)]
 mod tests {
     use super::{
-        MIGRATION_V11_SQL, MIGRATION_V12_SQL, MIGRATION_V13_SQL, MIGRATION_V15_SQL, MIGRATIONS,
-        RawMemoryEnumRecord, RawMindMapEnumRecord, RawTaskStreamEnumRecord, apply_migration,
-        inspect_legacy_enum_data, normalize_enum_value,
+        MIGRATION_V11_SQL, MIGRATION_V12_SQL, MIGRATION_V13_SQL, MIGRATION_V15_SQL,
+        MIGRATION_V16_SQL, MIGRATION_V17_SQL, MIGRATIONS, RawMemoryEnumRecord, RawMindMapEnumRecord,
+        RawTaskStreamEnumRecord, apply_migration, inspect_legacy_enum_data, normalize_enum_value,
     };
     use crate::{MapType, TaskStreamStatus};
     use surrealdb::Surreal;
@@ -692,9 +710,30 @@ mod tests {
     #[test]
     fn migration_v15_is_registered() {
         let last = MIGRATIONS.last().expect("at least one migration");
-        assert_eq!(last.version, 15);
-        assert_eq!(last.name, "enum_fields_as_strings");
-        assert_eq!(last.sql, MIGRATION_V15_SQL);
+        assert_eq!(last.version, 17);
+        assert_eq!(last.name, "dynamic_embedding_index_metadata");
+        assert_eq!(last.sql, MIGRATION_V17_SQL);
+
+        let v15 = MIGRATIONS
+            .iter()
+            .find(|migration| migration.version == 15)
+            .expect("v15 migration remains registered");
+        assert_eq!(v15.name, "enum_fields_as_strings");
+        assert_eq!(v15.sql, MIGRATION_V15_SQL);
+
+        let v16 = MIGRATIONS
+            .iter()
+            .find(|migration| migration.version == 16)
+            .expect("v16 migration remains registered");
+        assert_eq!(v16.name, "palace_drawers_table");
+        assert_eq!(v16.sql, MIGRATION_V16_SQL);
+    }
+
+    #[test]
+    fn migration_v17_removes_static_embedding_indexes() {
+        assert!(MIGRATION_V17_SQL.contains("REMOVE INDEX IF EXISTS entity_embedding_hnsw"));
+        assert!(MIGRATION_V17_SQL.contains("REMOVE INDEX IF EXISTS memory_embedding_hnsw"));
+        assert!(MIGRATION_V17_SQL.contains("DEFINE TABLE IF NOT EXISTS schema_metadata"));
     }
 
     #[test]

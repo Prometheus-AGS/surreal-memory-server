@@ -119,7 +119,7 @@ pub struct Memory {
     pub id: Option<RecordId>,
     /// The raw content of the memory.
     pub content: String,
-    /// Vector embedding of `content` (1536-dim by default).
+    /// Vector embedding of `content` using the active embedding provider dimensions.
     #[serde(default)]
     pub embedding: Option<Vec<f32>>,
     /// Scoping level — determines who can retrieve this memory.

@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y \
     libclang-dev \
     lld \
     pkg-config \
+    libssl-dev \
     build-essential \
     cmake \
     libssl-dev \
