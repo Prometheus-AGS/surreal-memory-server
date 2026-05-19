@@ -99,6 +99,10 @@ pub struct CreateTaskStreamParams {
 pub struct TaskStreamNameParams {
     #[schemars(description = "Name of the task stream")]
     pub name: String,
+    #[schemars(description = "User ID scope — only resolves streams owned by this user")]
+    pub user_id: Option<String>,
+    #[schemars(description = "Agent ID scope — only resolves streams owned by this agent")]
+    pub agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -121,6 +125,44 @@ pub struct GetContextParams {
     pub model_name: String,
     #[schemars(description = "Override the model's default token budget")]
     pub max_tokens: Option<u64>,
+    #[schemars(description = "User ID scope — only resolves streams owned by this user")]
+    pub user_id: Option<String>,
+    #[schemars(description = "Agent ID scope — only resolves streams owned by this agent")]
+    pub agent_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AddTaskStepParams {
+    #[schemars(description = "Name of the task stream to add the step to")]
+    pub stream_name: String,
+    #[schemars(description = "Linear position of the step within the stream (1-based)")]
+    pub ordinal: u32,
+    #[schemars(description = "Short name for the step")]
+    pub name: String,
+    pub description: Option<String>,
+    #[schemars(
+        description = "Caller-supplied key making step creation safe to replay. Re-adding with the same key returns the existing step."
+    )]
+    pub idempotency_key: String,
+    pub user_id: Option<String>,
+    pub agent_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct UpdateTaskStepStatusParams {
+    #[schemars(description = "Idempotency key identifying the step to update")]
+    pub idempotency_key: String,
+    #[schemars(description = "New status: pending, running, completed, failed, or skipped")]
+    pub status: String,
+    pub result: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CompleteStepParams {
+    #[schemars(description = "Idempotency key identifying the step to complete")]
+    pub idempotency_key: String,
+    pub result: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -770,7 +812,11 @@ impl MemoryHandler {
     ) -> Result<CallToolResult, McpError> {
         let stream = self
             .storage
-            .get_task_stream(&params.name)
+            .get_task_stream(
+                &params.name,
+                params.user_id.as_deref(),
+                params.agent_id.as_deref(),
+            )
             .await
             .map_err(Self::internal_error)?;
         Ok(CallToolResult::success(vec![Content::text(
@@ -783,6 +829,8 @@ impl MemoryHandler {
         params: AddToTaskStreamParams,
     ) -> Result<CallToolResult, McpError> {
         use crate::storage::Memory;
+        let user_id = params.user_id.clone();
+        let agent_id = params.agent_id.clone();
         let memory = Memory::new(
             params.content,
             params.user_id,
@@ -792,7 +840,12 @@ impl MemoryHandler {
         );
         let stored = self
             .storage
-            .add_to_task_stream(&params.stream_name, memory)
+            .add_to_task_stream(
+                &params.stream_name,
+                user_id.as_deref(),
+                agent_id.as_deref(),
+                memory,
+            )
             .await
             .map_err(Self::internal_error)?;
         Ok(CallToolResult::success(vec![Content::text(
@@ -806,7 +859,13 @@ impl MemoryHandler {
     ) -> Result<CallToolResult, McpError> {
         let ctx = self
             .storage
-            .get_context_for_task(&params.stream_name, &params.model_name, params.max_tokens)
+            .get_context_for_task(
+                &params.stream_name,
+                params.user_id.as_deref(),
+                params.agent_id.as_deref(),
+                &params.model_name,
+                params.max_tokens,
+            )
             .await
             .map_err(Self::internal_error)?;
         Ok(CallToolResult::success(vec![Content::text(
@@ -834,7 +893,11 @@ impl MemoryHandler {
     ) -> Result<CallToolResult, McpError> {
         let archived = self
             .storage
-            .archive_task_stream(&params.name)
+            .archive_task_stream(
+                &params.name,
+                params.user_id.as_deref(),
+                params.agent_id.as_deref(),
+            )
             .await
             .map_err(Self::internal_error)?;
         Ok(CallToolResult::success(vec![Content::text(
@@ -848,11 +911,116 @@ impl MemoryHandler {
     ) -> Result<CallToolResult, McpError> {
         let paused = self
             .storage
-            .pause_task_stream(&params.name)
+            .pause_task_stream(
+                &params.name,
+                params.user_id.as_deref(),
+                params.agent_id.as_deref(),
+            )
             .await
             .map_err(Self::internal_error)?;
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&paused).unwrap_or_default(),
+        )]))
+    }
+
+    // ── TaskSteps ──────────────────────────────────────────────────────────────
+
+    pub async fn add_task_step(
+        &self,
+        params: AddTaskStepParams,
+    ) -> Result<CallToolResult, McpError> {
+        if params.name.trim().is_empty() {
+            return Err(Self::invalid_params("name cannot be empty"));
+        }
+        if params.idempotency_key.trim().is_empty() {
+            return Err(Self::invalid_params("idempotency_key cannot be empty"));
+        }
+        use crate::storage::TaskStep;
+        let step = TaskStep::new(
+            params.ordinal,
+            params.name,
+            params.description,
+            params.idempotency_key,
+        );
+        let added = self
+            .storage
+            .add_task_step(
+                &params.stream_name,
+                params.user_id.as_deref(),
+                params.agent_id.as_deref(),
+                step,
+            )
+            .await
+            .map_err(Self::internal_error)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&added).unwrap_or_default(),
+        )]))
+    }
+
+    pub async fn update_task_step_status(
+        &self,
+        params: UpdateTaskStepStatusParams,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::storage::TaskStepStatus;
+        let status =
+            TaskStepStatus::parse_str(&params.status).map_err(|e| Self::invalid_params(&e))?;
+        let updated = self
+            .storage
+            .update_task_step_status(&params.idempotency_key, status, params.result, params.error)
+            .await
+            .map_err(Self::internal_error)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&updated).unwrap_or_default(),
+        )]))
+    }
+
+    pub async fn get_task_steps(
+        &self,
+        params: TaskStreamNameParams,
+    ) -> Result<CallToolResult, McpError> {
+        let steps = self
+            .storage
+            .get_task_steps(
+                &params.name,
+                params.user_id.as_deref(),
+                params.agent_id.as_deref(),
+            )
+            .await
+            .map_err(Self::internal_error)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&steps).unwrap_or_default(),
+        )]))
+    }
+
+    pub async fn get_current_step(
+        &self,
+        params: TaskStreamNameParams,
+    ) -> Result<CallToolResult, McpError> {
+        let step = self
+            .storage
+            .get_current_step(
+                &params.name,
+                params.user_id.as_deref(),
+                params.agent_id.as_deref(),
+            )
+            .await
+            .map_err(Self::internal_error)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&step).unwrap_or_else(|_| "null".to_string()),
+        )]))
+    }
+
+    pub async fn complete_step(
+        &self,
+        params: CompleteStepParams,
+    ) -> Result<CallToolResult, McpError> {
+        let completed = self
+            .storage
+            .complete_step(&params.idempotency_key, params.result)
+            .await
+            .map_err(Self::internal_error)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&completed).unwrap_or_default(),
         )]))
     }
 }
@@ -951,7 +1119,7 @@ pub struct AddMindmapNodeParams {
     pub node_type: Option<String>,
     pub color: Option<String>,
     #[schemars(description = "Optional arbitrary JSON metadata for the node")]
-    pub metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
+    pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -1121,9 +1289,7 @@ impl MemoryHandler {
             parent_id: params.parent_id,
             node_type: params.node_type,
             color: params.color,
-            metadata: params
-                .metadata
-                .map(|m| serde_json::Value::Object(m.into_iter().collect())),
+            metadata: params.metadata,
         };
         node_request
             .validate()

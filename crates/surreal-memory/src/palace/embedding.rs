@@ -5,9 +5,14 @@
 //! surreal-memory can use it for HNSW indexing and hybrid search.
 
 use crate::embeddings::{Embedding, EmbeddingService};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::sync::Arc;
+use std::time::Duration;
+
+/// Upper bound on the cold-cache FastEmbed model download (~25-80 MB). Exceeding
+/// it yields a typed error instead of an open-ended hang on the first Palace call.
+const FASTEMBED_INIT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Wraps a mempalace-core `Embedder` as a surreal-memory `EmbeddingService`.
 pub struct FastEmbedService {
@@ -17,8 +22,23 @@ pub struct FastEmbedService {
 impl FastEmbedService {
     /// Create a new service backed by the default FastEmbed model (all-MiniLM-L6-v2, 384 dims).
     /// Downloads the model on first call (~25 MB) then caches it locally.
+    ///
+    /// The download is bounded by `FASTEMBED_INIT_TIMEOUT` so a cold cache or
+    /// unreachable network fails fast with a typed error instead of hanging the
+    /// first Palace operation.
     pub async fn new() -> Result<Self> {
-        let embedder = mempalace_core::embedder::FastEmbedder::new_default().await?;
+        let embedder = tokio::time::timeout(
+            FASTEMBED_INIT_TIMEOUT,
+            mempalace_core::embedder::FastEmbedder::new_default(),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "FastEmbed model initialization exceeded {}s timeout",
+                FASTEMBED_INIT_TIMEOUT.as_secs()
+            )
+        })?
+        .context("Failed to initialize FastEmbed model")?;
         Ok(Self {
             inner: Arc::new(embedder),
         })

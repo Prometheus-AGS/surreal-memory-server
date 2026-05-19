@@ -16,6 +16,7 @@ pub mod model_profiles;
 #[cfg(feature = "palace")]
 pub mod palace;
 pub mod storage;
+pub mod task_step;
 pub mod task_stream;
 
 // Re-exports for ergonomic top-level usage
@@ -26,6 +27,7 @@ pub use mindmap::{ExportFormat, MapType, MindMap, MindMapEdge, MindMapNode};
 pub use model_profiles::{MODEL_PROFILES, ModelProfile, profile_for};
 pub use storage::MemoryStorage;
 pub use storage::surreal::{RetryConfig, SurrealConfig, SurrealStorage};
+pub use task_step::{TaskStep, TaskStepStatus};
 pub use task_stream::{ContextWindow, TaskStream, TaskStreamStatus};
 
 #[cfg(feature = "palace")]

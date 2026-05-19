@@ -49,12 +49,18 @@ fn parse_retry_config_from_env() -> surreal_memory::RetryConfig {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0.25);
 
+    let operation_deadline_ms = env::var("SURREAL_OPERATION_DEADLINE_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30_000);
+
     surreal_memory::RetryConfig {
         max_connect_retries,
         max_operation_retries,
         base_retry_delay_ms,
         max_retry_delay_ms,
         jitter_factor,
+        operation_deadline_ms,
     }
 }
 
@@ -78,11 +84,18 @@ async fn main() -> Result<()> {
     let embedding_service = init_embedding_service(&config).await?;
     let retry_config = parse_retry_config_from_env();
 
+    if config.embedding_warmup {
+        warmup_embedding(Arc::clone(&embedding_service)).await;
+    }
+
     let api_port: u16 = std::env::var("API_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(3001);
 
+    // The API layer keeps a handle to the embedding service so `/health` can
+    // report true readiness via `EmbeddingService::is_ready()`.
+    let health_embedding = Arc::clone(&embedding_service);
     let storage = init_storage(config, embedding_service, retry_config).await?;
 
     // Graceful shutdown channel — send `true` to stop all workers.
@@ -108,7 +121,8 @@ async fn main() -> Result<()> {
 
     // ── Axum REST API + HTTP/SSE MCP ─────────────────────────────────────────
     let api_storage = Arc::clone(&storage);
-    let api_handle = tokio::spawn(async move { run_api_server(api_storage, api_port).await });
+    let api_handle =
+        tokio::spawn(async move { run_api_server(api_storage, api_port, health_embedding).await });
 
     // ── MCP stdio ─────────────────────────────────────────────────────────────
     let enable_stdio_mcp = std::env::var("MCP_STDIO")
@@ -339,7 +353,7 @@ async fn init_embedding_service(config: &Config) -> Result<Arc<dyn EmbeddingServ
         .await
         .context("Failed to create embedding service")?;
     tracing::info!(
-        "✅ Embedding service ready ({} dimensions)",
+        "🧠 Embedding service configured ({} dimensions); model loads on warmup or first use",
         service.dimensions()
     );
     Ok(Arc::from(service))
@@ -364,10 +378,31 @@ async fn run_mcp_server(storage: Arc<dyn MemoryStorage>) -> Result<()> {
     server.run().await.context("MCP server error")
 }
 
-async fn run_api_server(storage: Arc<dyn MemoryStorage>, port: u16) -> Result<()> {
+/// Eagerly loads the embedding model so the first user-facing write does not
+/// pay the cold-load latency. A warmup failure is logged but not fatal — the
+/// model will be retried lazily on first use. Readiness is reported via
+/// `EmbeddingService::is_ready()`, so `/health` stays accurate regardless of
+/// whether warmup ran or succeeded.
+async fn warmup_embedding(service: Arc<dyn EmbeddingService>) {
+    tracing::info!("🔥 Warming up embedding model...");
+    match service.embed("warmup").await {
+        Ok(_) => {
+            tracing::info!("✅ Embedding model warmed up and ready");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Embedding warmup failed; model will load lazily on first use");
+        }
+    }
+}
+
+async fn run_api_server(
+    storage: Arc<dyn MemoryStorage>,
+    port: u16,
+    embedding_service: Arc<dyn EmbeddingService>,
+) -> Result<()> {
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("🌐 Starting REST API + HTTP MCP server on http://{}", addr);
-    let router = api::build_router(storage);
+    let router = api::build_router(storage, embedding_service);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .context("Failed to bind REST API port")?;

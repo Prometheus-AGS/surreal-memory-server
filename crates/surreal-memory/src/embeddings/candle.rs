@@ -6,8 +6,14 @@ use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config as BertConfig};
 use hf_hub::{Repo, RepoType, api::tokio::Api};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 use tokenizers::Tokenizer;
 use tokio::sync::{Mutex, OnceCell};
+
+/// Upper bound on a cold-cache HuggingFace model download. Exceeding it yields a
+/// typed error instead of an open-ended hang on the write path.
+const MODEL_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Inner struct that holds the actual loaded model
 /// The mutex protects all GPU operations to prevent Metal command buffer conflicts
@@ -19,9 +25,13 @@ struct CandleEmbeddingsInner {
     dimensions: usize,
 }
 
-/// Thread-safe wrapper that serializes all GPU operations
+/// Thread-safe wrapper that serializes all GPU operations.
+///
+/// The inner state is held in `Arc<Mutex<_>>` so it can be moved into a
+/// `spawn_blocking` task: the CPU-heavy tokenize + forward pass runs on a
+/// blocking thread (acquiring the mutex there) and never starves the runtime.
 pub struct CandleEmbeddings {
-    inner: OnceCell<Mutex<CandleEmbeddingsInner>>,
+    inner: OnceCell<Arc<Mutex<CandleEmbeddingsInner>>>,
     model_id: String,
     cache_dir: String,
     expected_dimensions: usize,
@@ -64,7 +74,12 @@ impl CandleEmbeddings {
 
     /// Ensures the model is loaded, downloading if necessary.
     /// This is called lazily on first embed request.
-    async fn ensure_loaded(&self) -> Result<&Mutex<CandleEmbeddingsInner>> {
+    ///
+    /// The HuggingFace download is bounded by `MODEL_DOWNLOAD_TIMEOUT` so a cold
+    /// cache or unreachable network fails fast with a typed error rather than
+    /// hanging the write path. The CPU-heavy model build runs on a blocking
+    /// thread (`spawn_blocking`) so it never starves the async runtime.
+    async fn ensure_loaded(&self) -> Result<&Arc<Mutex<CandleEmbeddingsInner>>> {
         self.inner
             .get_or_try_init(|| async {
                 tracing::info!("Loading Candle embeddings model: {}", self.model_id);
@@ -73,63 +88,110 @@ impl CandleEmbeddings {
                 let device = Self::get_device().context("Failed to get compute device")?;
                 tracing::info!("Using device: {:?}", device);
 
-                // Download model files
-                let (config_path, tokenizer_path, weights_path) =
-                    Self::download_model(&self.model_id, &self.cache_dir)
-                        .await
-                        .context("Failed to download model files")?;
+                // Download model files — bounded so a cold cache or network
+                // failure surfaces as a clear error instead of an open hang.
+                let (config_path, tokenizer_path, weights_path) = tokio::time::timeout(
+                    MODEL_DOWNLOAD_TIMEOUT,
+                    Self::download_model(&self.model_id, &self.cache_dir),
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "Embedding model download exceeded {}s timeout for '{}'",
+                        MODEL_DOWNLOAD_TIMEOUT.as_secs(),
+                        self.model_id
+                    )
+                })?
+                .context("Failed to download model files")?;
 
                 tracing::debug!("Config path: {:?}", config_path);
                 tracing::debug!("Tokenizer path: {:?}", tokenizer_path);
                 tracing::debug!("Weights path: {:?}", weights_path);
 
-                // Load tokenizer
-                tracing::info!("Loading tokenizer...");
-                let tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|e| {
-                    anyhow::anyhow!("Failed to load tokenizer from {:?}: {}", tokenizer_path, e)
-                })?;
+                // The model build is synchronous, CPU-heavy work (file reads,
+                // weight parsing, tensor allocation). Run it on a blocking
+                // thread so it does not starve tokio runtime workers.
+                let inner = tokio::task::spawn_blocking(move || {
+                    Self::build_model(config_path, tokenizer_path, weights_path, device)
+                })
+                .await
+                .context("Embedding model build task panicked")??;
 
-                // Load config
-                tracing::info!("Loading config...");
-                let config: BertConfig = serde_json::from_reader(
-                    std::fs::File::open(&config_path)
-                        .context(format!("Failed to open config file: {:?}", config_path))?,
-                )
-                .context("Failed to parse config.json")?;
+                tracing::info!(
+                    "Model loaded successfully with {} dimensions",
+                    inner.dimensions
+                );
 
-                let dimensions = config.hidden_size;
-                tracing::info!("Model config loaded: {} dimensions", dimensions);
-
-                // Load model weights - try safetensors first, then pytorch
-                tracing::info!("Loading model weights from: {:?}", weights_path);
-                let weights_path_str = weights_path.to_string_lossy();
-
-                let vb = if weights_path_str.ends_with(".safetensors") {
-                    tracing::info!("Loading SafeTensors weights...");
-                    unsafe {
-                        VarBuilder::from_mmaped_safetensors(&[&weights_path], DType::F32, &device)
-                            .context("Failed to load SafeTensors weights")?
-                    }
-                } else {
-                    tracing::info!("Loading PyTorch weights...");
-                    VarBuilder::from_pth(&weights_path, DType::F32, &device)
-                        .context("Failed to load PyTorch weights")?
-                };
-
-                tracing::info!("Building BERT model...");
-                let model = BertModel::load(vb, &config)
-                    .context("Failed to build BERT model from weights")?;
-
-                tracing::info!("Model loaded successfully with {} dimensions", dimensions);
-
-                Ok(Mutex::new(CandleEmbeddingsInner {
-                    model,
-                    tokenizer,
-                    device,
-                    dimensions,
-                }))
+                Ok(Arc::new(Mutex::new(inner)))
             })
             .await
+    }
+
+    /// Loads the model eagerly. Used by an optional startup warmup so the
+    /// first user-facing write does not pay the cold-load cost.
+    pub async fn warmup(&self) -> Result<()> {
+        self.ensure_loaded().await?;
+        Ok(())
+    }
+
+    /// Reports whether the model has been loaded and verified. Lets `/health`
+    /// distinguish "process up" from "embedding model ready".
+    pub fn is_loaded(&self) -> bool {
+        self.inner.get().is_some()
+    }
+
+    /// Synchronous model build: load tokenizer, config, and weights, then
+    /// construct the BERT model. Runs inside `spawn_blocking`.
+    fn build_model(
+        config_path: PathBuf,
+        tokenizer_path: PathBuf,
+        weights_path: PathBuf,
+        device: Device,
+    ) -> Result<CandleEmbeddingsInner> {
+        tracing::info!("Loading tokenizer...");
+        let tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|e| {
+            anyhow::anyhow!("Failed to load tokenizer from {:?}: {}", tokenizer_path, e)
+        })?;
+
+        tracing::info!("Loading config...");
+        let config: BertConfig = serde_json::from_reader(
+            std::fs::File::open(&config_path)
+                .context(format!("Failed to open config file: {:?}", config_path))?,
+        )
+        .context("Failed to parse config.json")?;
+
+        let dimensions = config.hidden_size;
+        tracing::info!("Model config loaded: {} dimensions", dimensions);
+
+        tracing::info!("Loading model weights from: {:?}", weights_path);
+        let weights_path_str = weights_path.to_string_lossy();
+
+        let vb = if weights_path_str.ends_with(".safetensors") {
+            tracing::info!("Loading SafeTensors weights...");
+            // SAFETY: `weights_path` points to a file just downloaded from the
+            // HuggingFace Hub into a process-owned cache directory. It is a
+            // valid safetensors file and is not concurrently modified for the
+            // lifetime of the memory map.
+            unsafe {
+                VarBuilder::from_mmaped_safetensors(&[&weights_path], DType::F32, &device)
+                    .context("Failed to load SafeTensors weights")?
+            }
+        } else {
+            tracing::info!("Loading PyTorch weights...");
+            VarBuilder::from_pth(&weights_path, DType::F32, &device)
+                .context("Failed to load PyTorch weights")?
+        };
+
+        tracing::info!("Building BERT model...");
+        let model =
+            BertModel::load(vb, &config).context("Failed to build BERT model from weights")?;
+
+        Ok(CandleEmbeddingsInner {
+            model,
+            tokenizer,
+            device,
+            dimensions,
+        })
     }
 
     fn get_device() -> Result<Device> {
@@ -165,18 +227,25 @@ impl CandleEmbeddings {
         // Set cache directory
         std::fs::create_dir_all(cache_dir)?;
 
-        // Download required files
-        let config_path = repo.get("config.json").await?;
-        let tokenizer_path = repo.get("tokenizer.json").await?;
-
-        // Try different weight file names
-        let weights_path = if let Ok(path) = repo.get("model.safetensors").await {
-            path
-        } else if let Ok(path) = repo.get("pytorch_model.bin").await {
-            path
-        } else {
-            anyhow::bail!("No compatible model weights found");
+        // Download config, tokenizer, and weights concurrently. The weights
+        // future tries safetensors first and falls back to the PyTorch file.
+        let config_fut = repo.get("config.json");
+        let tokenizer_fut = repo.get("tokenizer.json");
+        let weights_fut = async {
+            match repo.get("model.safetensors").await {
+                Ok(path) => Ok(path),
+                Err(_) => repo
+                    .get("pytorch_model.bin")
+                    .await
+                    .map_err(|_| anyhow::anyhow!("No compatible model weights found")),
+            }
         };
+
+        let (config_path, tokenizer_path, weights_path) = tokio::try_join!(
+            async { config_fut.await.map_err(anyhow::Error::from) },
+            async { tokenizer_fut.await.map_err(anyhow::Error::from) },
+            weights_fut
+        )?;
 
         tracing::info!("Model files downloaded successfully");
 
@@ -184,204 +253,98 @@ impl CandleEmbeddings {
     }
 
     fn mean_pooling(embeddings: &Tensor, attention_mask: &Tensor) -> Result<Tensor> {
-        // Mean pooling with attention mask
-        tracing::info!(
-            "mean_pooling: embeddings shape={:?}, dtype={:?}, device={:?}",
-            embeddings.shape(),
-            embeddings.dtype(),
-            embeddings.device()
-        );
-        tracing::info!(
-            "mean_pooling: attention_mask shape={:?}, dtype={:?}, device={:?}",
-            attention_mask.shape(),
-            attention_mask.dtype(),
-            attention_mask.device()
-        );
-
-        // Need to cast attention_mask to f32 for multiplication
-        tracing::info!("mean_pooling: casting attention_mask to F32...");
+        // Mean pooling with attention mask. Each step carries error context so a
+        // failure is diagnosable without per-step logging on the hot path.
         let mask_f32 = attention_mask
             .to_dtype(DType::F32)
             .context("Failed to cast attention_mask to F32")?;
-        tracing::info!(
-            "mean_pooling: cast successful, shape={:?}",
-            mask_f32.shape()
-        );
-
-        tracing::info!("mean_pooling: unsqueezing mask...");
         let mask = mask_f32.unsqueeze(2).context("Failed to unsqueeze mask")?;
-        tracing::info!(
-            "mean_pooling: unsqueeze successful, shape={:?}",
-            mask.shape()
-        );
-
-        tracing::info!("mean_pooling: broadcasting mask to embeddings shape...");
         let mask = mask
             .broadcast_as(embeddings.shape())
             .context("Failed to broadcast mask")?;
-        tracing::info!(
-            "mean_pooling: broadcast successful, shape={:?}",
-            mask.shape()
-        );
 
-        tracing::info!("mean_pooling: multiplying embeddings by mask...");
         let masked_embeddings = embeddings
             .mul(&mask)
             .context("Failed to multiply embeddings by mask")?;
-        tracing::info!(
-            "mean_pooling: multiplication successful, shape={:?}",
-            masked_embeddings.shape()
-        );
-
-        tracing::info!("mean_pooling: summing embeddings along axis 1...");
         let sum_embeddings = masked_embeddings
             .sum(1)
             .context("Failed to sum embeddings")?;
-        tracing::info!(
-            "mean_pooling: sum_embeddings successful, shape={:?}",
-            sum_embeddings.shape()
-        );
-
-        tracing::info!("mean_pooling: summing mask along axis 1...");
         let sum_mask = mask.sum(1).context("Failed to sum mask")?;
-        tracing::info!(
-            "mean_pooling: sum_mask successful, shape={:?}",
-            sum_mask.shape()
-        );
-
-        tracing::info!("mean_pooling: clamping sum_mask...");
         let sum_mask = sum_mask
             .clamp(1e-9, f32::MAX)
             .context("Failed to clamp sum_mask")?;
-        tracing::info!("mean_pooling: clamp successful");
 
-        tracing::info!("mean_pooling: dividing for final pooled output...");
-        let pooled = sum_embeddings
+        sum_embeddings
             .div(&sum_mask)
-            .context("Failed to divide for mean pooling")?;
-        tracing::info!(
-            "mean_pooling: division successful, final shape={:?}",
-            pooled.shape()
-        );
-
-        Ok(pooled)
+            .context("Failed to divide for mean pooling")
     }
 
     async fn embed_internal(&self, text: &str) -> Result<Embedding> {
-        tracing::info!("embed_internal called for text length: {}", text.len());
+        tracing::debug!("embed_internal called for text length: {}", text.len());
 
-        let inner_mutex = match self.ensure_loaded().await {
-            Ok(inner) => {
-                tracing::info!("Model loaded successfully");
-                inner
-            }
-            Err(e) => {
-                tracing::error!("Failed to load embedding model: {:?}", e);
-                return Err(e.context("Failed to load embedding model"));
-            }
-        };
+        let inner_mutex = self
+            .ensure_loaded()
+            .await
+            .map_err(|e| e.context("Failed to load embedding model"))?;
 
-        // Lock the mutex for ALL GPU operations to prevent Metal command buffer conflicts
-        // This ensures only one thread is submitting commands to the Metal GPU at a time
-        let inner = inner_mutex.lock().await;
+        // The tokenize + forward pass is synchronous, CPU/GPU-heavy work. Run it
+        // on a blocking thread so it never starves the async runtime. The mutex
+        // (acquired inside the blocking thread via `blocking_lock`) still
+        // serializes GPU access to avoid Metal command-buffer conflicts.
+        let inner_mutex = Arc::clone(inner_mutex);
+        let text = text.to_string();
 
-        // Tokenize (CPU operation, but we keep it in the lock for simplicity)
-        tracing::info!("Tokenizing text: {}...", &text[..text.len().min(50)]);
-        let encoding = match inner.tokenizer.encode(text, true) {
-            Ok(enc) => {
-                tracing::info!("Tokenization successful");
-                enc
-            }
-            Err(e) => {
-                tracing::error!("Tokenization failed: {}", e);
-                return Err(anyhow::anyhow!("Tokenization failed: {}", e));
-            }
-        };
+        tokio::task::spawn_blocking(move || {
+            let inner = inner_mutex.blocking_lock();
+            Self::compute_embedding(&inner, &text)
+        })
+        .await
+        .context("Embedding compute task panicked")?
+    }
+
+    /// Synchronous embedding compute: tokenize, forward pass, mean pooling, and
+    /// L2 normalization. Runs inside `spawn_blocking` while holding the inner
+    /// mutex, so GPU command submission stays serialized.
+    fn compute_embedding(inner: &CandleEmbeddingsInner, text: &str) -> Result<Embedding> {
+        let encoding = inner
+            .tokenizer
+            .encode(text, true)
+            .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
 
         let tokens = encoding.get_ids();
         let attention_mask = encoding.get_attention_mask();
-        tracing::info!("Tokenized into {} tokens", tokens.len());
+        tracing::debug!("Tokenized into {} tokens", tokens.len());
 
-        // Convert to tensors
-        tracing::info!("Creating tensors on device: {:?}", inner.device);
         let token_ids = Tensor::new(tokens, &inner.device)
             .context("Failed to create token_ids tensor")?
             .unsqueeze(0)
             .context("Failed to unsqueeze token_ids")?;
-        tracing::info!("token_ids tensor created: {:?}", token_ids.shape());
 
         let attention_mask_tensor = Tensor::new(attention_mask, &inner.device)
             .context("Failed to create attention_mask tensor")?
             .unsqueeze(0)
             .context("Failed to unsqueeze attention_mask")?;
-        tracing::info!(
-            "attention_mask tensor created: {:?}",
-            attention_mask_tensor.shape()
-        );
 
         let token_type_ids = Tensor::zeros(token_ids.shape(), DType::I64, &inner.device)
             .context("Failed to create token_type_ids tensor")?;
-        tracing::info!(
-            "token_type_ids tensor created: {:?}",
-            token_type_ids.shape()
-        );
 
-        // Run through model
-        tracing::info!("Running model forward pass...");
-        let embeddings =
-            match inner
-                .model
-                .forward(&token_ids, &token_type_ids, Some(&attention_mask_tensor))
-            {
-                Ok(emb) => {
-                    tracing::info!("Forward pass successful, output shape: {:?}", emb.shape());
-                    emb
-                }
-                Err(e) => {
-                    tracing::error!("Model forward pass failed: {:?}", e);
-                    return Err(anyhow::anyhow!("Model forward pass failed: {}", e));
-                }
-            };
+        let embeddings = inner
+            .model
+            .forward(&token_ids, &token_type_ids, Some(&attention_mask_tensor))
+            .map_err(|e| anyhow::anyhow!("Model forward pass failed: {}", e))?;
 
-        // Mean pooling (still on GPU, within mutex scope)
-        tracing::info!("Applying mean pooling...");
-        let pooled = match Self::mean_pooling(&embeddings, &attention_mask_tensor) {
-            Ok(p) => {
-                tracing::info!("Mean pooling successful, shape: {:?}", p.shape());
-                p
-            }
-            Err(e) => {
-                tracing::error!("Mean pooling failed: {:?}", e);
-                return Err(e.context("Mean pooling failed"));
-            }
-        };
+        let pooled = Self::mean_pooling(&embeddings, &attention_mask_tensor)
+            .context("Mean pooling failed")?;
 
-        // L2 normalize (still on GPU, within mutex scope)
-        tracing::info!("Applying L2 normalization...");
-        let normalized = match Self::l2_normalize(&pooled) {
-            Ok(n) => {
-                tracing::info!("L2 normalization successful");
-                n
-            }
-            Err(e) => {
-                tracing::error!("L2 normalization failed: {:?}", e);
-                return Err(e.context("L2 normalization failed"));
-            }
-        };
+        let normalized = Self::l2_normalize(&pooled).context("L2 normalization failed")?;
 
-        // Convert to Vec<f32> - this transfers data from GPU to CPU
-        // After this, we no longer need GPU access
-        tracing::info!("Converting to Vec<f32>...");
         let embedding_vec = normalized
             .squeeze(0)
             .context("Failed to squeeze output")?
             .to_vec1::<f32>()
             .context("Failed to convert to Vec<f32>")?;
 
-        // Explicitly drop the lock after all GPU operations are complete
-        drop(inner);
-
-        tracing::info!(
+        tracing::debug!(
             "Successfully generated embedding with {} dimensions",
             embedding_vec.len()
         );
@@ -434,5 +397,75 @@ impl EmbeddingService for CandleEmbeddings {
     fn dimensions(&self) -> usize {
         // Return expected dimensions (we can't easily access the mutex synchronously)
         self.expected_dimensions
+    }
+
+    fn is_ready(&self) -> bool {
+        self.is_loaded()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_does_not_load_model_eagerly() {
+        let embedder = CandleEmbeddings::new("BAAI/bge-small-en-v1.5", "/tmp/test-cache")
+            .expect("construct lazy embedder");
+        assert!(
+            !embedder.is_loaded(),
+            "model must not be loaded until first use or warmup"
+        );
+        assert_eq!(embedder.dimensions(), 384);
+    }
+
+    #[test]
+    fn download_timeout_is_bounded() {
+        // A cold-cache download must be bounded so the write path cannot hang
+        // open-endedly. The bound is enforced via tokio::time::timeout in
+        // ensure_loaded; this guards against the constant being removed.
+        assert!(MODEL_DOWNLOAD_TIMEOUT.as_secs() > 0);
+        assert!(MODEL_DOWNLOAD_TIMEOUT.as_secs() <= 600);
+    }
+
+    #[tokio::test]
+    async fn warmup_with_unresolvable_model_fails_bounded() {
+        // An unresolvable model id must surface a typed error within the
+        // download bound — never an open-ended hang.
+        let embedder = CandleEmbeddings::new(
+            "surreal-memory-test/definitely-not-a-real-model",
+            &std::env::temp_dir()
+                .join("candle-warmup-test")
+                .to_string_lossy(),
+        )
+        .expect("construct lazy embedder");
+
+        let result = tokio::time::timeout(
+            MODEL_DOWNLOAD_TIMEOUT + Duration::from_secs(5),
+            embedder.warmup(),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "warmup must return within the bounded download timeout"
+        );
+        assert!(
+            result.unwrap().is_err(),
+            "warmup with an unresolvable model must return a typed error"
+        );
+        assert!(!embedder.is_loaded(), "failed warmup must not mark loaded");
+    }
+
+    fn estimate(model_id: &str) -> usize {
+        CandleEmbeddings::estimate_dimensions(model_id)
+    }
+
+    #[test]
+    fn dimension_estimation_covers_known_models() {
+        assert_eq!(estimate("BAAI/bge-small-en-v1.5"), 384);
+        assert_eq!(estimate("BAAI/bge-base-en-v1.5"), 768);
+        assert_eq!(estimate("BAAI/bge-large-en-v1.5"), 1024);
+        assert_eq!(estimate("sentence-transformers/all-MiniLM-L6-v2"), 384);
     }
 }

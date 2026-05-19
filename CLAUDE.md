@@ -255,10 +255,14 @@ Migrations live in `crates/surreal-memory/src/storage/migrations/mod.rs`.
 
 **Root Cause**: SurrealDB has a known performance bottleneck with `UPDATE CONTENT` on large JSON objects (see [SurrealDB #1810](https://github.com/surrealdb/surrealdb/issues/1810)). Mindmaps are stored as single records with nested node/edge arrays, so every node addition rewrites the entire mindmap.
 
-**Mitigation Applied (2026-03-31)**:
-- Added 30-second query timeout to fail fast: `UPDATE ... TIMEOUT 30s`
-- Added warnings when mindmaps exceed 500 nodes
-- Added JSON size monitoring for objects >500KB
+**Mitigation Applied**:
+- 30-second `TIMEOUT` clause on every mindmap `UPDATE` statement
+  (`update_mindmap_graph`, `append_mindmap_node`, `append_mindmap_edge` in
+  `storage/surreal.rs`, via the `MINDMAP_UPDATE_TIMEOUT` const) so an oversized
+  update fails fast with a clear error instead of stalling the write path
+  (added 2026-05-18; prior to that the `TIMEOUT` was documented but not
+  actually enforced — only a `tracing::warn!` existed).
+- Warnings when mindmaps exceed 500 nodes.
 
 **Recommended**: Keep mindmaps under 500 nodes. Split large hierarchies into multiple related mindmaps or use TaskStreams for linear context.
 

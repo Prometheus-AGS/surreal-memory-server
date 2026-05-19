@@ -12,6 +12,10 @@ pub struct Config {
     pub surreal_password: Option<String>,
     pub embedded_path: Option<String>,
     pub embedding_provider: EmbeddingProvider,
+    /// When true, the embedding model is loaded eagerly at startup so the first
+    /// user-facing write does not pay the cold-load latency. Set via
+    /// `EMBEDDING_WARMUP=true`.
+    pub embedding_warmup: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -74,6 +78,9 @@ impl Config {
                 .ok()
                 .or_else(|| Some("./data/memory.db".to_string())),
             embedding_provider,
+            embedding_warmup: env::var("EMBEDDING_WARMUP")
+                .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+                .unwrap_or(false),
         };
 
         Ok(config)

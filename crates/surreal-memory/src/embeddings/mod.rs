@@ -35,6 +35,15 @@ pub trait EmbeddingService: Send + Sync {
     async fn embed(&self, text: &str) -> Result<Embedding>;
     async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Embedding>>;
     fn dimensions(&self) -> usize;
+
+    /// Reports whether the provider is ready to serve embeddings without a
+    /// cold-load delay. Remote providers (OpenAI, Cohere) are ready as soon as
+    /// they are constructed. Local providers that lazily load a model override
+    /// this to report the actual load state, so `/health` can distinguish a
+    /// warm server from one about to cold-load on first use.
+    fn is_ready(&self) -> bool {
+        true
+    }
 }
 
 pub async fn create_embedding_service(

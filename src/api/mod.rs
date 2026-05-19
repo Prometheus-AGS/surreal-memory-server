@@ -13,6 +13,7 @@ pub mod palace;
 pub mod search;
 pub mod taskstreams;
 
+use axum::extract::State;
 use axum::{Json, http::StatusCode};
 use axum::{Router, routing::get};
 use serde::Serialize;
@@ -21,12 +22,17 @@ use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
+use crate::embeddings::EmbeddingService;
 use crate::storage::MemoryStorage;
 
 /// Shared application state passed to every Axum handler.
 #[derive(Clone)]
 pub struct AppState {
     pub storage: Arc<dyn MemoryStorage>,
+    /// The embedding provider. `/health` queries `is_ready()` on it to
+    /// distinguish "process up" from "write path actually ready" — accurate
+    /// whether the model was loaded via startup warmup or lazily on first use.
+    pub embedding_service: Arc<dyn EmbeddingService>,
 }
 
 #[derive(Serialize)]
@@ -79,9 +85,13 @@ pub(crate) fn not_found(message: impl Into<String>) -> ApiFailure {
 }
 
 /// Build the full Axum router.
-pub fn build_router(storage: Arc<dyn MemoryStorage>) -> Router {
+pub fn build_router(
+    storage: Arc<dyn MemoryStorage>,
+    embedding_service: Arc<dyn EmbeddingService>,
+) -> Router {
     let state = AppState {
         storage: Arc::clone(&storage),
+        embedding_service,
     };
 
     // The MCP HTTP service captures storage in its factory closure, returning Router<()>.
@@ -108,10 +118,13 @@ pub fn build_router(storage: Arc<dyn MemoryStorage>) -> Router {
         .with_state(state)
 }
 
-async fn health_handler() -> axum::Json<serde_json::Value> {
+async fn health_handler(State(state): State<AppState>) -> axum::Json<serde_json::Value> {
+    let embedding_ready = state.embedding_service.is_ready();
     axum::Json(json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
-        "service": "surreal-memory-server"
+        "service": "surreal-memory-server",
+        "embedding_ready": embedding_ready,
+        "write_path_ready": embedding_ready
     }))
 }

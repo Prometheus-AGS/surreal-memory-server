@@ -175,7 +175,10 @@ mod tests {
     fn router_with_storage(storage: Arc<dyn MemoryStorage>) -> Router {
         Router::new()
             .nest("/api/v1/memory", router())
-            .with_state(AppState { storage })
+            .with_state(AppState {
+                storage,
+                embedding_service: Arc::new(NoOpEmbedder),
+            })
     }
 
     #[tokio::test]

@@ -10,6 +10,7 @@ pub mod surreal;
 use crate::entity::{Entity, KnowledgeGraph, Relation, SemanticSearchResult};
 use crate::memory::{Memory, MemoryHistory};
 use crate::mindmap::{MindMap, MindMapEdge, MindMapNode};
+use crate::task_step::{TaskStep, TaskStepStatus};
 use crate::task_stream::{ContextWindow, TaskStream};
 
 /// The unified storage interface for the surreal-memory platform.
@@ -111,11 +112,24 @@ pub trait MemoryStorage: Send + Sync {
     // ── TaskStreams ───────────────────────────────────────────────────────────
 
     async fn create_task_stream(&self, stream: TaskStream) -> Result<TaskStream>;
-    async fn get_task_stream(&self, name: &str) -> Result<Option<TaskStream>>;
-    async fn add_to_task_stream(&self, stream_name: &str, memory: Memory) -> Result<Memory>;
+    async fn get_task_stream(
+        &self,
+        name: &str,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> Result<Option<TaskStream>>;
+    async fn add_to_task_stream(
+        &self,
+        stream_name: &str,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+        memory: Memory,
+    ) -> Result<Memory>;
     async fn get_context_for_task(
         &self,
         stream_name: &str,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
         model_name: &str,
         max_tokens: Option<u64>,
     ) -> Result<ContextWindow>;
@@ -124,10 +138,75 @@ pub trait MemoryStorage: Send + Sync {
         agent_id: Option<&str>,
         user_id: Option<&str>,
     ) -> Result<Vec<TaskStream>>;
-    async fn delete_task_stream(&self, name: &str) -> Result<()>;
-    async fn archive_task_stream(&self, name: &str) -> Result<TaskStream>;
+    async fn delete_task_stream(
+        &self,
+        name: &str,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> Result<()>;
+    async fn archive_task_stream(
+        &self,
+        name: &str,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> Result<TaskStream>;
     /// Pause an active `TaskStream`, suspending further additions without archiving it.
-    async fn pause_task_stream(&self, name: &str) -> Result<TaskStream>;
+    async fn pause_task_stream(
+        &self,
+        name: &str,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> Result<TaskStream>;
+
+    // ── TaskSteps ────────────────────────────────────────────────────────────
+
+    /// Add an ordered step to a stream. Idempotent on `idempotency_key`: if a
+    /// step with that key already exists, the existing step is returned and no
+    /// duplicate is created.
+    async fn add_task_step(
+        &self,
+        stream_name: &str,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+        step: TaskStep,
+    ) -> Result<TaskStep>;
+
+    /// Update a step's status, recording result/error and started/completed
+    /// timestamps as appropriate. Looked up by `idempotency_key`.
+    async fn update_task_step_status(
+        &self,
+        idempotency_key: &str,
+        status: TaskStepStatus,
+        result: Option<String>,
+        error: Option<String>,
+    ) -> Result<TaskStep>;
+
+    /// Return all steps of a stream ordered by `ordinal`.
+    async fn get_task_steps(
+        &self,
+        stream_name: &str,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> Result<Vec<TaskStep>>;
+
+    /// Returns the lowest-ordinal step whose status is not `Completed` or
+    /// `Skipped`. A `Failed` or `Running` step is returned as current so the
+    /// caller can resolve it (retry, skip, or complete) before advancing — a
+    /// failed step intentionally blocks progress until resolved.
+    async fn get_current_step(
+        &self,
+        stream_name: &str,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> Result<Option<TaskStep>>;
+
+    /// Mark a step `completed`. Idempotent: completing an already-completed
+    /// step returns it unchanged without re-applying the result.
+    async fn complete_step(
+        &self,
+        idempotency_key: &str,
+        result: Option<String>,
+    ) -> Result<TaskStep>;
 
     // ── Mindmaps ─────────────────────────────────────────────────────────────
 

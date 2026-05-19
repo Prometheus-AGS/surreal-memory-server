@@ -93,6 +93,8 @@ static MIGRATIONS: &[Migration] = &[
     Migration::sql(15, "enum_fields_as_strings", MIGRATION_V15_SQL),
     Migration::sql(16, "palace_drawers_table", MIGRATION_V16_SQL),
     Migration::sql(17, "dynamic_embedding_index_metadata", MIGRATION_V17_SQL),
+    Migration::sql(18, "task_stream_scope_unique_index", MIGRATION_V18_SQL),
+    Migration::sql(19, "task_step_table", MIGRATION_V19_SQL),
 ];
 
 // ── v1: Baseline entity + relation schema ─────────────────────────────────────
@@ -354,6 +356,57 @@ DEFINE FIELD IF NOT EXISTS name ON schema_metadata TYPE string;
 DEFINE FIELD IF NOT EXISTS int_value ON schema_metadata TYPE option<int>;
 DEFINE FIELD IF NOT EXISTS updated_at ON schema_metadata TYPE datetime;
 DEFINE INDEX IF NOT EXISTS schema_metadata_name ON schema_metadata FIELDS name UNIQUE;
+";
+
+// ── v18: Scope-qualified TaskStream name uniqueness ─────────────────────────
+//
+// v3 defined `task_stream_name` as a GLOBAL unique index on `name`, which
+// blocks two agents (or two users) from each owning a stream with the same
+// name (e.g. both having a "build" stream). Replace it with a composite
+// unique index over (agent_id, user_id, name) so uniqueness is scoped.
+//
+// `DbTaskStream::from` now stores absent agent_id/user_id as the empty string
+// "". Rows created before this migration stored them as NONE, so the backfill
+// statements below normalize those legacy rows to "" FIRST — otherwise the
+// composite unique index would see a mixed NONE/"" key space and enforce
+// uniqueness inconsistently. Order matters: backfill, then REMOVE, then DEFINE.
+//
+// After the backfill the index key space is uniform: two rows with identical
+// (agent_id, user_id, name) collide, preserving "one stream per name per
+// scope" semantics.
+
+const MIGRATION_V18_SQL: &str = "
+UPDATE task_stream SET agent_id = '' WHERE agent_id IS NONE;
+UPDATE task_stream SET user_id = '' WHERE user_id IS NONE;
+REMOVE INDEX IF EXISTS task_stream_name ON task_stream;
+DEFINE INDEX IF NOT EXISTS task_stream_scope_name
+  ON task_stream FIELDS agent_id, user_id, name UNIQUE;
+";
+
+// ── v19: TaskStep — first-class ordered, status-tracked steps ───────────────
+//
+// Introduces the `task_step` table backing the `TaskStep` struct. SCHEMAFULL,
+// so every persisted field MUST have a DEFINE FIELD or inserts fail at runtime.
+// `status` is stored as a string (enums-as-strings standard from v15).
+// `idempotency_key` carries a UNIQUE index so step creation and completion are
+// safe to replay. The composite (task_stream_id, ordinal) index backs ordered
+// retrieval and current-step lookups.
+
+const MIGRATION_V19_SQL: &str = "
+DEFINE TABLE IF NOT EXISTS task_step SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS task_stream_id ON task_step TYPE option<record<task_stream>>;
+DEFINE FIELD IF NOT EXISTS ordinal ON task_step TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS name ON task_step TYPE string;
+DEFINE FIELD IF NOT EXISTS description ON task_step TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS status ON task_step TYPE string DEFAULT 'pending';
+DEFINE FIELD IF NOT EXISTS idempotency_key ON task_step TYPE string;
+DEFINE FIELD IF NOT EXISTS result ON task_step TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS error ON task_step TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS started_at ON task_step TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS completed_at ON task_step TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS created_at ON task_step TYPE datetime;
+DEFINE INDEX IF NOT EXISTS task_step_stream_ordinal ON task_step FIELDS task_stream_id, ordinal;
+DEFINE INDEX IF NOT EXISTS task_step_idempotency_key ON task_step FIELDS idempotency_key UNIQUE;
 ";
 
 #[derive(Debug, Clone)]
@@ -698,8 +751,9 @@ struct SchemaVersion {
 mod tests {
     use super::{
         MIGRATION_V11_SQL, MIGRATION_V12_SQL, MIGRATION_V13_SQL, MIGRATION_V15_SQL,
-        MIGRATION_V16_SQL, MIGRATION_V17_SQL, MIGRATIONS, RawMemoryEnumRecord, RawMindMapEnumRecord,
-        RawTaskStreamEnumRecord, apply_migration, inspect_legacy_enum_data, normalize_enum_value,
+        MIGRATION_V16_SQL, MIGRATION_V17_SQL, MIGRATION_V18_SQL, MIGRATION_V19_SQL, MIGRATIONS,
+        RawMemoryEnumRecord, RawMindMapEnumRecord, RawTaskStreamEnumRecord, apply_migration,
+        inspect_legacy_enum_data, normalize_enum_value,
     };
     use crate::{MapType, TaskStreamStatus};
     use surrealdb::Surreal;
@@ -710,9 +764,23 @@ mod tests {
     #[test]
     fn migration_v15_is_registered() {
         let last = MIGRATIONS.last().expect("at least one migration");
-        assert_eq!(last.version, 17);
-        assert_eq!(last.name, "dynamic_embedding_index_metadata");
-        assert_eq!(last.sql, MIGRATION_V17_SQL);
+        assert_eq!(last.version, 19);
+        assert_eq!(last.name, "task_step_table");
+        assert_eq!(last.sql, MIGRATION_V19_SQL);
+
+        let v18 = MIGRATIONS
+            .iter()
+            .find(|migration| migration.version == 18)
+            .expect("v18 migration remains registered");
+        assert_eq!(v18.name, "task_stream_scope_unique_index");
+        assert_eq!(v18.sql, MIGRATION_V18_SQL);
+
+        let v17 = MIGRATIONS
+            .iter()
+            .find(|migration| migration.version == 17)
+            .expect("v17 migration remains registered");
+        assert_eq!(v17.name, "dynamic_embedding_index_metadata");
+        assert_eq!(v17.sql, MIGRATION_V17_SQL);
 
         let v15 = MIGRATIONS
             .iter()
@@ -734,6 +802,66 @@ mod tests {
         assert!(MIGRATION_V17_SQL.contains("REMOVE INDEX IF EXISTS entity_embedding_hnsw"));
         assert!(MIGRATION_V17_SQL.contains("REMOVE INDEX IF EXISTS memory_embedding_hnsw"));
         assert!(MIGRATION_V17_SQL.contains("DEFINE TABLE IF NOT EXISTS schema_metadata"));
+    }
+
+    #[test]
+    fn migration_v18_scopes_task_stream_name_uniqueness() {
+        assert!(
+            MIGRATION_V18_SQL.contains("REMOVE INDEX IF EXISTS task_stream_name ON task_stream")
+        );
+        assert!(MIGRATION_V18_SQL.contains("task_stream_scope_name"));
+        assert!(MIGRATION_V18_SQL.contains("FIELDS agent_id, user_id, name UNIQUE"));
+    }
+
+    #[test]
+    fn migration_v18_backfills_none_scopes_before_index() {
+        // Pre-existing rows store agent_id/user_id as NONE; the new composite
+        // unique index requires them normalized to "" so uniqueness is
+        // consistently enforced. The backfill must run BEFORE the index DDL.
+        assert!(
+            MIGRATION_V18_SQL
+                .contains("UPDATE task_stream SET agent_id = '' WHERE agent_id IS NONE")
+        );
+        assert!(
+            MIGRATION_V18_SQL.contains("UPDATE task_stream SET user_id = '' WHERE user_id IS NONE")
+        );
+        let backfill_pos = MIGRATION_V18_SQL
+            .find("UPDATE task_stream SET agent_id")
+            .expect("backfill present");
+        let define_pos = MIGRATION_V18_SQL
+            .find("DEFINE INDEX")
+            .expect("index DDL present");
+        assert!(
+            backfill_pos < define_pos,
+            "backfill must precede index redefinition"
+        );
+    }
+
+    #[test]
+    fn migration_v19_defines_task_step_table_and_indexes() {
+        assert!(MIGRATION_V19_SQL.contains("DEFINE TABLE IF NOT EXISTS task_step SCHEMAFULL"));
+        for field in [
+            "task_stream_id",
+            "ordinal",
+            "name",
+            "description",
+            "status",
+            "idempotency_key",
+            "result",
+            "error",
+            "started_at",
+            "completed_at",
+            "created_at",
+        ] {
+            assert!(
+                MIGRATION_V19_SQL
+                    .contains(&format!("DEFINE FIELD IF NOT EXISTS {field} ON task_step")),
+                "v19 must define field '{field}' on task_step"
+            );
+        }
+        assert!(MIGRATION_V19_SQL.contains("task_step_stream_ordinal"));
+        assert!(MIGRATION_V19_SQL
+            .contains("DEFINE INDEX IF NOT EXISTS task_step_idempotency_key ON task_step FIELDS idempotency_key UNIQUE"));
     }
 
     #[test]

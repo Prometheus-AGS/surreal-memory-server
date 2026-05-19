@@ -329,7 +329,10 @@ mod tests {
     }
 
     fn router_with_storage(storage: Arc<dyn MemoryStorage>) -> Router {
-        router().with_state(AppState { storage })
+        router().with_state(AppState {
+            storage,
+            embedding_service: Arc::new(NoOpEmbedder),
+        })
     }
 
     async fn json_response(response: axum::response::Response) -> serde_json::Value {

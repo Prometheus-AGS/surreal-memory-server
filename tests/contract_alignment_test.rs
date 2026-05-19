@@ -51,7 +51,7 @@ fn mcp_code(error: &McpError) -> ErrorCode {
 #[tokio::test]
 async fn mcp_and_rest_reject_invalid_mindmap_map_type() {
     let storage = make_storage().await;
-    let router = api::build_router(Arc::clone(&storage));
+    let router = api::build_router(Arc::clone(&storage), Arc::new(NoOpEmbedder));
     let body = CreateMindmapRequest {
         name: "bad-map-type".to_string(),
         map_type: Some("not-a-map-type".to_string()),
@@ -78,7 +78,7 @@ async fn mcp_and_rest_reject_invalid_mindmap_map_type() {
 
     let handler = MemoryHandler::new(storage);
     let mcp_error = handler
-        .create_mindmap(body.into())
+        .create_mindmap(body)
         .await
         .expect_err("invalid map type should fail through MCP");
     assert_eq!(mcp_code(&mcp_error), ErrorCode::INVALID_PARAMS);
@@ -96,14 +96,12 @@ async fn mcp_batch_create_entities_validates_every_item() {
                     name: "Valid entity".to_string(),
                     entity_type: "Concept".to_string(),
                     observations: vec!["Has one useful observation".to_string()],
-                }
-                .into(),
+                },
                 CreateEntityRequest {
                     name: "Invalid entity".to_string(),
                     entity_type: "Concept".to_string(),
                     observations: Vec::new(),
-                }
-                .into(),
+                },
             ],
         })
         .await
@@ -115,7 +113,7 @@ async fn mcp_batch_create_entities_validates_every_item() {
 #[tokio::test]
 async fn rest_and_mcp_add_memory_persist_same_contract_fields() {
     let rest_storage = make_storage().await;
-    let rest_router = api::build_router(Arc::clone(&rest_storage));
+    let rest_router = api::build_router(Arc::clone(&rest_storage), Arc::new(NoOpEmbedder));
     let mcp_storage = make_storage().await;
     let mcp_handler = MemoryHandler::new(Arc::clone(&mcp_storage));
 
@@ -141,7 +139,7 @@ async fn rest_and_mcp_add_memory_persist_same_contract_fields() {
     assert_eq!(rest_response.status(), StatusCode::CREATED);
 
     mcp_handler
-        .add_memory(body.clone().into())
+        .add_memory(body.clone())
         .await
         .expect("mcp add_memory");
 
@@ -174,7 +172,7 @@ async fn rest_and_mcp_add_memory_persist_same_contract_fields() {
 #[tokio::test]
 async fn rest_and_mcp_create_entity_persist_same_contract_fields() {
     let rest_storage = make_storage().await;
-    let rest_router = api::build_router(Arc::clone(&rest_storage));
+    let rest_router = api::build_router(Arc::clone(&rest_storage), Arc::new(NoOpEmbedder));
     let mcp_storage = make_storage().await;
     let mcp_handler = MemoryHandler::new(Arc::clone(&mcp_storage));
 
@@ -201,7 +199,7 @@ async fn rest_and_mcp_create_entity_persist_same_contract_fields() {
     assert_eq!(rest_response.status(), StatusCode::CREATED);
 
     mcp_handler
-        .create_entity(body.clone().into())
+        .create_entity(body.clone())
         .await
         .expect("mcp create_entity");
 
@@ -224,7 +222,7 @@ async fn rest_and_mcp_create_entity_persist_same_contract_fields() {
 #[tokio::test]
 async fn rest_and_mcp_mindmap_nodes_preserve_nested_metadata() {
     let rest_storage = make_storage().await;
-    let rest_router = api::build_router(Arc::clone(&rest_storage));
+    let rest_router = api::build_router(Arc::clone(&rest_storage), Arc::new(NoOpEmbedder));
     let mcp_storage = make_storage().await;
     let mcp_handler = MemoryHandler::new(Arc::clone(&mcp_storage));
 
@@ -284,7 +282,7 @@ async fn rest_and_mcp_mindmap_nodes_preserve_nested_metadata() {
     assert_eq!(add_node_response.status(), StatusCode::OK);
 
     mcp_handler
-        .create_mindmap(create_body.clone().into())
+        .create_mindmap(create_body.clone())
         .await
         .expect("mcp create_mindmap");
     mcp_handler
@@ -320,7 +318,7 @@ async fn rest_and_mcp_mindmap_nodes_preserve_nested_metadata() {
 #[tokio::test]
 async fn mcp_and_rest_reject_invalid_mindmap_task_stream_id() {
     let storage = make_storage().await;
-    let router = api::build_router(Arc::clone(&storage));
+    let router = api::build_router(Arc::clone(&storage), Arc::new(NoOpEmbedder));
     let body = CreateMindmapRequest {
         name: "bad-task-stream-id".to_string(),
         map_type: Some("radial".to_string()),
@@ -347,7 +345,7 @@ async fn mcp_and_rest_reject_invalid_mindmap_task_stream_id() {
 
     let handler = MemoryHandler::new(storage);
     let mcp_error = handler
-        .create_mindmap(body.into())
+        .create_mindmap(body)
         .await
         .expect_err("invalid task stream id should fail through MCP");
     assert_eq!(mcp_code(&mcp_error), ErrorCode::INVALID_PARAMS);

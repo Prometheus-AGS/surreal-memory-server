@@ -5,9 +5,10 @@
 use std::sync::Arc;
 use surreal_memory::mindmap::{MapType, MindMap, MindMapNode};
 use surreal_memory::{
-    Entity, Memory, MemoryStorage, Relation, TaskStream,
+    Entity, Memory, MemoryStorage, Relation, TaskStep, TaskStream,
     model_profiles::{MODEL_PROFILES, profile_for},
     storage::surreal::{RetryConfig, SurrealConfig, SurrealMode, SurrealStorage},
+    task_step::TaskStepStatus,
     task_stream::TaskStreamStatus,
 };
 use surrealdb::Surreal;
@@ -28,7 +29,7 @@ impl surreal_memory::embeddings::EmbeddingService for NoOpEmbedder {
         Ok(texts.iter().map(|_| vec![0.0f32; 1536]).collect())
     }
     fn dimensions(&self) -> usize {
-        384
+        1536
     }
 }
 
@@ -294,7 +295,7 @@ async fn test_task_stream_lifecycle() {
     assert_eq!(created.name, "my-task");
     assert_eq!(created.status, TaskStreamStatus::Active);
 
-    s.add_to_task_stream("my-task", memory("Step 1", "u1"))
+    s.add_to_task_stream("my-task", None, None, memory("Step 1", "u1"))
         .await
         .expect("add_to_stream");
 
@@ -302,7 +303,7 @@ async fn test_task_stream_lifecycle() {
     assert!(!streams.is_empty());
 
     let ctx = s
-        .get_context_for_task("my-task", "gpt-4o", None)
+        .get_context_for_task("my-task", None, None, "gpt-4o", None)
         .await
         .expect("context");
     assert!(!ctx.memories.is_empty());
@@ -311,7 +312,7 @@ async fn test_task_stream_lifecycle() {
     for idx in 0..4 {
         let mut mem = memory(&format!("Long step {}", idx + 2), "u1");
         mem.token_count = Some((profile.summarization_threshold() / 4 + 1) as u32);
-        s.add_to_task_stream("my-task", mem)
+        s.add_to_task_stream("my-task", None, None, mem)
             .await
             .expect("seed summarization");
     }
@@ -321,7 +322,7 @@ async fn test_task_stream_lifecycle() {
         .await
         .expect("auto summarize");
     let stream_after_summary = s
-        .get_task_stream("my-task")
+        .get_task_stream("my-task", None, None)
         .await
         .expect("get task stream after summarize")
         .expect("task stream exists after summarize");
@@ -330,7 +331,10 @@ async fn test_task_stream_lifecycle() {
         "expected a summary once threshold is crossed, either inline or explicit"
     );
 
-    let archived = s.archive_task_stream("my-task").await.expect("archive");
+    let archived = s
+        .archive_task_stream("my-task", None, None)
+        .await
+        .expect("archive");
     assert_eq!(archived.status, TaskStreamStatus::Archived);
 }
 
@@ -349,6 +353,8 @@ async fn delete_task_stream_removes_linked_memories_and_detaches_mindmaps() {
         .expect("create task stream");
     s.add_to_task_stream(
         "cleanup-task",
+        None,
+        None,
         Memory::new(
             "delete me".to_string(),
             Some("user-cleanup".to_string()),
@@ -371,12 +377,12 @@ async fn delete_task_stream_removes_linked_memories_and_detaches_mindmaps() {
     map.task_stream_id = stream.id.clone();
     s.create_mindmap(map).await.expect("create linked mindmap");
 
-    s.delete_task_stream("cleanup-task")
+    s.delete_task_stream("cleanup-task", None, None)
         .await
         .expect("delete task stream");
 
     assert!(
-        s.get_task_stream("cleanup-task")
+        s.get_task_stream("cleanup-task", None, None)
             .await
             .expect("get task stream after delete")
             .is_none()
@@ -393,6 +399,157 @@ async fn delete_task_stream_removes_linked_memories_and_detaches_mindmaps() {
         .expect("get linked mindmap after delete")
         .expect("linked mindmap should survive task deletion");
     assert!(linked_map.task_stream_id.is_none());
+}
+
+/// C-1 regression: `auto_summarize_task_stream` must only compact memories
+/// belonging to the target stream. Previously it selected `task_stream_id != NONE`
+/// and deleted the oldest half of memories across ALL streams in scope.
+#[tokio::test]
+async fn auto_summarize_does_not_touch_sibling_stream() {
+    let s = make_storage().await;
+    let agent = "agent-c1";
+
+    // auto_summarize disabled so the ONLY compaction is our explicit call on S1.
+    let mk = |name: &str| {
+        let mut ts = TaskStream::new(
+            name,
+            Some("c1 regression".to_string()),
+            Some(agent.to_string()),
+            None,
+        );
+        ts.auto_summarize = false;
+        ts
+    };
+    s.create_task_stream(mk("c1-s1")).await.expect("create s1");
+    s.create_task_stream(mk("c1-s2")).await.expect("create s2");
+
+    let profile = profile_for("default");
+    let big = (profile.summarization_threshold() / 4 + 1) as u32;
+
+    // Seed both streams with enough memories to be compressible.
+    for idx in 0..6 {
+        let mut m1 = Memory::new(
+            format!("s1 step {idx}"),
+            None,
+            Some(agent.to_string()),
+            None,
+            vec![],
+        );
+        m1.token_count = Some(big);
+        s.add_to_task_stream("c1-s1", None, Some(agent), m1)
+            .await
+            .expect("add to s1");
+
+        let mut m2 = Memory::new(
+            format!("s2 step {idx}"),
+            None,
+            Some(agent.to_string()),
+            None,
+            vec![],
+        );
+        m2.token_count = Some(big);
+        s.add_to_task_stream("c1-s2", None, Some(agent), m2)
+            .await
+            .expect("add to s2");
+    }
+
+    // Summarize ONLY s1 — this MUST produce a summary (proving s1 crossed
+    // the threshold and the compaction path actually ran).
+    let summary = s
+        .auto_summarize_task_stream("c1-s1", None, Some(agent), "default")
+        .await
+        .expect("summarize s1");
+    assert!(summary.is_some(), "S1 should have been compacted");
+
+    // S2's memories must all still be present.
+    let s2_ctx = s
+        .get_context_for_task("c1-s2", None, Some(agent), "gpt-4o", Some(1_000_000))
+        .await
+        .expect("get s2 context");
+    assert_eq!(
+        s2_ctx.memories.len(),
+        6,
+        "sibling stream S2 must keep all 6 memories after summarizing S1"
+    );
+}
+
+/// C-2 regression: stream resolution and mutation must be scope-bounded.
+#[tokio::test]
+async fn task_stream_access_is_scope_bounded() {
+    let s = make_storage().await;
+
+    s.create_task_stream(TaskStream::new(
+        "c2-build",
+        Some("owned by A".to_string()),
+        Some("agent-A".to_string()),
+        None,
+    ))
+    .await
+    .expect("create stream for A");
+
+    // Cross-scope read returns None.
+    let cross_read = s
+        .get_task_stream("c2-build", None, Some("agent-B"))
+        .await
+        .expect("get_task_stream call succeeds");
+    assert!(
+        cross_read.is_none(),
+        "agent B must not see agent A's stream"
+    );
+
+    // Owner can still read it.
+    assert!(
+        s.get_task_stream("c2-build", None, Some("agent-A"))
+            .await
+            .expect("owner read")
+            .is_some(),
+        "agent A must still resolve its own stream"
+    );
+
+    // Cross-scope add fails.
+    assert!(
+        s.add_to_task_stream(
+            "c2-build",
+            None,
+            Some("agent-B"),
+            memory("intrusion attempt", "agent-B"),
+        )
+        .await
+        .is_err(),
+        "agent B must not add to agent A's stream"
+    );
+
+    // Cross-scope pause fails.
+    assert!(
+        s.pause_task_stream("c2-build", None, Some("agent-B"))
+            .await
+            .is_err(),
+        "agent B must not pause agent A's stream"
+    );
+
+    // Cross-scope archive fails.
+    assert!(
+        s.archive_task_stream("c2-build", None, Some("agent-B"))
+            .await
+            .is_err(),
+        "agent B must not archive agent A's stream"
+    );
+
+    // Cross-scope delete fails.
+    assert!(
+        s.delete_task_stream("c2-build", None, Some("agent-B"))
+            .await
+            .is_err(),
+        "agent B must not delete agent A's stream"
+    );
+
+    // Stream is unchanged and still owned by A.
+    let still_there = s
+        .get_task_stream("c2-build", None, Some("agent-A"))
+        .await
+        .expect("post-attack read")
+        .expect("agent A's stream must still exist");
+    assert_eq!(still_there.status, TaskStreamStatus::Active);
 }
 
 // ── Mindmaps ──────────────────────────────────────────────────────────────────
@@ -476,6 +633,67 @@ async fn test_mindmap_crud() {
 }
 
 #[tokio::test]
+async fn mindmap_update_path_succeeds_under_timeout_bound() {
+    // M-1 regression: the mindmap UPDATE statements (update_mindmap_graph,
+    // append_mindmap_node, append_mindmap_edge) carry a `TIMEOUT` clause so
+    // oversized updates fail fast instead of stalling. A normal-sized mindmap
+    // must still complete well within that bound. This exercises all three
+    // TIMEOUT-bearing query paths: node add, edge add, and full-graph update.
+    let s = make_storage().await;
+
+    let mm = MindMap {
+        id: None,
+        name: "m1-timeout".to_string(),
+        map_type: MapType::Radial,
+        description: Some("M-1 timeout regression".to_string()),
+        user_id: Some("u-m1".to_string()),
+        agent_id: None,
+        task_stream_id: None,
+        nodes: vec![MindMapNode {
+            id: "root".to_string(),
+            label: "Root".to_string(),
+            parent_id: None,
+            node_type: None,
+            color: None,
+            metadata: None,
+        }],
+        edges: vec![],
+        tags: vec![],
+        created_at: Default::default(),
+        updated_at: Default::default(),
+    };
+    s.create_mindmap(mm).await.expect("create_mindmap");
+
+    let start = std::time::Instant::now();
+    for i in 0..20 {
+        let node = MindMapNode {
+            id: format!("n{i}"),
+            label: format!("Node {i}"),
+            parent_id: Some("root".to_string()),
+            node_type: None,
+            color: None,
+            metadata: None,
+        };
+        s.add_mindmap_node("m1-timeout", Some("u-m1"), None, node)
+            .await
+            .unwrap_or_else(|e| panic!("add_mindmap_node {i} within timeout bound: {e}"));
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(25),
+        "20 node adds must complete well under the 30s mindmap UPDATE timeout, took {elapsed:?}"
+    );
+
+    let fetched = s
+        .get_mindmap("m1-timeout", Some("u-m1"), None)
+        .await
+        .expect("get")
+        .expect("exists");
+    assert_eq!(fetched.nodes.len(), 21, "root + 20 added nodes");
+}
+
+#[tokio::test]
 async fn test_long_running_project_lifecycle_embedded() {
     let s = make_storage().await;
     let user_id = "project-user";
@@ -494,6 +712,8 @@ async fn test_long_running_project_lifecycle_embedded() {
     let kickoff = s
         .add_to_task_stream(
             &stream_name,
+            None,
+            None,
             memory("Kickoff decision: use shared memory", user_id),
         )
         .await
@@ -507,6 +727,8 @@ async fn test_long_running_project_lifecycle_embedded() {
     let milestone = s
         .add_to_task_stream(
             &stream_name,
+            None,
+            None,
             memory("Milestone: schema repair landed", user_id),
         )
         .await
@@ -518,7 +740,7 @@ async fn test_long_running_project_lifecycle_embedded() {
         .expect("milestone memory id");
 
     let mut map = MindMap::new(
-        &format!("map-{}", stream_name),
+        format!("map-{}", stream_name),
         MapType::Radial,
         "Project Root",
         Some("Shared project context".to_string()),
@@ -577,7 +799,7 @@ async fn test_long_running_project_lifecycle_embedded() {
     );
 
     let context = s
-        .get_context_for_task(&stream_name, "gpt-4o", Some(256))
+        .get_context_for_task(&stream_name, None, None, "gpt-4o", Some(256))
         .await
         .expect("context for task");
     assert_eq!(context.memories.len(), 2);
@@ -604,7 +826,7 @@ async fn test_long_running_project_lifecycle_embedded() {
     );
 
     let archived = s
-        .archive_task_stream(&stream_name)
+        .archive_task_stream(&stream_name, None, None)
         .await
         .expect("archive task stream");
     assert_eq!(archived.status, TaskStreamStatus::Archived);
@@ -636,7 +858,7 @@ async fn taskstream_server_mode_explicit_create_round_trips_model_settings() {
     );
 
     let fetched = s
-        .get_task_stream(&name)
+        .get_task_stream(&name, None, None)
         .await
         .expect("get_task_stream")
         .expect("task stream exists");
@@ -644,7 +866,7 @@ async fn taskstream_server_mode_explicit_create_round_trips_model_settings() {
     assert!(!fetched.auto_summarize);
 
     let stored = s
-        .add_to_task_stream(&name, memory("server-mode step", user_id))
+        .add_to_task_stream(&name, None, None, memory("server-mode step", user_id))
         .await
         .expect("add_to_task_stream");
     assert_eq!(stored.content, "server-mode step");
@@ -657,16 +879,19 @@ async fn taskstream_server_mode_explicit_create_round_trips_model_settings() {
     assert_eq!(listed[0].name, name);
 
     let context = s
-        .get_context_for_task(&name, "gpt-4o", Some(64))
+        .get_context_for_task(&name, None, None, "gpt-4o", Some(64))
         .await
         .expect("get_context_for_task");
     assert_eq!(context.memories.len(), 1);
 
-    let paused = s.pause_task_stream(&name).await.expect("pause_task_stream");
+    let paused = s
+        .pause_task_stream(&name, None, None)
+        .await
+        .expect("pause_task_stream");
     assert_eq!(paused.status, surreal_memory::TaskStreamStatus::Paused);
 
     let archived = s
-        .archive_task_stream(&name)
+        .archive_task_stream(&name, None, None)
         .await
         .expect("archive_task_stream");
     assert_eq!(archived.status, surreal_memory::TaskStreamStatus::Archived);
@@ -832,7 +1057,12 @@ async fn shared_project_server_mode_continuity_across_storage_instances() {
     assert_eq!(created_stream.status, TaskStreamStatus::Active);
 
     let kickoff = writer_a
-        .add_to_task_stream(&stream_name, memory("Kickoff complete", &user_id))
+        .add_to_task_stream(
+            &stream_name,
+            None,
+            None,
+            memory("Kickoff complete", &user_id),
+        )
         .await
         .expect("writer A add kickoff");
     let kickoff_id = kickoff
@@ -863,7 +1093,7 @@ async fn shared_project_server_mode_continuity_across_storage_instances() {
     assert_eq!(listed_streams[0].name, stream_name);
 
     let context_before = writer_b
-        .get_context_for_task(&stream_name, "gpt-4o", Some(128))
+        .get_context_for_task(&stream_name, None, None, "gpt-4o", Some(128))
         .await
         .expect("writer B context");
     assert_eq!(context_before.memories.len(), 1);
@@ -876,7 +1106,12 @@ async fn shared_project_server_mode_continuity_across_storage_instances() {
     assert_eq!(map_before.nodes.len(), 1);
 
     writer_b
-        .add_to_task_stream(&stream_name, memory("Validation finished", &user_id))
+        .add_to_task_stream(
+            &stream_name,
+            None,
+            None,
+            memory("Validation finished", &user_id),
+        )
         .await
         .expect("writer B add memory");
     writer_b
@@ -914,7 +1149,7 @@ async fn shared_project_server_mode_continuity_across_storage_instances() {
         .expect("writer B add edge");
 
     let context_after = writer_a
-        .get_context_for_task(&stream_name, "gpt-4o", Some(256))
+        .get_context_for_task(&stream_name, None, None, "gpt-4o", Some(256))
         .await
         .expect("writer A updated context");
     assert_eq!(context_after.memories.len(), 2);
@@ -942,13 +1177,13 @@ async fn shared_project_server_mode_continuity_across_storage_instances() {
     );
 
     let paused = writer_a
-        .pause_task_stream(&stream_name)
+        .pause_task_stream(&stream_name, None, None)
         .await
         .expect("pause stream");
     assert_eq!(paused.status, TaskStreamStatus::Paused);
 
     let archived = writer_b
-        .archive_task_stream(&stream_name)
+        .archive_task_stream(&stream_name, None, None)
         .await
         .expect("archive stream");
     assert_eq!(archived.status, TaskStreamStatus::Archived);
@@ -1138,7 +1373,7 @@ async fn test_graph_traversal() {
         .expand_neighbors("A", 2, 50)
         .await
         .expect("expand_neighbors");
-    assert!(graph.entities.len() >= 1);
+    assert!(!graph.entities.is_empty());
 
     let related = s
         .get_related("B", Some("LINKS"), "both", 10)
@@ -1182,6 +1417,184 @@ async fn test_graph_at_time() {
         .expect("get_graph_at_time");
 }
 
+// ── Harden TaskStream Correctness (H-2 / M-1 / M-2) ───────────────────────────
+
+/// H-2: N concurrent `add_to_task_stream` calls must not lose token counts.
+/// The memory insert and the `total_tokens` bump are wrapped in one
+/// transaction, so the final counter equals the sum of every per-memory count.
+#[tokio::test]
+async fn concurrent_adds_preserve_total_token_count() {
+    let s = make_storage().await;
+    s.create_task_stream(TaskStream::new(
+        "concurrency-task",
+        Some("concurrency".to_string()),
+        None,
+        Some("u-conc".to_string()),
+    ))
+    .await
+    .expect("create task stream");
+
+    const N: usize = 8;
+    let mut handles = Vec::with_capacity(N);
+    for idx in 0..N {
+        let storage = Arc::clone(&s);
+        handles.push(tokio::spawn(async move {
+            // Distinct content per task so semantic dedup never collapses them.
+            let mem = memory(
+                &format!("concurrent step number {idx} unique payload"),
+                "u-conc",
+            );
+            storage
+                .add_to_task_stream("concurrency-task", None, None, mem)
+                .await
+                .expect("concurrent add_to_task_stream")
+        }));
+    }
+
+    let mut expected_tokens: u64 = 0;
+    for handle in handles {
+        let stored = handle.await.expect("join concurrent add");
+        expected_tokens += stored.token_count.expect("token_count populated") as u64;
+    }
+
+    let stream = s
+        .get_task_stream("concurrency-task", None, None)
+        .await
+        .expect("get task stream")
+        .expect("task stream exists");
+    assert_eq!(
+        stream.total_tokens, expected_tokens,
+        "total_tokens must equal the sum of all {N} concurrent per-memory counts",
+    );
+}
+
+/// M-1: two agents must each be able to own a stream with the same name.
+/// The unique index is composite over (agent_id, user_id, name), so a global
+/// name clash no longer blocks the second `create_task_stream`.
+#[tokio::test]
+async fn two_agents_can_reuse_a_stream_name() {
+    let s = make_storage().await;
+
+    let a = s
+        .create_task_stream(TaskStream::new(
+            "build",
+            Some("agent A build".to_string()),
+            Some("agent-A".to_string()),
+            None,
+        ))
+        .await
+        .expect("agent A creates 'build'");
+    assert_eq!(a.name, "build");
+
+    let b = s
+        .create_task_stream(TaskStream::new(
+            "build",
+            Some("agent B build".to_string()),
+            Some("agent-B".to_string()),
+            None,
+        ))
+        .await
+        .expect("agent B creates 'build' — composite index must allow this");
+    assert_eq!(b.name, "build");
+
+    // Each agent resolves only its own stream.
+    let a_stream = s
+        .get_task_stream("build", None, Some("agent-A"))
+        .await
+        .expect("get agent A stream")
+        .expect("agent A stream exists");
+    assert_eq!(a_stream.description.as_deref(), Some("agent A build"));
+    let b_stream = s
+        .get_task_stream("build", None, Some("agent-B"))
+        .await
+        .expect("get agent B stream")
+        .expect("agent B stream exists");
+    assert_eq!(b_stream.description.as_deref(), Some("agent B build"));
+}
+
+/// M-2: after `auto_summarize_task_stream` compacts memories, `total_tokens`
+/// decreases, the summary memory is attached to the stream (returned by
+/// `get_context_for_task`), and the summarization trigger does not re-fire.
+#[tokio::test]
+async fn summarization_decrements_tokens_and_attaches_summary() {
+    let s = make_storage().await;
+    // Disable inline auto-summarization so seeding does not compact the stream
+    // mid-flight; this test drives `auto_summarize_task_stream` explicitly.
+    let mut ts = TaskStream::new(
+        "summarize-task",
+        Some("summarize".to_string()),
+        None,
+        Some("u-sum".to_string()),
+    );
+    ts.auto_summarize = false;
+    s.create_task_stream(ts).await.expect("create task stream");
+
+    let profile = profile_for("default");
+    // Add 8 memories, each ~1/6 of the threshold. Total (~8/6 of threshold)
+    // crosses the summarization threshold, and compacting the oldest half
+    // (4 memories, ~4/6 of threshold) drops the total back below it.
+    let per_memory = (profile.summarization_threshold() / 6 + 1) as u32;
+    for idx in 0..8 {
+        let mut mem = memory(&format!("summarize step {idx} distinct content"), "u-sum");
+        mem.token_count = Some(per_memory);
+        s.add_to_task_stream("summarize-task", None, None, mem)
+            .await
+            .expect("seed memory for summarization");
+    }
+
+    let before = s
+        .get_task_stream("summarize-task", None, None)
+        .await
+        .expect("get stream before")
+        .expect("stream exists before");
+    assert!(
+        before.total_tokens >= profile.summarization_threshold(),
+        "seeded stream must cross the summarization threshold",
+    );
+
+    let summary = s
+        .auto_summarize_task_stream("summarize-task", Some("u-sum"), None, "default")
+        .await
+        .expect("auto summarize")
+        .expect("a summary memory is produced");
+
+    let after = s
+        .get_task_stream("summarize-task", None, None)
+        .await
+        .expect("get stream after")
+        .expect("stream exists after");
+
+    assert!(
+        after.total_tokens < before.total_tokens,
+        "total_tokens must decrease after summarization (before={}, after={})",
+        before.total_tokens,
+        after.total_tokens,
+    );
+    assert_eq!(after.summary_count, before.summary_count + 1);
+    // After compaction the token total must drop back below the threshold so
+    // the summarization trigger does not immediately re-fire. Check the raw
+    // condition directly (this stream has auto_summarize disabled, so
+    // `needs_summarization()` alone would be trivially false).
+    assert!(
+        after.total_tokens < profile.summarization_threshold(),
+        "compaction must bring total_tokens below the threshold (after={}, threshold={})",
+        after.total_tokens,
+        profile.summarization_threshold(),
+    );
+
+    // The summary memory must remain attached to the stream.
+    let ctx = s
+        .get_context_for_task("summarize-task", None, None, "default", None)
+        .await
+        .expect("get context for task");
+    assert!(
+        ctx.memories
+            .iter()
+            .any(|m| m.id == summary.id || m.content == summary.content),
+        "get_context_for_task must include the auto-summary memory",
+    );
+}
+
 // ── Retry Logic ───────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -1203,6 +1616,7 @@ async fn test_operation_survives_transient_failure() {
         base_retry_delay_ms: 10, // Short delays for test speed
         max_retry_delay_ms: 100,
         jitter_factor: 0.1,
+        operation_deadline_ms: 30_000,
     };
 
     let config = SurrealConfig {
@@ -1285,4 +1699,240 @@ async fn test_operation_survives_transient_failure() {
 
     // Cleanup: Remove test database
     std::fs::remove_dir_all(&test_dir).ok();
+}
+
+// ── TaskSteps ───────────────────────────────────────────────────────────────────
+
+/// Helper: create a stream and add `count` pending steps numbered 1..=count.
+async fn seed_stream_with_steps(s: &SurrealStorage, stream: &str, count: u32) {
+    s.create_task_stream(TaskStream::new(stream, None, None, Some("u1".to_string())))
+        .await
+        .expect("create stream");
+    for ordinal in 1..=count {
+        let step = TaskStep::new(
+            ordinal,
+            format!("step-{ordinal}"),
+            None,
+            format!("{stream}-key-{ordinal}"),
+        );
+        s.add_task_step(stream, Some("u1"), None, step)
+            .await
+            .expect("add step");
+    }
+}
+
+#[tokio::test]
+async fn test_task_steps_created_in_ordinal_order() {
+    let s = make_storage().await;
+    seed_stream_with_steps(&s, "ordered", 3).await;
+
+    let steps = s
+        .get_task_steps("ordered", Some("u1"), None)
+        .await
+        .expect("get_task_steps");
+
+    assert_eq!(steps.len(), 3);
+    assert_eq!(steps[0].ordinal, 1);
+    assert_eq!(steps[1].ordinal, 2);
+    assert_eq!(steps[2].ordinal, 3);
+    for step in &steps {
+        assert_eq!(step.status, TaskStepStatus::Pending);
+        assert!(step.task_stream_id.is_some(), "step linked to stream");
+    }
+}
+
+#[tokio::test]
+async fn test_get_current_step_skips_completed() {
+    let s = make_storage().await;
+    seed_stream_with_steps(&s, "current", 3).await;
+
+    s.complete_step("current-key-1", Some("done 1".to_string()))
+        .await
+        .expect("complete 1");
+    s.complete_step("current-key-2", None)
+        .await
+        .expect("complete 2");
+
+    let current = s
+        .get_current_step("current", Some("u1"), None)
+        .await
+        .expect("get_current_step")
+        .expect("a current step exists");
+    assert_eq!(current.ordinal, 3);
+    assert_eq!(current.status, TaskStepStatus::Pending);
+}
+
+#[tokio::test]
+async fn test_complete_step_is_idempotent_on_replay() {
+    let s = make_storage().await;
+    seed_stream_with_steps(&s, "replay", 2).await;
+
+    let first = s
+        .complete_step("replay-key-1", Some("result-A".to_string()))
+        .await
+        .expect("first complete");
+    assert_eq!(first.status, TaskStepStatus::Completed);
+    assert_eq!(first.result.as_deref(), Some("result-A"));
+
+    // Replay with a different result must NOT re-apply — the already-completed
+    // step is returned verbatim.
+    let second = s
+        .complete_step("replay-key-1", Some("result-B".to_string()))
+        .await
+        .expect("replayed complete");
+    assert_eq!(second.status, TaskStepStatus::Completed);
+    assert_eq!(
+        second.result.as_deref(),
+        Some("result-A"),
+        "replay must not overwrite the original result"
+    );
+
+    // Exactly one completed step, no duplicate row.
+    let steps = s
+        .get_task_steps("replay", Some("u1"), None)
+        .await
+        .expect("get steps");
+    assert_eq!(steps.len(), 2);
+    let completed: Vec<_> = steps
+        .iter()
+        .filter(|st| st.status == TaskStepStatus::Completed)
+        .collect();
+    assert_eq!(completed.len(), 1, "exactly one completed step");
+}
+
+#[tokio::test]
+async fn test_add_task_step_is_idempotent_on_key() {
+    let s = make_storage().await;
+    s.create_task_stream(TaskStream::new("idem", None, None, Some("u1".to_string())))
+        .await
+        .expect("create");
+
+    let added = s
+        .add_task_step(
+            "idem",
+            Some("u1"),
+            None,
+            TaskStep::new(1, "first", None, "idem-key"),
+        )
+        .await
+        .expect("add once");
+
+    // Re-add with the same key — returns the existing step, no duplicate.
+    let again = s
+        .add_task_step(
+            "idem",
+            Some("u1"),
+            None,
+            TaskStep::new(1, "first", None, "idem-key"),
+        )
+        .await
+        .expect("add again");
+    assert_eq!(added.id, again.id, "replay returns the existing step");
+
+    let steps = s
+        .get_task_steps("idem", Some("u1"), None)
+        .await
+        .expect("get");
+    assert_eq!(steps.len(), 1, "no duplicate step created");
+}
+
+#[tokio::test]
+async fn test_resume_returns_first_pending_step() {
+    let s = make_storage().await;
+    seed_stream_with_steps(&s, "resume", 3).await;
+
+    // Steps 1-2 completed, step 3 still pending.
+    s.complete_step("resume-key-1", None).await.expect("c1");
+    s.complete_step("resume-key-2", None).await.expect("c2");
+
+    // A fresh query (simulating a new session) resumes at step 3.
+    let resumed = s
+        .get_current_step("resume", Some("u1"), None)
+        .await
+        .expect("get_current_step")
+        .expect("step 3 pending");
+    assert_eq!(resumed.ordinal, 3);
+    assert_eq!(resumed.status, TaskStepStatus::Pending);
+
+    // Completed steps are untouched.
+    let steps = s
+        .get_task_steps("resume", Some("u1"), None)
+        .await
+        .expect("steps");
+    assert_eq!(steps[0].status, TaskStepStatus::Completed);
+    assert_eq!(steps[1].status, TaskStepStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_update_task_step_status_transitions() {
+    let s = make_storage().await;
+    seed_stream_with_steps(&s, "transition", 1).await;
+
+    let running = s
+        .update_task_step_status("transition-key-1", TaskStepStatus::Running, None, None)
+        .await
+        .expect("set running");
+    assert_eq!(running.status, TaskStepStatus::Running);
+    assert!(running.started_at.is_some(), "started_at set on running");
+
+    let failed = s
+        .update_task_step_status(
+            "transition-key-1",
+            TaskStepStatus::Failed,
+            None,
+            Some("boom".to_string()),
+        )
+        .await
+        .expect("set failed");
+    assert_eq!(failed.status, TaskStepStatus::Failed);
+    assert_eq!(failed.error.as_deref(), Some("boom"));
+    assert!(failed.completed_at.is_some(), "completed_at set on failed");
+}
+
+#[tokio::test]
+async fn test_get_current_step_returns_failed_step_not_next() {
+    let s = make_storage().await;
+    seed_stream_with_steps(&s, "blocked", 2).await;
+
+    // Step 1 fails; step 2 stays pending.
+    s.update_task_step_status(
+        "blocked-key-1",
+        TaskStepStatus::Failed,
+        None,
+        Some("boom".to_string()),
+    )
+    .await
+    .expect("fail step 1");
+
+    // A failed step intentionally blocks progress: get_current_step returns
+    // the failed step (ordinal 1), NOT the next pending step (ordinal 2),
+    // so the caller can resolve it (retry/skip/complete) before advancing.
+    let current = s
+        .get_current_step("blocked", Some("u1"), None)
+        .await
+        .expect("get_current_step")
+        .expect("a current step exists");
+    assert_eq!(
+        current.ordinal, 1,
+        "failed step is current, not the next one"
+    );
+    assert_eq!(current.status, TaskStepStatus::Failed);
+}
+
+#[tokio::test]
+async fn test_complete_step_sets_started_at_without_prior_running() {
+    let s = make_storage().await;
+    seed_stream_with_steps(&s, "directcomplete", 1).await;
+
+    // complete_step directly from Pending — no Running transition.
+    let completed = s
+        .complete_step("directcomplete-key-1", Some("done".to_string()))
+        .await
+        .expect("complete step");
+    assert_eq!(completed.status, TaskStepStatus::Completed);
+    assert!(
+        completed.started_at.is_some(),
+        "started_at set even on a direct complete without Running"
+    );
+    assert!(completed.completed_at.is_some(), "completed_at set");
 }

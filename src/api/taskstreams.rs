@@ -107,7 +107,7 @@ async fn get_task_stream(
 ) -> Result<Json<TaskStream>, ApiFailure> {
     let stream = state
         .storage
-        .get_task_stream(&name)
+        .get_task_stream(&name, None, None)
         .await
         .map_err(api_error)?
         .ok_or_else(|| not_found("Task stream not found"))?;
@@ -120,7 +120,7 @@ async fn delete_task_stream(
 ) -> Result<StatusCode, ApiFailure> {
     state
         .storage
-        .delete_task_stream(&name)
+        .delete_task_stream(&name, None, None)
         .await
         .map_err(api_error)?;
     Ok(StatusCode::NO_CONTENT)
@@ -132,7 +132,7 @@ async fn archive_task_stream(
 ) -> Result<Json<TaskStream>, ApiFailure> {
     let archived = state
         .storage
-        .archive_task_stream(&name)
+        .archive_task_stream(&name, None, None)
         .await
         .map_err(api_error)?;
     Ok(Json(archived))
@@ -144,7 +144,7 @@ async fn pause_task_stream(
 ) -> Result<Json<TaskStream>, ApiFailure> {
     let paused = state
         .storage
-        .pause_task_stream(&name)
+        .pause_task_stream(&name, None, None)
         .await
         .map_err(api_error)?;
     Ok(Json(paused))
@@ -165,7 +165,7 @@ async fn add_memory_to_task_stream(
 
     let stored = state
         .storage
-        .add_to_task_stream(&name, memory)
+        .add_to_task_stream(&name, None, None, memory)
         .await
         .map_err(api_error)?;
     Ok((StatusCode::CREATED, Json(stored)))
@@ -180,6 +180,8 @@ async fn get_context_for_task(
         .storage
         .get_context_for_task(
             &name,
+            None,
+            None,
             q.model_name.as_deref().unwrap_or("default"),
             q.max_tokens,
         )
@@ -201,7 +203,7 @@ async fn auto_summarize_task_stream(
 
     let stream = state
         .storage
-        .get_task_stream(&name)
+        .get_task_stream(&name, None, None)
         .await
         .map_err(api_error)?
         .ok_or_else(|| not_found("Task stream not found"))?;
@@ -222,7 +224,7 @@ async fn auto_summarize_task_stream(
 
     let updated = state
         .storage
-        .get_task_stream(&name)
+        .get_task_stream(&name, None, None)
         .await
         .map_err(api_error)?
         .ok_or_else(|| not_found("Task stream not found"))?;
@@ -278,7 +280,10 @@ mod tests {
     fn router_with_storage(storage: Arc<dyn MemoryStorage>) -> Router {
         Router::new()
             .nest("/api/v1/taskstreams", router())
-            .with_state(AppState { storage })
+            .with_state(AppState {
+                storage,
+                embedding_service: Arc::new(NoOpEmbedder),
+            })
     }
 
     async fn json_response(response: axum::response::Response) -> serde_json::Value {
@@ -377,6 +382,8 @@ mod tests {
         storage
             .add_to_task_stream(
                 "delete-me",
+                None,
+                None,
                 Memory::new(
                     "important step".to_string(),
                     Some("user-9".to_string()),
@@ -417,7 +424,7 @@ mod tests {
 
         assert!(
             storage
-                .get_task_stream("delete-me")
+                .get_task_stream("delete-me", None, None)
                 .await
                 .expect("get task stream")
                 .is_none()
@@ -473,7 +480,7 @@ mod tests {
             .await
             .expect("create task stream");
         storage
-            .pause_task_stream("paused-task")
+            .pause_task_stream("paused-task", None, None)
             .await
             .expect("pause task stream");
 

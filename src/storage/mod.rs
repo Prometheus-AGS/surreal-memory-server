@@ -13,7 +13,8 @@ pub use surreal_memory::storage::surreal::{RetryConfig, SurrealConfig, SurrealMo
 #[allow(unused_imports)]
 pub use surreal_memory::{
     ContextWindow, Entity, KnowledgeGraph, Memory, MemoryHistory, MemoryScope, MemoryType,
-    Relation, SemanticSearchResult, SurrealStorage, TaskStream, TaskStreamStatus,
+    Relation, SemanticSearchResult, SurrealStorage, TaskStep, TaskStepStatus, TaskStream,
+    TaskStreamStatus,
 };
 
 // Bridge: create SurrealStorage from the server's Config

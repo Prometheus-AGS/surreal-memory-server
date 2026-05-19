@@ -9,6 +9,7 @@ use crate::{
     memory::{Memory, MemoryHistory, MemoryScope, MemoryType},
     mindmap::{MapType, MindMap, MindMapEdge, MindMapNode},
     storage::migrations::run_migrations,
+    task_step::{TaskStep, TaskStepStatus},
     task_stream::{ContextWindow, TaskStream, TaskStreamStatus},
 };
 use anyhow::{Context, Result};
@@ -25,6 +26,13 @@ use uuid::Uuid;
 
 /// Token budget constants per model family. Extend via config in Phase 3.
 const DEFAULT_CONTEXT_BUDGET: u64 = 100_000;
+
+/// SurrealDB query timeout for mindmap `UPDATE` statements. Mindmaps are stored
+/// as a single record with nested node/edge arrays, so every node/edge add
+/// rewrites the whole JSON object — a known SurrealDB performance cliff on
+/// large mindmaps. This `TIMEOUT` makes an oversized update fail fast with a
+/// clear error instead of stalling the write path open-endedly.
+const MINDMAP_UPDATE_TIMEOUT: &str = "30s";
 
 /// SurrealDB-backed memory storage.
 ///
@@ -44,6 +52,12 @@ pub struct SurrealStorage {
 
 use std::time::Duration;
 
+/// Number of connect attempts allowed when reconnecting from inside an
+/// operation retry. Deliberately small — the operation deadline, not this
+/// count, is the real bound; the larger `max_connect_retries` is reserved for
+/// the initial startup connect where a longer wait is acceptable.
+const OPERATION_RECONNECT_ATTEMPTS: u32 = 2;
+
 /// Configuration for retry and reconnection behavior.
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
@@ -52,6 +66,18 @@ pub struct RetryConfig {
     pub base_retry_delay_ms: u64,
     pub max_retry_delay_ms: u64,
     pub jitter_factor: f64,
+    /// Total wall-clock budget for a single storage operation, spanning all
+    /// retries and reconnection attempts. When exceeded, the operation returns
+    /// a typed error instead of stalling. Prevents the nested
+    /// retry × reconnect amplification that produced multi-minute hangs.
+    ///
+    /// Note: individual SQL statements also carry their own `TIMEOUT` (e.g.
+    /// `create_record` uses `TIMEOUT 30s`). With the 30_000ms default, a single
+    /// slow-but-alive query can consume the whole budget before any retry — by
+    /// design: the deadline is a hard "fail fast" ceiling, not a guarantee of N
+    /// full retry cycles. Operators wanting guaranteed retries against a slow
+    /// (not dead) DB should raise this above the per-query SQL timeout.
+    pub operation_deadline_ms: u64,
 }
 
 impl Default for RetryConfig {
@@ -62,6 +88,7 @@ impl Default for RetryConfig {
             base_retry_delay_ms: 100,
             max_retry_delay_ms: 5000,
             jitter_factor: 0.25,
+            operation_deadline_ms: 30_000,
         }
     }
 }
@@ -108,6 +135,35 @@ pub(crate) enum ConnectionState {
     Failed(String),
 }
 
+/// Cancellation-safety guard for `reconnect_with_attempts`. If the reconnect
+/// future is dropped while still in `Reconnecting` (e.g. the operation deadline
+/// fired mid-connect), the guard's `Drop` forces the state to `Failed` so the
+/// connection is never permanently stranded in `Reconnecting`. On a normal
+/// completion the caller calls `disarm()` before setting the final state.
+struct ReconnectGuard {
+    connection: Arc<std::sync::RwLock<ConnectionState>>,
+}
+
+impl ReconnectGuard {
+    /// Disarm the guard once the caller is about to set the final state.
+    fn disarm(self) {
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for ReconnectGuard {
+    fn drop(&mut self) {
+        let mut state = self
+            .connection
+            .write()
+            .expect("Connection lock poisoned - another thread panicked while holding the lock");
+        if matches!(*state, ConnectionState::Reconnecting) {
+            tracing::warn!("Reconnect cancelled before completion; marking connection Failed");
+            *state = ConnectionState::Failed("Reconnect cancelled before completion".to_string());
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, SurrealValue)]
 struct DbTaskStream {
     id: Option<RecordId>,
@@ -130,8 +186,13 @@ impl From<TaskStream> for DbTaskStream {
             id: stream.id,
             name: stream.name,
             description: stream.description,
-            agent_id: stream.agent_id,
-            user_id: stream.user_id,
+            // The `task_stream_scope_name` composite UNIQUE index (migration
+            // v18) cannot enforce uniqueness or be used for lookups when an
+            // indexed field is NONE (SurrealDB 3.x). Persist absent scope ids
+            // as the empty string so the index works; `TryFrom` maps `""` back
+            // to `None` so the public `TaskStream` API is unchanged.
+            agent_id: Some(stream.agent_id.unwrap_or_default()),
+            user_id: Some(stream.user_id.unwrap_or_default()),
             status: stream.status.as_str().to_string(),
             total_tokens: stream.total_tokens,
             model_id: stream.model_id,
@@ -141,6 +202,13 @@ impl From<TaskStream> for DbTaskStream {
             last_active: stream.last_active,
         }
     }
+}
+
+/// Map a persisted scope id back to the public `Option<String>` representation.
+/// Empty strings are written by `DbTaskStream::from` for absent scope ids so the
+/// composite unique index works; decode them back to `None`.
+fn scope_id_from_db(value: Option<String>) -> Option<String> {
+    value.filter(|v| !v.is_empty())
 }
 
 impl TryFrom<DbTaskStream> for TaskStream {
@@ -165,8 +233,8 @@ impl TryFrom<DbTaskStream> for TaskStream {
             id: stream.id,
             name: stream.name,
             description: stream.description,
-            agent_id: stream.agent_id,
-            user_id: stream.user_id,
+            agent_id: scope_id_from_db(stream.agent_id),
+            user_id: scope_id_from_db(stream.user_id),
             status,
             total_tokens: stream.total_tokens,
             model_id: stream.model_id,
@@ -174,6 +242,76 @@ impl TryFrom<DbTaskStream> for TaskStream {
             summary_count: stream.summary_count,
             created_at: stream.created_at,
             last_active: stream.last_active,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, SurrealValue)]
+struct DbTaskStep {
+    id: Option<RecordId>,
+    task_stream_id: Option<RecordId>,
+    ordinal: u32,
+    name: String,
+    description: Option<String>,
+    status: String,
+    idempotency_key: String,
+    result: Option<String>,
+    error: Option<String>,
+    started_at: Option<Datetime>,
+    completed_at: Option<Datetime>,
+    created_at: Datetime,
+}
+
+impl From<TaskStep> for DbTaskStep {
+    fn from(step: TaskStep) -> Self {
+        Self {
+            id: step.id,
+            task_stream_id: step.task_stream_id,
+            ordinal: step.ordinal,
+            name: step.name,
+            description: step.description,
+            status: step.status.as_str().to_string(),
+            idempotency_key: step.idempotency_key,
+            result: step.result,
+            error: step.error,
+            started_at: step.started_at,
+            completed_at: step.completed_at,
+            created_at: step.created_at,
+        }
+    }
+}
+
+impl TryFrom<DbTaskStep> for TaskStep {
+    type Error = anyhow::Error;
+
+    fn try_from(step: DbTaskStep) -> Result<Self> {
+        let record_id = step
+            .id
+            .as_ref()
+            .map(SurrealStorage::record_id_to_string)
+            .unwrap_or_else(|| "<new>".to_string());
+        let status = TaskStepStatus::parse_str(&step.status).map_err(|err| {
+            anyhow::anyhow!(
+                "task_step.status decode failed for record {}: {} (raw={})",
+                record_id,
+                err,
+                step.status
+            )
+        })?;
+
+        Ok(Self {
+            id: step.id,
+            task_stream_id: step.task_stream_id,
+            ordinal: step.ordinal,
+            name: step.name,
+            description: step.description,
+            status,
+            idempotency_key: step.idempotency_key,
+            result: step.result,
+            error: step.error,
+            started_at: step.started_at,
+            completed_at: step.completed_at,
+            created_at: step.created_at,
         })
     }
 }
@@ -423,12 +561,23 @@ impl SurrealStorage {
     /// Used by `new()` for the initial connection.  `new_mem()` (embedded test
     /// helper) skips retries because a missing embedded path is a programmer
     /// error, not a transient failure.
+    /// Connect using the full startup retry budget (`max_connect_retries`).
     async fn connect_with_retry(config: &SurrealConfig) -> Result<Surreal<Any>> {
+        Self::connect_with_attempts(config, config.retry.max_connect_retries).await
+    }
+
+    /// Connect with an explicit attempt cap. The operation-path reconnect uses a
+    /// small cap so it cannot amplify into a multi-minute stall; the initial
+    /// startup connect uses the larger `max_connect_retries`.
+    async fn connect_with_attempts(
+        config: &SurrealConfig,
+        max_attempts: u32,
+    ) -> Result<Surreal<Any>> {
         let mut attempt = 0u32;
         loop {
             match Self::connect_with_config(config).await {
                 Ok(db) => return Ok(db),
-                Err(e) if attempt < config.retry.max_connect_retries => {
+                Err(e) if attempt < max_attempts => {
                     let delay = config.retry.calculate_delay(attempt);
                     tracing::warn!(
                         attempt,
@@ -700,21 +849,33 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
         false
     }
 
-    /// Attempts to reconnect after connection loss.
-    /// Updates ConnectionState: Current → Reconnecting → Connected/Failed
-    async fn reconnect(&self) -> Result<()> {
-        // Set state to Reconnecting
-        {
+    /// Reconnect with an explicit connect-attempt cap. `retry_operation` calls
+    /// this with a small cap (`OPERATION_RECONNECT_ATTEMPTS`) so a reconnection
+    /// cannot amplify into a long stall; the surrounding operation deadline is
+    /// the real bound.
+    ///
+    /// The connection state transitions Reconnecting → Connected/Failed. A
+    /// `ReconnectGuard` ensures that if this future is cancelled mid-connect
+    /// (e.g. the operation deadline fires), the state is not stranded in
+    /// `Reconnecting` — it is forced to `Failed` on drop so the storage
+    /// instance stays usable (subsequent calls retry rather than bail forever).
+    async fn reconnect_with_attempts(&self, max_attempts: u32) -> Result<()> {
+        // Set state to Reconnecting, armed with a cancellation-safe guard.
+        let guard = {
             let mut state = self.connection.write().expect(
                 "Connection lock poisoned - another thread panicked while holding the lock",
             );
             *state = ConnectionState::Reconnecting;
             tracing::warn!("Connection lost, attempting reconnection");
-        }
+            ReconnectGuard {
+                connection: Arc::clone(&self.connection),
+            }
+        };
 
         // Attempt to establish new connection
-        match Self::connect_with_retry(&self.connection_info.config).await {
+        match Self::connect_with_attempts(&self.connection_info.config, max_attempts).await {
             Ok(db) => {
+                guard.disarm();
                 let mut state = self.connection.write().expect(
                     "Connection lock poisoned - another thread panicked while holding the lock",
                 );
@@ -723,6 +884,7 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
                 Ok(())
             }
             Err(err) => {
+                guard.disarm();
                 let error_msg = format!("{}", err);
                 let mut state = self.connection.write().expect(
                     "Connection lock poisoned - another thread panicked while holding the lock",
@@ -735,8 +897,41 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
     }
 
     /// Generic retry wrapper for database operations.
-    /// Handles connection extraction, error classification, reconnection, and exponential backoff.
+    ///
+    /// Handles connection extraction, error classification, reconnection, and
+    /// exponential backoff — all under a single wall-clock deadline
+    /// (`operation_deadline_ms`). When the deadline is exceeded the operation
+    /// returns a typed error instead of stalling. This bounds the previous
+    /// `retry × reconnect × connect_with_retry` amplification.
     async fn retry_operation<F, R, Fut>(&self, op_name: &str, op: F) -> Result<R>
+    where
+        F: Fn(Surreal<Any>) -> Fut,
+        Fut: std::future::Future<Output = Result<R>>,
+    {
+        use tracing::Instrument as _;
+
+        let deadline =
+            Duration::from_millis(self.connection_info.config.retry.operation_deadline_ms);
+        let span = tracing::debug_span!("retry_operation", operation = op_name);
+
+        match tokio::time::timeout(
+            deadline,
+            self.retry_operation_inner(op_name, op).instrument(span),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(anyhow::anyhow!(
+                "Operation '{}' exceeded the {}ms deadline and was aborted",
+                op_name,
+                deadline.as_millis()
+            )),
+        }
+    }
+
+    /// Inner retry loop. Always run under the `tokio::time::timeout` budget
+    /// established by `retry_operation`.
+    async fn retry_operation_inner<F, R, Fut>(&self, op_name: &str, op: F) -> Result<R>
     where
         F: Fn(Surreal<Any>) -> Fut,
         Fut: std::future::Future<Output = Result<R>>,
@@ -770,8 +965,12 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
                     if attempt < max_retries - 1
                         && self.is_retriable_error(last_error.as_ref().unwrap())
                     {
-                        // Attempt reconnection
-                        if let Err(reconnect_err) = self.reconnect().await {
+                        // Reconnect with a small attempt cap — the operation
+                        // deadline is the real bound, not this count.
+                        if let Err(reconnect_err) = self
+                            .reconnect_with_attempts(OPERATION_RECONNECT_ATTEMPTS)
+                            .await
+                        {
                             tracing::warn!(
                                 operation = op_name,
                                 attempt = attempt + 1,
@@ -839,6 +1038,82 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
 
     fn decode_task_streams(records: Vec<DbTaskStream>) -> Result<Vec<TaskStream>> {
         records.into_iter().map(Self::decode_task_stream).collect()
+    }
+
+    /// Update a `TaskStream`'s status, scoped to the caller's `user_id`/`agent_id`.
+    /// A cross-scope call matches zero rows and surfaces a "not found" error.
+    async fn update_task_stream_status(
+        &self,
+        name: &str,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+        status: TaskStreamStatus,
+    ) -> Result<TaskStream> {
+        let db = {
+            let state = self.connection.read().expect(
+                "Connection lock poisoned - another thread panicked while holding the lock",
+            );
+            match &*state {
+                ConnectionState::Connected(db) => db.clone(),
+                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
+                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+            }
+        };
+        let mut sql = "UPDATE task_stream SET status = $status WHERE name = $name".to_string();
+        if user_id.is_some() {
+            sql.push_str(" AND user_id = $uid");
+        }
+        if agent_id.is_some() {
+            sql.push_str(" AND agent_id = $aid");
+        }
+        sql.push_str(" RETURN AFTER");
+        let mut q = db
+            .query(sql)
+            .bind(("name", name.to_string()))
+            .bind(("status", status.as_str()));
+        if let Some(v) = user_id {
+            q = q.bind(("uid", v.to_string()));
+        }
+        if let Some(v) = agent_id {
+            q = q.bind(("aid", v.to_string()));
+        }
+        let mut res = q.await?;
+        let updated: Option<DbTaskStream> = res.take(0)?;
+        let updated = updated.with_context(|| format!("TaskStream '{}' not found", name))?;
+        Self::decode_task_stream(updated)
+    }
+
+    fn decode_task_step(record: DbTaskStep) -> Result<TaskStep> {
+        record.try_into()
+    }
+
+    fn decode_task_steps(records: Vec<DbTaskStep>) -> Result<Vec<TaskStep>> {
+        records.into_iter().map(Self::decode_task_step).collect()
+    }
+
+    /// Whether an error chain represents a SurrealDB UNIQUE index violation.
+    /// Used to recover from the TOCTOU race in `add_task_step` — narrowly
+    /// matched so non-uniqueness errors are never swallowed.
+    fn is_unique_violation(err: &anyhow::Error) -> bool {
+        let msg = format!("{err:#}").to_lowercase();
+        msg.contains("already contains") || (msg.contains("index") && msg.contains("unique"))
+    }
+
+    /// Look up a single `TaskStep` by its `idempotency_key`. Returns `None`
+    /// when no step with that key exists. Backs the idempotency checks in
+    /// `add_task_step` and `complete_step`.
+    async fn find_task_step_by_key(&self, idempotency_key: &str) -> Result<Option<TaskStep>> {
+        let db = self.db()?;
+        let steps: Vec<DbTaskStep> = db
+            .query("SELECT * FROM task_step WHERE idempotency_key = $key LIMIT 1")
+            .bind(("key", idempotency_key.to_string()))
+            .await?
+            .take(0)?;
+        steps
+            .into_iter()
+            .next()
+            .map(Self::decode_task_step)
+            .transpose()
     }
 
     fn decode_mindmap(record: DbMindMap) -> Result<MindMap> {
@@ -946,11 +1221,11 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
         let edge_values = serde_json::to_value(edges)
             .with_context(|| format!("{op}: edge serialization failed"))?;
         let mut response = db
-            .query(
+            .query(format!(
                 "UPDATE type::record($table, $key) \
                  SET nodes = $nodes, edges = $edges, updated_at = $updated_at \
-                 RETURN AFTER",
-            )
+                 RETURN AFTER TIMEOUT {MINDMAP_UPDATE_TIMEOUT}"
+            ))
             .bind(("table", table))
             .bind(("key", key))
             .bind(("nodes", nodes))
@@ -988,11 +1263,11 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
         };
         let (table, key) = Self::record_id_parts(id);
         let mut response = db
-            .query(
+            .query(format!(
                 "UPDATE type::record($table, $key) \
                  SET nodes = array::append(nodes, $node), updated_at = $updated_at \
-                 RETURN AFTER",
-            )
+                 RETURN AFTER TIMEOUT {MINDMAP_UPDATE_TIMEOUT}"
+            ))
             .bind(("table", table))
             .bind(("key", key))
             .bind(("node", node))
@@ -1031,11 +1306,11 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
         let edge_value = serde_json::to_value(edge)
             .with_context(|| format!("{op}: edge serialization failed"))?;
         let mut response = db
-            .query(
+            .query(format!(
                 "UPDATE type::record($table, $key) \
                  SET edges = array::append(edges, $edge), updated_at = $updated_at \
-                 RETURN AFTER",
-            )
+                 RETURN AFTER TIMEOUT {MINDMAP_UPDATE_TIMEOUT}"
+            ))
             .bind(("table", table))
             .bind(("key", key))
             .bind(("edge", edge_value))
@@ -1056,6 +1331,37 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
     fn estimate_tokens(text: &str) -> u32 {
         // Rough heuristic: ~4 chars per token (good enough for budget tracking)
         (text.len() as u32).div_ceil(4)
+    }
+
+    /// Trigger auto-summarization when the stream's running token total crosses
+    /// the model's summarization threshold. Runs inline; failures are logged but
+    /// non-fatal so a summarization error never loses the memory that was added.
+    async fn maybe_summarize_after_add(
+        &self,
+        stream_name: &str,
+        updated_stream: &TaskStream,
+        stored: Memory,
+    ) -> Result<Memory> {
+        if updated_stream.needs_summarization() {
+            let model_id = updated_stream
+                .model_id
+                .clone()
+                .unwrap_or_else(|| "default".to_string());
+            // Scope the summary memory identically to the stream's memories.
+            let agent_id = updated_stream.agent_id.as_deref();
+            let user_id = updated_stream.user_id.as_deref();
+            if let Err(e) = self
+                .auto_summarize_task_stream(stream_name, user_id, agent_id, &model_id)
+                .await
+            {
+                tracing::warn!(
+                    stream = stream_name,
+                    error = %e,
+                    "Auto-summarization failed (non-fatal)"
+                );
+            }
+        }
+        Ok(stored)
     }
 
     fn model_context_budget(model_name: &str) -> u64 {
@@ -1648,7 +1954,12 @@ impl MemoryStorage for SurrealStorage {
             .and_then(Self::decode_task_stream)
     }
 
-    async fn get_task_stream(&self, name: &str) -> Result<Option<TaskStream>> {
+    async fn get_task_stream(
+        &self,
+        name: &str,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> Result<Option<TaskStream>> {
         let db = {
             let state = self.connection.read().expect(
                 "Connection lock poisoned - another thread panicked while holding the lock",
@@ -1659,11 +1970,21 @@ impl MemoryStorage for SurrealStorage {
                 ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
             }
         };
-        let result: Vec<DbTaskStream> = db
-            .query("SELECT * FROM task_stream WHERE name = $name")
-            .bind(("name", name.to_string()))
-            .await?
-            .take(0)?;
+        let mut sql = "SELECT * FROM task_stream WHERE name = $name".to_string();
+        if user_id.is_some() {
+            sql.push_str(" AND user_id = $uid");
+        }
+        if agent_id.is_some() {
+            sql.push_str(" AND agent_id = $aid");
+        }
+        let mut q = db.query(&sql).bind(("name", name.to_string()));
+        if let Some(v) = user_id {
+            q = q.bind(("uid", v.to_string()));
+        }
+        if let Some(v) = agent_id {
+            q = q.bind(("aid", v.to_string()));
+        }
+        let result: Vec<DbTaskStream> = q.await?.take(0)?;
         result
             .into_iter()
             .next()
@@ -1671,9 +1992,15 @@ impl MemoryStorage for SurrealStorage {
             .transpose()
     }
 
-    async fn add_to_task_stream(&self, stream_name: &str, mut memory: Memory) -> Result<Memory> {
+    async fn add_to_task_stream(
+        &self,
+        stream_name: &str,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+        mut memory: Memory,
+    ) -> Result<Memory> {
         let stream = self
-            .get_task_stream(stream_name)
+            .get_task_stream(stream_name, user_id, agent_id)
             .await?
             .with_context(|| format!("TaskStream '{}' not found", stream_name))?;
 
@@ -1681,23 +2008,72 @@ impl MemoryStorage for SurrealStorage {
             anyhow::bail!("TaskStream '{}' is not active", stream_name);
         }
 
-        // Link memory to stream
-        if let Some(id) = &stream.id {
-            memory.task_stream_id = Some(id.clone());
+        let stream_id = stream.id.clone().with_context(|| "TaskStream has no id")?;
+
+        // Link memory to stream.
+        memory.task_stream_id = Some(stream_id.clone());
+
+        // Compute embedding + token count up front (same as `add_memory`).
+        let embedding = self.embed_text(&memory.content).await?;
+        if memory.token_count.is_none() {
+            memory.token_count = Some(Self::estimate_tokens(&memory.content));
         }
 
-        let stored = self.add_memory(memory).await?;
+        // Semantic deduplication at the 0.92 threshold, matching `add_memory`.
+        // If an existing memory is a near-duplicate, update it in place: its
+        // tokens are already counted in `total_tokens`, so we must NOT bump
+        // the counter again.
+        let candidates = self
+            .search_memories(
+                &memory.content,
+                memory.user_id.as_deref(),
+                memory.agent_id.as_deref(),
+                memory.session_id.as_deref(),
+                None,
+                5,
+            )
+            .await?;
+        for candidate in candidates {
+            if let Some(c_emb) = &candidate.embedding
+                && Self::cosine_similarity(&embedding, c_emb) >= 0.92
+                && let Some(id) = &candidate.id
+            {
+                let id_str = Self::record_id_to_string(id);
+                let stored = self.update_memory(&id_str, memory.content).await?;
+                let updated_stream = self
+                    .get_task_stream(stream_name, user_id, agent_id)
+                    .await?
+                    .with_context(|| {
+                        format!("TaskStream '{}' disappeared during dedup add", stream_name)
+                    })?;
+                return self
+                    .maybe_summarize_after_add(stream_name, &updated_stream, stored)
+                    .await;
+            }
+        }
 
-        // Standardised token count: prefer stored value, fall back to heuristic estimate.
-        // This matches the fallback logic used in `get_context_for_task` so that
-        // `total_tokens` stays consistent with per-memory token sums.
-        let added_tokens = stored
+        // H-2: insert the new memory row, its history record, and the
+        // `total_tokens` counter bump inside ONE SurrealDB transaction so no
+        // concurrent reader can observe a memory that is not yet counted, and
+        // concurrent adds cannot interleave a half-applied state.
+        let added_tokens = memory
             .token_count
             .map(|t| t as u64)
-            .unwrap_or_else(|| Self::estimate_tokens(&stored.content) as u64);
+            .unwrap_or_else(|| Self::estimate_tokens(&memory.content) as u64);
 
-        // Verify the update actually found and modified the stream record.
-        let db_upd = {
+        let now = Datetime::default();
+        memory.embedding = Some(embedding);
+        memory.created_at = now;
+        memory.updated_at = now;
+        memory.version = 1;
+        let db_memory = DbMemory::from(memory);
+
+        // Generate the memory key client-side so every statement in the
+        // transaction can reference the same record id without depending on
+        // SurrealDB `LET`/response-index semantics.
+        let memory_key = Uuid::new_v4().to_string();
+
+        let db = {
             let state = self.connection.read().expect(
                 "Connection lock poisoned - another thread panicked while holding the lock",
             );
@@ -1707,56 +2083,77 @@ impl MemoryStorage for SurrealStorage {
                 ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
             }
         };
-        let mut res = db_upd
-            .query(
-                "UPDATE task_stream \
-                 SET total_tokens += $tokens, last_active = $now \
-                 WHERE name = $name \
-                 RETURN AFTER",
-            )
-            .bind(("tokens", added_tokens))
-            .bind(("now", Datetime::default()))
-            .bind(("name", stream_name.to_string()))
-            .await?;
-        let updated_stream: Option<DbTaskStream> = res.take(0)?;
-        let updated_stream = updated_stream.with_context(|| {
-            format!(
-                "TaskStream '{}' disappeared during token update",
-                stream_name
-            )
-        })?;
-        let updated_stream = Self::decode_task_stream(updated_stream)?;
 
-        // Trigger auto-summarization when the running token total crosses 80 % of
-        // the model's context budget.  Run inline; the operation is async but
-        // bounded and callers already await this method.
-        if updated_stream.needs_summarization() {
-            let model_id = updated_stream
-                .model_id
-                .clone()
-                .unwrap_or_else(|| "default".to_string());
-            // Pass through agent_id / user_id from the stream so the summary
-            // memory is scoped identically to the other memories in the stream.
-            let agent_id = updated_stream.agent_id.as_deref();
-            let user_id = updated_stream.user_id.as_deref();
-            if let Err(e) = self
-                .auto_summarize_task_stream(stream_name, user_id, agent_id, &model_id)
-                .await
-            {
-                tracing::warn!(
-                    stream = stream_name,
-                    error = %e,
-                    "Auto-summarization failed (non-fatal)"
-                );
-            }
+        let mut txn_sql = "BEGIN TRANSACTION;\n\
+             CREATE type::record('memory', $mkey) CONTENT $memory;\n\
+             INSERT INTO memory_history { memory_id: type::record('memory', $mkey), \
+             version: 1, old_content: NONE, new_content: $content, \
+             changed_at: $now, change_type: 'created' };\n\
+             UPDATE task_stream SET total_tokens += $tokens, last_active = $now \
+             WHERE name = $name"
+            .to_string();
+        if user_id.is_some() {
+            txn_sql.push_str(" AND user_id = $uid");
         }
+        if agent_id.is_some() {
+            txn_sql.push_str(" AND agent_id = $aid");
+        }
+        txn_sql.push_str(";\nCOMMIT TRANSACTION;");
 
-        Ok(stored)
+        let mut txn_q = db
+            .query(txn_sql)
+            .bind(("mkey", memory_key.clone()))
+            .bind(("memory", db_memory.clone()))
+            .bind(("content", db_memory.content.clone()))
+            .bind(("tokens", added_tokens))
+            .bind(("now", now))
+            .bind(("name", stream_name.to_string()));
+        if let Some(v) = user_id {
+            txn_q = txn_q.bind(("uid", v.to_string()));
+        }
+        if let Some(v) = agent_id {
+            txn_q = txn_q.bind(("aid", v.to_string()));
+        }
+        let res = txn_q
+            .await
+            .context("add_to_task_stream transaction failed")?;
+        // `.check()` surfaces any per-statement error so a rejected transaction
+        // fails loudly rather than silently dropping the write.
+        res.check()
+            .context("add_to_task_stream transaction was rejected")?;
+
+        // Index-stability: whether BEGIN/COMMIT occupy result-set slots is
+        // driver-dependent, so we do NOT rely on a hardcoded statement index
+        // into the transaction response. Instead we re-fetch the just-created
+        // row by its client-generated key in a separate scoped SELECT.
+        let mut fetch_res = db
+            .query("SELECT * FROM type::record('memory', $mkey)")
+            .bind(("mkey", memory_key.clone()))
+            .await
+            .context("add_to_task_stream: failed to read back stored memory")?;
+        let created: Option<DbMemory> = fetch_res.take(0)?;
+        let stored =
+            created.with_context(|| "add_to_task_stream: no memory returned after transaction")?;
+        let stored = Self::decode_memory(stored)?;
+
+        let updated_stream = self
+            .get_task_stream(stream_name, user_id, agent_id)
+            .await?
+            .with_context(|| {
+                format!(
+                    "TaskStream '{}' disappeared during token update",
+                    stream_name
+                )
+            })?;
+        self.maybe_summarize_after_add(stream_name, &updated_stream, stored)
+            .await
     }
 
     async fn get_context_for_task(
         &self,
         stream_name: &str,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
         model_name: &str,
         max_tokens: Option<u64>,
     ) -> Result<ContextWindow> {
@@ -1775,7 +2172,7 @@ impl MemoryStorage for SurrealStorage {
 
         let stream_id = {
             let stream = self
-                .get_task_stream(stream_name)
+                .get_task_stream(stream_name, user_id, agent_id)
                 .await?
                 .with_context(|| format!("TaskStream '{}' not found", stream_name))?;
             stream.id.with_context(|| "TaskStream has no id")?
@@ -1859,9 +2256,14 @@ impl MemoryStorage for SurrealStorage {
         Self::decode_task_streams(results)
     }
 
-    async fn delete_task_stream(&self, name: &str) -> Result<()> {
+    async fn delete_task_stream(
+        &self,
+        name: &str,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> Result<()> {
         let stream = self
-            .get_task_stream(name)
+            .get_task_stream(name, user_id, agent_id)
             .await?
             .with_context(|| format!("TaskStream '{}' not found", name))?;
         let stream_id = stream.id.clone().context("TaskStream missing id")?;
@@ -1915,46 +2317,24 @@ impl MemoryStorage for SurrealStorage {
         Ok(())
     }
 
-    async fn archive_task_stream(&self, name: &str) -> Result<TaskStream> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
-        let mut res = db
-            .query("UPDATE task_stream SET status = $status WHERE name = $name RETURN AFTER")
-            .bind(("name", name.to_string()))
-            .bind(("status", TaskStreamStatus::Archived.as_str()))
-            .await?;
-        let updated: Option<DbTaskStream> = res.take(0)?;
-        let updated = updated.with_context(|| format!("TaskStream '{}' not found", name))?;
-        Self::decode_task_stream(updated)
+    async fn archive_task_stream(
+        &self,
+        name: &str,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> Result<TaskStream> {
+        self.update_task_stream_status(name, user_id, agent_id, TaskStreamStatus::Archived)
+            .await
     }
 
-    async fn pause_task_stream(&self, name: &str) -> Result<TaskStream> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
-        let mut res = db
-            .query("UPDATE task_stream SET status = $status WHERE name = $name RETURN AFTER")
-            .bind(("name", name.to_string()))
-            .bind(("status", TaskStreamStatus::Paused.as_str()))
-            .await?;
-        let updated: Option<DbTaskStream> = res.take(0)?;
-        let updated = updated.with_context(|| format!("TaskStream '{}' not found", name))?;
-        Self::decode_task_stream(updated)
+    async fn pause_task_stream(
+        &self,
+        name: &str,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> Result<TaskStream> {
+        self.update_task_stream_status(name, user_id, agent_id, TaskStreamStatus::Paused)
+            .await
     }
 
     // ── Hybrid BM25 + HNSW Search ─────────────────────────────────────────────
@@ -2194,6 +2574,169 @@ impl MemoryStorage for SurrealStorage {
         Ok(count)
     }
 
+    // ── TaskSteps ────────────────────────────────────────────────────────────
+
+    async fn add_task_step(
+        &self,
+        stream_name: &str,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+        mut step: TaskStep,
+    ) -> Result<TaskStep> {
+        let stream = self
+            .get_task_stream(stream_name, user_id, agent_id)
+            .await?
+            .with_context(|| format!("TaskStream '{}' not found", stream_name))?;
+        let stream_id = stream.id.clone().context("TaskStream has no id")?;
+
+        // Idempotency: if a step with this key already exists, return it
+        // verbatim — no duplicate row, no side effects.
+        if let Some(existing) = self.find_task_step_by_key(&step.idempotency_key).await? {
+            return Ok(existing);
+        }
+
+        let idempotency_key = step.idempotency_key.clone();
+        step.task_stream_id = Some(stream_id);
+        step.created_at = Datetime::default();
+        let key = Uuid::new_v4().to_string();
+        let payload = DbTaskStep::from(step);
+        match self
+            .create_record::<_, DbTaskStep>("task_step", &key, payload, "add_task_step")
+            .await
+        {
+            Ok(record) => Self::decode_task_step(record),
+            Err(err) if Self::is_unique_violation(&err) => {
+                // TOCTOU: a concurrent add_task_step won the race on the
+                // unique idempotency_key index. Treat as "already created"
+                // and return the existing step so the call stays idempotent.
+                self.find_task_step_by_key(&idempotency_key)
+                    .await?
+                    .with_context(|| {
+                        format!(
+                            "add_task_step: unique violation but step '{idempotency_key}' \
+                             not found on re-fetch"
+                        )
+                    })
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn update_task_step_status(
+        &self,
+        idempotency_key: &str,
+        status: TaskStepStatus,
+        result: Option<String>,
+        error: Option<String>,
+    ) -> Result<TaskStep> {
+        let db = self.db()?;
+        let now = Datetime::default();
+        // Set started_at the first time the step leaves Pending — for ANY
+        // non-Pending target status, including a direct jump to Completed/
+        // Failed (e.g. complete_step without a prior Running transition).
+        // The conditional preserves an existing started_at on re-entry.
+        let set_started = !matches!(status, TaskStepStatus::Pending);
+        // Set completed_at when it reaches a terminal state.
+        let set_completed = matches!(
+            status,
+            TaskStepStatus::Completed | TaskStepStatus::Failed | TaskStepStatus::Skipped
+        );
+
+        let mut sql =
+            String::from("UPDATE task_step SET status = $status, result = $result, error = $error");
+        if set_started {
+            sql.push_str(", started_at = IF started_at IS NONE THEN $now ELSE started_at END");
+        }
+        if set_completed {
+            sql.push_str(", completed_at = $now");
+        }
+        sql.push_str(" WHERE idempotency_key = $key RETURN AFTER");
+
+        let mut res = db
+            .query(sql)
+            .bind(("status", status.as_str().to_string()))
+            .bind(("result", result))
+            .bind(("error", error))
+            .bind(("now", now))
+            .bind(("key", idempotency_key.to_string()))
+            .await
+            .context("update_task_step_status query failed")?;
+        let updated: Option<DbTaskStep> = res.take(0)?;
+        let updated = updated
+            .with_context(|| format!("TaskStep with key '{}' not found", idempotency_key))?;
+        Self::decode_task_step(updated)
+    }
+
+    async fn get_task_steps(
+        &self,
+        stream_name: &str,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> Result<Vec<TaskStep>> {
+        let stream = self
+            .get_task_stream(stream_name, user_id, agent_id)
+            .await?
+            .with_context(|| format!("TaskStream '{}' not found", stream_name))?;
+        let stream_id = stream.id.clone().context("TaskStream has no id")?;
+
+        let db = self.db()?;
+        let steps: Vec<DbTaskStep> = db
+            .query("SELECT * FROM task_step WHERE task_stream_id = $sid ORDER BY ordinal ASC")
+            .bind(("sid", stream_id))
+            .await?
+            .take(0)?;
+        Self::decode_task_steps(steps)
+    }
+
+    async fn get_current_step(
+        &self,
+        stream_name: &str,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> Result<Option<TaskStep>> {
+        // Returns the lowest-ordinal step that is not terminal-done. A Failed
+        // or Running step IS returned (see `is_terminal_done`) so the caller
+        // can resolve it before advancing.
+        let stream = self
+            .get_task_stream(stream_name, user_id, agent_id)
+            .await?
+            .with_context(|| format!("TaskStream '{}' not found", stream_name))?;
+        let stream_id = stream.id.clone().context("TaskStream has no id")?;
+
+        let db = self.db()?;
+        let steps: Vec<DbTaskStep> = db
+            .query(
+                "SELECT * FROM task_step WHERE task_stream_id = $sid \
+                 AND status NOT IN ['completed', 'skipped'] ORDER BY ordinal ASC LIMIT 1",
+            )
+            .bind(("sid", stream_id))
+            .await?
+            .take(0)?;
+        steps
+            .into_iter()
+            .next()
+            .map(Self::decode_task_step)
+            .transpose()
+    }
+
+    async fn complete_step(
+        &self,
+        idempotency_key: &str,
+        result: Option<String>,
+    ) -> Result<TaskStep> {
+        // Idempotent: an already-completed step is returned unchanged so the
+        // result is never re-applied on replay.
+        let existing = self
+            .find_task_step_by_key(idempotency_key)
+            .await?
+            .with_context(|| format!("TaskStep with key '{}' not found", idempotency_key))?;
+        if existing.status == TaskStepStatus::Completed {
+            return Ok(existing);
+        }
+        self.update_task_step_status(idempotency_key, TaskStepStatus::Completed, result, None)
+            .await
+    }
+
     // ── Mindmaps ─────────────────────────────────────────────────────────────
 
     async fn create_mindmap(&self, mut mindmap: MindMap) -> Result<MindMap> {
@@ -2431,7 +2974,7 @@ impl MemoryStorage for SurrealStorage {
         use crate::task_stream::TaskStreamStatus;
 
         // Load the stream
-        let Some(stream) = self.get_task_stream(stream_name).await? else {
+        let Some(stream) = self.get_task_stream(stream_name, user_id, agent_id).await? else {
             return Ok(None);
         };
         if stream.status != TaskStreamStatus::Active {
@@ -2443,13 +2986,18 @@ impl MemoryStorage for SurrealStorage {
             return Ok(None); // nothing to do
         }
 
-        // Fetch stream memories ordered oldest-first
-        let mut scope_parts: Vec<String> = vec!["task_stream_id != NONE".into()];
-        if let Some(u) = user_id {
-            scope_parts.push(format!("user_id = '{}'", u));
+        // C-1: the memory-selection query MUST be bound to this stream's id.
+        // Using `task_stream_id != NONE` previously selected (and deleted)
+        // memories across ALL streams in scope.
+        let stream_id = stream.id.clone().with_context(|| "TaskStream has no id")?;
+
+        // Fetch stream memories ordered oldest-first, scoped to this stream.
+        let mut scope_parts: Vec<String> = vec!["task_stream_id = $sid".into()];
+        if user_id.is_some() {
+            scope_parts.push("user_id = $uid".into());
         }
-        if let Some(a) = agent_id {
-            scope_parts.push(format!("agent_id = '{}'", a));
+        if agent_id.is_some() {
+            scope_parts.push("agent_id = $aid".into());
         }
         let db = {
             let state = self.connection.read().expect(
@@ -2466,7 +3014,14 @@ impl MemoryStorage for SurrealStorage {
             "SELECT * FROM memory WHERE {} ORDER BY created_at ASC LIMIT 200",
             scope_parts.join(" AND ")
         );
-        let memories: Vec<DbMemory> = db.query(&sql).await?.take(0).unwrap_or_default();
+        let mut q = db.query(&sql).bind(("sid", stream_id.clone()));
+        if let Some(u) = user_id {
+            q = q.bind(("uid", u.to_string()));
+        }
+        if let Some(a) = agent_id {
+            q = q.bind(("aid", a.to_string()));
+        }
+        let memories: Vec<DbMemory> = q.await?.take(0).unwrap_or_default();
         let memories = Self::decode_memories(memories)?;
 
         if memories.len() < 4 {
@@ -2477,7 +3032,22 @@ impl MemoryStorage for SurrealStorage {
         let half = memories.len() / 2;
         let to_compress = memories.into_iter().take(half).collect::<Vec<_>>();
 
-        // Build summary content
+        // M-2(a): sum the compacted memories' token counts so the stream's
+        // `total_tokens` counter can be decremented by exactly what we remove.
+        // Use the same estimate fallback as `add_to_task_stream` /
+        // `get_context_for_task` so the counter stays consistent.
+        let compacted_tokens: u64 = to_compress
+            .iter()
+            .map(|m| {
+                m.token_count
+                    .map(|t| t as u64)
+                    .unwrap_or_else(|| Self::estimate_tokens(&m.content) as u64)
+            })
+            .sum();
+
+        // Build summary content. NOTE: a naive concat can itself grow tokens;
+        // a real LLM summarization path is out of scope for this correctness
+        // tier (there is no existing summarization helper to call here).
         let summary_content = format!(
             "[Auto-summary of {} memories from task stream '{}'] {}",
             half,
@@ -2498,20 +3068,40 @@ impl MemoryStorage for SurrealStorage {
             }
         }
 
-        // Store the summary
-        let summary = crate::memory::Memory::new(
+        // M-2(b): the summary memory MUST stay attached to the stream so that
+        // `get_context_for_task` (which filters by `task_stream_id`) returns it.
+        let mut summary = crate::memory::Memory::new(
             summary_content,
             user_id.map(str::to_string),
             agent_id.map(str::to_string),
             None,
             vec!["auto_summary".to_string()],
         );
+        summary.task_stream_id = Some(stream_id.clone());
         let stored = self.add_memory(summary).await?;
 
-        // Update stream summary_count
+        // M-2: the summary memory is now a linked member of the stream, so its
+        // own tokens must be counted in `total_tokens`. `add_memory` only
+        // counts tokens into the memory row, never the stream counter, so the
+        // net effect must be `total_tokens -= compacted; total_tokens +=
+        // summary`. Use the same token-estimate source as the rest of the code.
+        let summary_tokens: u64 = stored
+            .token_count
+            .map(|t| t as u64)
+            .unwrap_or_else(|| Self::estimate_tokens(&stored.content) as u64);
+
+        // M-2(a): decrement `total_tokens` by the compacted total, add the new
+        // summary memory's tokens back, and bump `summary_count`.
         let _: Option<serde_json::Value> = db
-            .query("UPDATE type::table($t) SET summary_count += 1, last_active = time::now() WHERE name = $n")
+            .query(
+                "UPDATE type::table($t) \
+                 SET total_tokens = math::max([0, total_tokens - $compacted]) + $summary, \
+                     summary_count += 1, last_active = time::now() \
+                 WHERE name = $n",
+            )
             .bind(("t", "task_stream"))
+            .bind(("compacted", compacted_tokens))
+            .bind(("summary", summary_tokens))
             .bind(("n", stream_name.to_string()))
             .await?
             .take(0)?;
@@ -3151,21 +3741,21 @@ mod retry_tests {
             ..Default::default()
         };
         let result = SurrealStorage::connect_with_retry(&config).await;
-        // Result can be Ok or Err depending on environment — either is valid here.
-        match result {
-            Ok(_) => assert!(true),
-            Err(_) => assert!(true),
-        }
+        // Result can be Ok or Err depending on environment — the test only
+        // asserts the call completes without panicking.
+        let _ = result;
     }
 
     #[tokio::test]
     async fn test_reconnect_updates_connection_state() {
-        // Test that reconnect() properly transitions state through Reconnecting
-        // If DB is available, it ends in Connected; if not, it ends in Failed
+        // Test that reconnect_with_attempts properly transitions state through
+        // Reconnecting. If DB is available, it ends in Connected; if not, Failed.
         let storage = mock_storage();
 
-        // Call reconnect
-        let result = storage.reconnect().await;
+        // Call reconnect with the operation-path attempt cap
+        let result = storage
+            .reconnect_with_attempts(OPERATION_RECONNECT_ATTEMPTS)
+            .await;
 
         // After reconnect, state should be either Connected (if DB available) or Failed (if not)
         // The important thing is that it's no longer in the initial Failed/Reconnecting state
@@ -3223,6 +3813,101 @@ mod retry_tests {
 
         // Expect failure (no real DB), but method uses retry wrapper
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_task_stream_fast_fails_on_failed_connection() {
+        // C-2 reproduction (failed-connection path): create_task_stream does no
+        // embedding, yet it hung 4 minutes in the incident. Against a Failed
+        // connection it must return a bounded typed error immediately.
+        let storage = mock_storage();
+        let stream = crate::task_stream::TaskStream::new(
+            "c2-repro".to_string(),
+            None,
+            Some("agent-x".to_string()),
+            None,
+        );
+
+        let start = std::time::Instant::now();
+        let result = storage.create_task_stream(stream).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            result.is_err(),
+            "create_task_stream against an unreachable DB must return an error"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "create_task_stream must fail fast, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retry_operation_aborts_on_deadline() {
+        // C-2 core fix: a write must never stall open-endedly. With a live
+        // (Connected) connection and a hung operation closure, retry_operation
+        // must abort at the wall-clock deadline with a typed error.
+        struct MockEmbedding;
+        #[async_trait::async_trait]
+        impl crate::embeddings::EmbeddingService for MockEmbedding {
+            async fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+                Ok(vec![0.0; 1536])
+            }
+            async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
+                Ok(texts.iter().map(|_| vec![0.0; 1536]).collect())
+            }
+            fn dimensions(&self) -> usize {
+                1536
+            }
+        }
+
+        let mut storage = SurrealStorage::new_mem(Arc::new(MockEmbedding))
+            .await
+            .expect("in-memory storage");
+        storage.connection_info.config.retry.operation_deadline_ms = 300;
+
+        let start = std::time::Instant::now();
+        let result: Result<()> = storage
+            .retry_operation("hung_op", |_db| async move {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Ok(())
+            })
+            .await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "a hung operation must return an error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("deadline"),
+            "error must be a typed deadline error, got: {msg}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "operation must abort at the deadline, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reconnect_cancellation_does_not_strand_reconnecting() {
+        // If reconnect_with_attempts is cancelled (e.g. by the operation
+        // deadline) the ReconnectGuard must force state out of Reconnecting so
+        // the storage instance stays usable rather than bailing forever.
+        let storage = mock_storage();
+        // A very short timeout cancels reconnect_with_attempts mid-connect.
+        let _ = tokio::time::timeout(
+            Duration::from_millis(1),
+            storage.reconnect_with_attempts(OPERATION_RECONNECT_ATTEMPTS),
+        )
+        .await;
+
+        // Give the dropped future's guard a moment to run.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let state = storage.connection.read().unwrap();
+        assert!(
+            !matches!(&*state, ConnectionState::Reconnecting),
+            "connection must not be stranded in Reconnecting after cancellation"
+        );
     }
 
     #[test]
@@ -3288,6 +3973,8 @@ mod retry_tests {
             ))),
             connection_info,
             embedding_service: Arc::new(MockEmbedding),
+            #[cfg(feature = "palace")]
+            palace: tokio::sync::OnceCell::new(),
         }
     }
 }

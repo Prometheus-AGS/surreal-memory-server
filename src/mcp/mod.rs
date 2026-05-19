@@ -1,8 +1,9 @@
 use anyhow::Result;
 use rmcp::{
-    ErrorData as McpError, ServerHandler, ServiceExt,
+    ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{CallToolResult, ServerCapabilities, ServerInfo},
+    service::RequestContext,
     tool, tool_handler, tool_router,
     transport::stdio,
 };
@@ -12,18 +13,21 @@ use crate::storage::MemoryStorage;
 
 pub mod handlers;
 pub mod http;
+pub mod progress;
+
+use progress::run_with_progress;
 
 use handlers::{
     AddMemoryParams, AddMindmapEdgeParams, AddMindmapNodeParams, AddObservationsParams,
-    AddToTaskStreamParams, AutoSummarizeTaskStreamParams, CompressMemoriesParams,
-    ConversationParams, CreateEntitiesParams, CreateEntityParams, CreateMindmapParams,
-    CreateRelationParams, CreateRelationsParams, CreateTaskStreamParams, DeleteEntityParams,
-    DeleteMindmapNodeParams, DeleteRelationParams, EntityNameParams, ExpandNeighborsParams,
-    ExportMindmapParams, FindPathParams, GenerateIdeationMindmapParams,
+    AddTaskStepParams, AddToTaskStreamParams, AutoSummarizeTaskStreamParams, CompleteStepParams,
+    CompressMemoriesParams, ConversationParams, CreateEntitiesParams, CreateEntityParams,
+    CreateMindmapParams, CreateRelationParams, CreateRelationsParams, CreateTaskStreamParams,
+    DeleteEntityParams, DeleteMindmapNodeParams, DeleteRelationParams, EntityNameParams,
+    ExpandNeighborsParams, ExportMindmapParams, FindPathParams, GenerateIdeationMindmapParams,
     GeneratePersonaMindmapParams, GetContextParams, GetRelatedParams, HybridSearchParams,
     ListMindmapsParams, MemoryHandler, MemoryIdParams, MindmapNameParams, ScopeFilterParams,
     SearchMemoriesParams, SearchParams, SemanticSearchParams, TaskStreamNameParams, TimeParams,
-    UpdateMemoryParams,
+    UpdateMemoryParams, UpdateTaskStepStatusParams,
 };
 
 use handlers::{
@@ -332,6 +336,56 @@ impl MemoryMcpServer {
         self.handler.pause_task_stream(params).await
     }
 
+    // ── TaskSteps ─────────────────────────────────────────────────────────────
+
+    #[tool(
+        description = "Add an ordered, status-tracked step to a task stream. Idempotent on idempotency_key — re-adding with the same key returns the existing step."
+    )]
+    async fn add_task_step(
+        &self,
+        Parameters(params): Parameters<AddTaskStepParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.handler.add_task_step(params).await
+    }
+
+    #[tool(
+        description = "Update a task step's status (pending/running/completed/failed/skipped), recording result/error and timestamps."
+    )]
+    async fn update_task_step_status(
+        &self,
+        Parameters(params): Parameters<UpdateTaskStepStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.handler.update_task_step_status(params).await
+    }
+
+    #[tool(description = "List all steps of a task stream, ordered by ordinal.")]
+    async fn get_task_steps(
+        &self,
+        Parameters(params): Parameters<TaskStreamNameParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.handler.get_task_steps(params).await
+    }
+
+    #[tool(
+        description = "Get the current (lowest-ordinal not-yet-completed) step of a task stream. Use to resume a multi-step process."
+    )]
+    async fn get_current_step(
+        &self,
+        Parameters(params): Parameters<TaskStreamNameParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.handler.get_current_step(params).await
+    }
+
+    #[tool(
+        description = "Mark a task step completed. Idempotent — completing an already-completed step returns it without re-applying the result."
+    )]
+    async fn complete_step(
+        &self,
+        Parameters(params): Parameters<CompleteStepParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.handler.complete_step(params).await
+    }
+
     // ── Mindmaps ─────────────────────────────────────────────────────────────
 
     #[tool(
@@ -364,16 +418,28 @@ impl MemoryMcpServer {
     async fn add_mindmap_node(
         &self,
         Parameters(params): Parameters<AddMindmapNodeParams>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        self.handler.add_mindmap_node(params).await
+        run_with_progress(
+            &ctx,
+            "add_mindmap_node",
+            self.handler.add_mindmap_node(params),
+        )
+        .await
     }
 
     #[tool(description = "Add a directed or undirected edge between two nodes in a mindmap.")]
     async fn add_mindmap_edge(
         &self,
         Parameters(params): Parameters<AddMindmapEdgeParams>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        self.handler.add_mindmap_edge(params).await
+        run_with_progress(
+            &ctx,
+            "add_mindmap_edge",
+            self.handler.add_mindmap_edge(params),
+        )
+        .await
     }
 
     #[tool(description = "Delete a node (and its incident edges) from a mindmap.")]
@@ -436,8 +502,14 @@ impl MemoryMcpServer {
     async fn compress_memories(
         &self,
         Parameters(params): Parameters<CompressMemoriesParams>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        self.handler.compress_memories(params).await
+        run_with_progress(
+            &ctx,
+            "compress_memories",
+            self.handler.compress_memories(params),
+        )
+        .await
     }
 
     #[tool(
@@ -458,8 +530,14 @@ impl MemoryMcpServer {
     async fn auto_summarize_task_stream(
         &self,
         Parameters(params): Parameters<AutoSummarizeTaskStreamParams>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        self.handler.auto_summarize_task_stream(params).await
+        run_with_progress(
+            &ctx,
+            "auto_summarize_task_stream",
+            self.handler.auto_summarize_task_stream(params),
+        )
+        .await
     }
 
     #[tool(
@@ -530,8 +608,9 @@ impl MemoryMcpServer {
     async fn palace_ingest(
         &self,
         Parameters(params): Parameters<PalaceIngestParams>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        self.handler.palace_ingest(params).await
+        run_with_progress(&ctx, "palace_ingest", self.handler.palace_ingest(params)).await
     }
 
     #[tool(description = "Delete a drawer from the memory palace by its record ID.")]
@@ -575,6 +654,8 @@ impl ServerHandler for MemoryMcpServer {
                 TaskStreams: create_task_stream, get_task_stream, add_to_task_stream, \
                 get_context_for_task, list_task_streams, archive_task_stream, auto_summarize_task_stream, \
                 pause_task_stream. \
+                TaskSteps: add_task_step, update_task_step_status, get_task_steps, get_current_step, \
+                complete_step. \
                 Mindmaps: create_mindmap, get_mindmap, list_mindmaps, add_mindmap_node, \
                 add_mindmap_edge, delete_mindmap_node, delete_mindmap, export_mindmap, \
                 generate_persona_mindmap, generate_ideation_mindmap.",
