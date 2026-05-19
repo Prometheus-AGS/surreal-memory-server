@@ -1,0 +1,49 @@
+{
+  "phase": "uar-consumer-resync",
+  "assessment_complete": true,
+  "plan_complete": true,
+  "execution_complete": false,
+  "reflection_complete": false,
+  "assessment_path": ".kbd-orchestrator/phases/uar-consumer-resync/assessment.md",
+  "plan_path": ".kbd-orchestrator/phases/uar-consumer-resync/plan.md",
+  "change_backend": "openspec",
+  "changes_total": 4,
+  "changes_completed": 0,
+  "changes": {
+    "commit-and-push-library": "PLANNED",
+    "resync-uar-consumer": "PLANNED",
+    "resync-librefang-consumer": "PLANNED",
+    "reconcile-library-pin-policy": "PLANNED"
+  },
+  "change_order": [
+    "commit-and-push-library",
+    "resync-uar-consumer",
+    "resync-librefang-consumer",
+    "reconcile-library-pin-policy"
+  ],
+  "change_dependencies": {
+    "resync-uar-consumer": ["commit-and-push-library"],
+    "resync-librefang-consumer": ["commit-and-push-library"],
+    "reconcile-library-pin-policy": ["resync-uar-consumer", "resync-librefang-consumer"]
+  },
+  "headline_verdict": "Medium gap, BLOCKED on an external prerequisite. 1 BLOCKER, 1 HIGH, 3 MEDIUM, 1 LOW.",
+  "finding_counts": { "blocker": 1, "high": 1, "medium": 3, "low": 1 },
+  "consumers": [
+    "universal-agent-runtime (/Users/gqadonis/Projects/prometheus/universal-agent-runtime)",
+    "librefang (/Users/gqadonis/Projects/references/librefang)"
+  ],
+  "blocking_prerequisite": "F-1: both completed library phases (task-stream-reliability + write-path-reliability, ~31 uncommitted files incl. task_step.rs) must be committed and pushed to surreal-memory-server main before any cargo update can resolve the resync target.",
+  "key_findings": [
+    "F-1 BLOCKER: all library work uncommitted; consumers pin branch=main; cargo update cannot see a working tree.",
+    "F-2 HIGH: UAR src/uar/memory/mcp_server.rs has 4 stale TaskStream call sites (get_task_stream, add_to_task_stream, get_context_for_task, archive_task_stream) missing user_id/agent_id scope args.",
+    "F-3 MEDIUM: librefang wraps SurrealStorage, never calls TaskStream surface — low-risk cargo update + build check.",
+    "F-4 MEDIUM: both Cargo.lock files stale (UAR 01e917ac, librefang edca63d) — refresh + commit.",
+    "F-5 MEDIUM: library migrations v17-v19 run against consumers' existing embedded DBs on first start after resync — v18 backfills task_stream rows; verify safe.",
+    "F-6 LOW: branch=main pin is a supply-chain hazard; CLAUDE.md rule #7 says rev pin — reconcile."
+  ],
+  "verified_not_broken": "Neither consumer implements MemoryStorage (both wrap SurrealStorage) so the 5 new no-default trait methods do not break compiles. Both use RetryConfig::default()/SurrealConfig{..Default::default()} so the new operation_deadline_ms field does not break them. SurrealStorage::new signature unchanged. SurrealDB =3.0.5 aligned across all 3 repos.",
+  "created": "2026-05-19",
+  "last_updated": "2026-05-19",
+  "last_tool": "claude-code/kbd-plan",
+  "next_step": "kbd-execute commit-and-push-library"
+}

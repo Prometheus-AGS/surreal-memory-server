@@ -1,0 +1,61 @@
+{
+  "phase": "write-path-reliability",
+  "assessment_complete": true,
+  "plan_complete": true,
+  "execution_complete": true,
+  "reflection_complete": true,
+  "assessment_path": ".kbd-orchestrator/phases/write-path-reliability/assessment.md",
+  "plan_path": ".kbd-orchestrator/phases/write-path-reliability/plan.md",
+  "reflection_path": ".kbd-orchestrator/phases/write-path-reliability/reflection.md",
+  "change_backend": "openspec",
+  "headline_verdict": "Large gap. 2 CRITICAL, 4 HIGH, 2 MEDIUM, 1 LOW. Write path hangs unbounded; clients abandon the tool.",
+  "changes_total": 3,
+  "changes_completed": 3,
+  "changes": {
+    "bound-embedding-model-loading": "ARCHIVED",
+    "eliminate-write-path-stalls": "ARCHIVED",
+    "add-mcp-progress-reporting": "ARCHIVED"
+  },
+  "change_order": [
+    "bound-embedding-model-loading",
+    "eliminate-write-path-stalls",
+    "add-mcp-progress-reporting"
+  ],
+  "change_results": {
+    "bound-embedding-model-loading": {
+      "status": "ARCHIVED",
+      "archive": "openspec/changes/archive/2026-05-18-bound-embedding-model-loading",
+      "closes": ["C-1", "H-3", "H-4", "L-1", "M-2"],
+      "qa_gate": "rust-reviewer — first pass BLOCK (1 CRITICAL, 2 HIGH); refined; re-review APPROVED"
+    },
+    "eliminate-write-path-stalls": {
+      "status": "ARCHIVED",
+      "archive": "openspec/changes/archive/2026-05-18-eliminate-write-path-stalls",
+      "closes": ["C-2", "H-2"],
+      "qa_gate": "rust-reviewer — first pass BLOCK (1 HIGH stranded Reconnecting state, 3 MEDIUM); refined (ReconnectGuard); re-review APPROVED",
+      "key_fix": "ReconnectGuard transitions Reconnecting->Failed if reconnect cancelled by the deadline"
+    },
+    "add-mcp-progress-reporting": {
+      "status": "ARCHIVED",
+      "archive": "openspec/changes/archive/2026-05-19-add-mcp-progress-reporting",
+      "closes": ["H-1", "M-1"],
+      "build": "cargo check/clippy --workspace --features embedded,metal --lib --bins — clean; fmt clean",
+      "tests": "40 bin lib + 17 + 36 library tests pass; new: mindmap_update_path_succeeds_under_timeout_bound, progress heartbeat-interval test",
+      "qa_gate": "rust-reviewer — APPROVED first pass (3 MEDIUM follow-ups); ticker drop-guard refinement applied anyway",
+      "tasks_api_decision": "DEFER — all ops now bounded ≤~30s; progress heartbeats address the failure mode; Tasks API adds stateful lifecycle for zero current benefit"
+    }
+  },
+  "headline_result": "All 9 assessment findings closed across 3 ordered OpenSpec changes. Canonical write-path spec created (7 requirements).",
+  "deferred_followups": [
+    "Pre-existing compile error tests/contract_alignment_test.rs:300/312 (Option<HashMap> vs Option<Value>) blocks binary cargo check --tests; exists on clean main; needs its own change.",
+    "Embedding hot-path under high concurrency: spawn_blocking + blocking_lock can accumulate OS threads; consider a bounded semaphore if embed concurrency grows.",
+    "RetryConfig gained a pub field operation_deadline_ms — breaking struct-literal change for UAR; fold into the standing UAR consumer resync.",
+    "update_task_stream_status reads the connection directly and bypasses the retry_operation deadline wrapper — pre-existing; route it through retry_operation.",
+    "MCP progress: no behavioral test that a heartbeat fires (needs a mock Peer / client-server pair) — follow-up.",
+    "Standing task-stream-reliability follow-ups remain: UAR consumer resync, TaskStep REST endpoints, REST JWT/header scope extraction."
+  ],
+  "created": "2026-05-17",
+  "last_updated": "2026-05-19",
+  "last_tool": "claude-code/kbd-reflect",
+  "next_step": "kbd-new-phase uar-consumer-resync"
+}

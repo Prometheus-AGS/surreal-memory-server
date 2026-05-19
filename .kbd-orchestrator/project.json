@@ -1,0 +1,22 @@
+{
+  "name": "surreal-memory-server",
+  "description": "High-performance MCP memory server in Rust with semantic search, knowledge graph, TaskStreams, mindmaps, and Memory Palace; ships a binary and an embeddable library crate.",
+  "active_phase": "task-stream-reliability",
+  "focus_project_path": "/Users/gqadonis/Projects/prometheus/surreal-memory-server",
+  "spec_paths": ["openspec/specs"],
+  "openspec_available": true,
+  "constraint_file": ".kbd-orchestrator/constraints.md",
+  "build_health_command": "cargo check --workspace --features embedded,metal",
+  "test_command": "cargo test --all-targets --features embedded,metal",
+  "lint_command": "cargo clippy --all-targets --features embedded,metal -- -D warnings",
+  "dev_command": "EMBEDDING_PROVIDER=local ./target/release/surreal-memory-server",
+  "preferred_planning_agent": "antigravity",
+  "preferred_execution_agents": [],
+  "agents_config": {},
+  "workspace": {
+    "workspace_file": "/Users/gqadonis/Projects/prometheus/recursive-llm.code-workspace",
+    "folders": [
+      { "path": "/Users/gqadonis/Projects/prometheus/surreal-memory-server", "role": "focus", "write_access": true }
+    ]
+  }
+}
