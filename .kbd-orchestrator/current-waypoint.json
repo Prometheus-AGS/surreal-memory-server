@@ -1,12 +1,12 @@
 {
   "active_phase": "uar-consumer-resync",
-  "active_phase_status": "plan-complete",
+  "active_phase_status": "executing",
   "completed_phases": ["task-stream-reliability", "write-path-reliability"],
   "last_phase": "uar-consumer-resync",
-  "last_phase_status": "plan-complete",
+  "last_phase_status": "executing",
   "change_backend": "openspec",
   "recommended_next_phase": "uar-consumer-resync",
-  "next_step": "kbd-execute commit-and-push-library",
+  "next_step": "kbd-execute resync-librefang-consumer",
   "created": "2026-05-17",
   "updated": "2026-05-19"
 }

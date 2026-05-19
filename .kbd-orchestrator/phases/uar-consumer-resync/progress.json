@@ -8,13 +8,43 @@
   "plan_path": ".kbd-orchestrator/phases/uar-consumer-resync/plan.md",
   "change_backend": "openspec",
   "changes_total": 4,
-  "changes_completed": 0,
+  "changes_completed": 2,
   "changes": {
-    "commit-and-push-library": "PLANNED",
-    "resync-uar-consumer": "PLANNED",
+    "commit-and-push-library": "ARCHIVED",
+    "resync-uar-consumer": "ARCHIVED",
     "resync-librefang-consumer": "PLANNED",
     "reconcile-library-pin-policy": "PLANNED"
   },
+  "resync_target_sha": "9051c3d37bfa0bb081b7203b5cb84ae69674cfda",
+  "change_results": {
+    "commit-and-push-library": {
+      "status": "ARCHIVED",
+      "closes": ["F-1"],
+      "commits": [
+        "f065902 — TaskStream reliability + write-path reliability (two phases + contract_alignment_test fix + openspec specs/changes)",
+        "9051c3d — KBD orchestrator artifacts"
+      ],
+      "pushed": "edca63d..9051c3d on main",
+      "library_health": "cargo check --tests green; clippy --all-targets -D warnings clean; fmt clean; 110 tests pass",
+      "code_fix": "AddMindmapNodeParams.metadata aligned to Option<serde_json::Value> (matches canonical MindMapNode.metadata + REST contract); fixes pre-existing contract_alignment_test compile error; 8 trivial clippy -D warnings fixes in test files",
+      "qa_gate": "rust-reviewer — APPROVED first pass (1 LOW, non-blocking)"
+    },
+    "resync-uar-consumer": {
+      "status": "ARCHIVED",
+      "closes": ["F-2", "F-4 (UAR)", "F-5 (UAR)"],
+      "repo_commit": "universal-agent-runtime b52b804",
+      "cargo_update": "surreal-memory 01e917ac -> 9051c3d3",
+      "code_fix": "8 stale TaskStream call sites resynced to the scoped (user_id/agent_id) API. DEVIATION: build surfaced 4 MORE sites than the assessment's 4 — MemoryService facade in service.rs also had stale arity (the plan anticipated this risk). Added scope fields to 3 mcp_server.rs param structs.",
+      "build": "UAR cargo build clean; 207 tests pass",
+      "qa_gate": "rust-reviewer — APPROVED first pass; 1 MEDIUM finding concerns pre-existing UAR code (MemoryService::new SurrealMode::Server+surrealkv) NOT touched by this change",
+      "migration_check": "F-5 verified at library level (migration tests apply v14-v19 against seeded task_stream rows incl. v18 backfill); NOT re-verified by booting UAR — UAR app-boot blocked by a pre-existing config defect"
+    }
+  },
+  "deferred_followups": [
+    "UAR: 4 pre-existing config_integration test failures (config-file loading; fail on clean UAR main; unrelated to the resync) — needs a UAR-side fix.",
+    "UAR: MemoryService::new routes the embedded path through SurrealMode::Server + surrealkv:// (rust-reviewer MEDIUM) — pre-existing; deserves a runtime smoke test of the embedded memory path.",
+    "F-5 migration safety against a populated UAR production DB was not independently re-verified (blocked by the config defect above) — verify once UAR app-boot is fixed."
+  ],
   "change_order": [
     "commit-and-push-library",
     "resync-uar-consumer",
@@ -44,6 +74,6 @@
   "verified_not_broken": "Neither consumer implements MemoryStorage (both wrap SurrealStorage) so the 5 new no-default trait methods do not break compiles. Both use RetryConfig::default()/SurrealConfig{..Default::default()} so the new operation_deadline_ms field does not break them. SurrealStorage::new signature unchanged. SurrealDB =3.0.5 aligned across all 3 repos.",
   "created": "2026-05-19",
   "last_updated": "2026-05-19",
-  "last_tool": "claude-code/kbd-plan",
-  "next_step": "kbd-execute commit-and-push-library"
+  "last_tool": "claude-code/kbd-execute",
+  "next_step": "kbd-execute resync-librefang-consumer"
 }
