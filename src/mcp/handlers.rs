@@ -79,8 +79,10 @@ pub struct SearchMemoriesParams {
     pub user_id: Option<String>,
     pub agent_id: Option<String>,
     pub session_id: Option<String>,
+    #[serde(default, deserialize_with = "crate::coerce::opt_string_vec")]
     pub categories: Option<Vec<String>>,
     #[schemars(description = "Maximum results to return (default 10)")]
+    #[serde(default, deserialize_with = "crate::coerce::opt_number")]
     pub limit: Option<usize>,
 }
 
@@ -92,6 +94,7 @@ pub struct CreateTaskStreamParams {
     pub agent_id: Option<String>,
     pub user_id: Option<String>,
     pub model_id: Option<String>,
+    #[serde(default, deserialize_with = "crate::coerce::opt_bool")]
     pub auto_summarize: Option<bool>,
 }
 
@@ -124,6 +127,7 @@ pub struct GetContextParams {
     )]
     pub model_name: String,
     #[schemars(description = "Override the model's default token budget")]
+    #[serde(default, deserialize_with = "crate::coerce::opt_number")]
     pub max_tokens: Option<u64>,
     #[schemars(description = "User ID scope — only resolves streams owned by this user")]
     pub user_id: Option<String>,
@@ -136,6 +140,7 @@ pub struct AddTaskStepParams {
     #[schemars(description = "Name of the task stream to add the step to")]
     pub stream_name: String,
     #[schemars(description = "Linear position of the step within the stream (1-based)")]
+    #[serde(deserialize_with = "crate::coerce::number")]
     pub ordinal: u32,
     #[schemars(description = "Short name for the step")]
     pub name: String,
@@ -167,11 +172,13 @@ pub struct CompleteStepParams {
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CreateEntitiesParams {
+    #[serde(deserialize_with = "crate::coerce::json_vec")]
     pub entities: Vec<CreateEntityParams>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CreateRelationsParams {
+    #[serde(deserialize_with = "crate::coerce::json_vec")]
     pub relations: Vec<CreateRelationParams>,
 }
 
@@ -184,6 +191,7 @@ pub struct AddObservationsParams {
     #[schemars(description = "Name of an existing entity to add observations to")]
     pub entity_name: String,
     #[schemars(description = "New facts or observations to record about the entity")]
+    #[serde(deserialize_with = "crate::coerce::string_vec")]
     pub observations: Vec<String>,
 }
 
@@ -223,13 +231,16 @@ pub struct SemanticSearchParams {
         description = "Natural language query to find similar entities (e.g., 'people who work on backend systems')"
     )]
     pub query: String,
-    #[serde(default = "default_limit")]
+    #[serde(default = "default_limit", deserialize_with = "crate::coerce::number")]
     #[schemars(
         description = "Maximum number of results to return (1-100)",
         default = "default_limit"
     )]
     pub limit: usize,
-    #[serde(default = "default_threshold")]
+    #[serde(
+        default = "default_threshold",
+        deserialize_with = "crate::coerce::number"
+    )]
     #[schemars(
         description = "Minimum similarity score (0.0-1.0). Higher values return more relevant but fewer results. Default 0.5 is recommended.",
         default = "default_threshold"
@@ -1130,7 +1141,7 @@ pub struct AddMindmapEdgeParams {
     pub from_id: String,
     pub to_id: String,
     pub label: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::coerce::boolean")]
     pub directed: bool,
 }
 
@@ -1176,11 +1187,20 @@ pub struct HybridSearchParams {
     pub user_id: Option<String>,
     pub agent_id: Option<String>,
     pub session_id: Option<String>,
-    #[serde(default = "hybrid_default_limit")]
+    #[serde(
+        default = "hybrid_default_limit",
+        deserialize_with = "crate::coerce::number"
+    )]
     pub limit: usize,
-    #[serde(default = "default_vector_weight")]
+    #[serde(
+        default = "default_vector_weight",
+        deserialize_with = "crate::coerce::number"
+    )]
     pub vector_weight: f32,
-    #[serde(default = "default_bm25_weight")]
+    #[serde(
+        default = "default_bm25_weight",
+        deserialize_with = "crate::coerce::number"
+    )]
     pub bm25_weight: f32,
 }
 fn default_vector_weight() -> f32 {
@@ -1199,6 +1219,7 @@ pub struct CompressMemoriesParams {
     pub agent_id: Option<String>,
     pub session_id: Option<String>,
     #[schemars(description = "Compress memories older than this many days")]
+    #[serde(deserialize_with = "crate::coerce::number")]
     pub older_than_days: u32,
 }
 
@@ -1213,6 +1234,7 @@ pub struct ConversationMessage {
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ConversationParams {
     #[schemars(description = "Array of role+content message objects")]
+    #[serde(deserialize_with = "crate::coerce::json_vec")]
     pub messages: Vec<ConversationMessage>,
     pub user_id: Option<String>,
     pub agent_id: Option<String>,
@@ -1689,6 +1711,7 @@ pub struct FindPathParams {
     #[schemars(description = "Name of the destination entity")]
     pub to: String,
     #[schemars(description = "Maximum hops to traverse (default 4, max 6)")]
+    #[serde(default, deserialize_with = "crate::coerce::opt_number")]
     pub max_depth: Option<u8>,
 }
 
@@ -1697,8 +1720,10 @@ pub struct ExpandNeighborsParams {
     #[schemars(description = "Name of the entity to expand from")]
     pub entity_name: String,
     #[schemars(description = "Number of hops to expand (default 2, max 5)")]
+    #[serde(default, deserialize_with = "crate::coerce::opt_number")]
     pub depth: Option<u8>,
     #[schemars(description = "Maximum total entities to return (default 50)")]
+    #[serde(default, deserialize_with = "crate::coerce::opt_number")]
     pub limit: Option<usize>,
 }
 
@@ -1711,6 +1736,7 @@ pub struct GetRelatedParams {
     #[schemars(description = "Direction: in | out | both (default: both)")]
     pub direction: Option<String>,
     #[schemars(description = "Maximum results (default 20)")]
+    #[serde(default, deserialize_with = "crate::coerce::opt_number")]
     pub limit: Option<usize>,
 }
 
@@ -1722,6 +1748,7 @@ pub struct PalaceWakeUpParams {
     #[schemars(description = "Optional wing to scope the wake-up context")]
     pub wing: Option<String>,
     #[schemars(description = "If true, compress output using AAAK Dialect")]
+    #[serde(default, deserialize_with = "crate::coerce::opt_bool")]
     pub compress: Option<bool>,
 }
 
@@ -1732,8 +1759,10 @@ pub struct PalaceRecallParams {
     #[schemars(description = "Optional room to filter by")]
     pub room: Option<String>,
     #[schemars(description = "Maximum drawers to recall (default: 20)")]
+    #[serde(default, deserialize_with = "crate::coerce::opt_number")]
     pub limit: Option<u32>,
     #[schemars(description = "If true, compress output using AAAK Dialect")]
+    #[serde(default, deserialize_with = "crate::coerce::opt_bool")]
     pub compress: Option<bool>,
 }
 
@@ -1746,8 +1775,10 @@ pub struct PalaceSearchParams {
     #[schemars(description = "Optional room to filter by")]
     pub room: Option<String>,
     #[schemars(description = "Number of results (default: 10)")]
+    #[serde(default, deserialize_with = "crate::coerce::opt_number")]
     pub n: Option<u32>,
     #[schemars(description = "If true, compress output using AAAK Dialect")]
+    #[serde(default, deserialize_with = "crate::coerce::opt_bool")]
     pub compress: Option<bool>,
 }
 
@@ -1762,6 +1793,7 @@ pub struct PalaceIngestParams {
     #[schemars(description = "Hall within the room (default: 'general')")]
     pub hall: Option<String>,
     #[schemars(description = "Importance 0.0-1.0 (default: 1.0)")]
+    #[serde(default, deserialize_with = "crate::coerce::opt_number")]
     pub importance: Option<f32>,
 }
 
@@ -1780,8 +1812,10 @@ pub struct PalaceHybridSearchParams {
     #[schemars(description = "Optional wing to filter palace drawers")]
     pub wing: Option<String>,
     #[schemars(description = "Number of results per source (default: 10)")]
+    #[serde(default, deserialize_with = "crate::coerce::opt_number")]
     pub n: Option<u32>,
     #[schemars(description = "If true, compress content using AAAK Dialect")]
+    #[serde(default, deserialize_with = "crate::coerce::opt_bool")]
     pub compress: Option<bool>,
 }
 

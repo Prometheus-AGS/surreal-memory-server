@@ -225,6 +225,16 @@ Migrations live in `crates/surreal-memory/src/storage/migrations/mod.rs`.
 1. Add handler params struct + handler method in `src/mcp/handlers.rs`
 2. Add `#[tool(...)]` annotated method in `src/mcp/mod.rs`
 3. Update the `instructions` string in `get_info()` to list the new tool
+4. **Every non-string param field MUST use a lenient deserializer from `src/coerce.rs`.**
+   Some MCP clients serialize all tool arguments as JSON strings (e.g. `"3"` for a
+   number, `"[\"a\"]"` for an array). Without coercion the server rejects the call
+   with `-32602 invalid type: string ..., expected ...`. Apply:
+   - numbers (`usize`/`u32`/`u64`/`u8`/`f32`): `#[serde(deserialize_with = "crate::coerce::number")]`
+     (required) or `#[serde(default, deserialize_with = "crate::coerce::opt_number")]` (`Option<T>`)
+   - `bool`: `crate::coerce::boolean` / `crate::coerce::opt_bool`
+   - `Vec<String>`: `crate::coerce::string_vec` / `crate::coerce::opt_string_vec`
+   - `Vec<Struct>`: `crate::coerce::json_vec`
+   The same applies to shared request structs in `src/contracts.rs`.
 
 ### Adding a New Embedding Provider
 1. Create module in `src/embeddings/` or `crates/surreal-memory/src/embeddings/`

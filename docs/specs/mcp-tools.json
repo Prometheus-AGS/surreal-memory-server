@@ -157,6 +157,7 @@
             ]
           },
           "categories": {
+            "default": null,
             "description": "Optional taxonomy categories",
             "items": {
               "type": "string"
@@ -244,6 +245,7 @@
             "type": "string"
           },
           "tags": {
+            "default": null,
             "items": {
               "type": "string"
             },

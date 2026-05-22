@@ -39,6 +39,7 @@ pub struct CreateEntityRequest {
     #[schemars(description = "Category or type of entity")]
     pub entity_type: String,
     #[schemars(description = "Facts or observations about the entity")]
+    #[serde(deserialize_with = "crate::coerce::string_vec")]
     pub observations: Vec<String>,
 }
 
@@ -96,6 +97,7 @@ pub struct AddMemoryRequest {
     pub agent_id: Option<String>,
     pub session_id: Option<String>,
     #[schemars(description = "Optional taxonomy categories")]
+    #[serde(default, deserialize_with = "crate::coerce::opt_string_vec")]
     pub categories: Option<Vec<String>>,
 }
 
@@ -145,6 +147,7 @@ pub struct CreateMindmapRequest {
     pub user_id: Option<String>,
     #[schemars(description = "Optional task stream record id in the form table:key")]
     pub task_stream_id: Option<String>,
+    #[serde(default, deserialize_with = "crate::coerce::opt_string_vec")]
     pub tags: Option<Vec<String>>,
 }
 
@@ -226,7 +229,7 @@ pub struct AddMindmapEdgeRequest {
     pub from_id: String,
     pub to_id: String,
     pub label: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::coerce::boolean")]
     pub directed: bool,
 }
 
