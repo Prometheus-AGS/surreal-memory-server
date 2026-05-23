@@ -13,11 +13,13 @@ use rmcp::{
     transport::{
         Transport, TransportAdapterIdentity,
         streamable_http_server::{
-            StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+            StreamableHttpServerConfig, StreamableHttpService,
+            session::local::{LocalSessionManager, SessionConfig},
         },
     },
 };
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
@@ -40,10 +42,23 @@ pub fn mcp_http_router(storage: Arc<dyn MemoryStorage>, prefix: &str) -> Router 
     };
 
     // --- Streamable HTTP Endpoint (New Standard) ---
+    //
+    // rmcp 1.4.0's `SessionConfig::DEFAULT_KEEP_ALIVE` is 5 minutes. Idle MCP
+    // clients (the common case: a coding agent that calls a tool, thinks for a
+    // while, then calls another tool) get culled mid-conversation and the next
+    // request returns 404 with `mcp-session-id` set. That manifests upstream as
+    // sporadic "list_task_streams timed out" / "add_memory timed out" because
+    // the client retries on a dead session. Bump the idle timeout to 24h —
+    // long enough that no realistic conversation hits it, short enough that
+    // truly abandoned sessions still get reclaimed.
+    let mut session_config = SessionConfig::default();
+    session_config.keep_alive = Some(Duration::from_secs(60 * 60 * 24));
+    let mut session_manager = LocalSessionManager::default();
+    session_manager.session_config = session_config;
     let storage_clone = storage.clone();
     let service = StreamableHttpService::new(
         move || Ok(MemoryMcpServer::new(storage_clone.clone())),
-        Arc::new(LocalSessionManager::default()),
+        Arc::new(session_manager),
         StreamableHttpServerConfig::default(),
     );
     let streamable_routes = Router::new().nest_service("/http", service);
