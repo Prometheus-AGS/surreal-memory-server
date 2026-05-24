@@ -13,6 +13,7 @@ use crate::{
     task_stream::{ContextWindow, TaskStream, TaskStreamStatus},
 };
 use anyhow::{Context, Result};
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde::{Serialize, de::DeserializeOwned};
@@ -36,14 +37,26 @@ const MINDMAP_UPDATE_TIMEOUT: &str = "30s";
 
 /// SurrealDB-backed memory storage.
 ///
-/// `Surreal<Any>` is internally `Arc`-wrapped and `Clone`-safe; no additional
-/// mutex or wrapper is needed for concurrent access.  WebSocket connections
-/// (remote server mode) auto-reconnect; the initial connection uses
-/// `connect_with_retry` which honours `SurrealConfig::retry`.
+/// `Surreal<Any>` is internally `Arc`-wrapped and `Clone`-safe; the SDK
+/// multiplexes concurrent queries over a single physical connection
+/// (WebSocket in server mode, in-process for embedded). The connection
+/// lifecycle (Connected/Reconnecting/Failed) is published via an atomic
+/// `ArcSwap` cell: hot-path readers do a single atomic load (no lock),
+/// reconnects do a single atomic store. This replaces the previous
+/// `Arc<std::sync::RwLock<ConnectionState>>` that serialized every storage
+/// call through a blocking lock and produced writer starvation under load.
 pub struct SurrealStorage {
-    connection: Arc<std::sync::RwLock<ConnectionState>>,
+    connection: Arc<ArcSwap<ConnectionCell>>,
     connection_info: ConnectionInfo,
     embedding_service: Arc<dyn EmbeddingService>,
+    /// Bounded-concurrency semaphore for embedded mode. RocksDB's
+    /// PointLockManager defaults to 16 stripes per column family —
+    /// concurrent transactions on overlapping keys serialize at the
+    /// storage engine. Bounding in-flight ops at the application layer
+    /// prevents head-of-line blocking and turns "lock timeout" /
+    /// "serialization failure" into honest backpressure. `None` in
+    /// server mode (the remote SurrealDB handles its own scheduling).
+    embedded_semaphore: Option<Arc<tokio::sync::Semaphore>>,
     #[cfg(feature = "palace")]
     palace: tokio::sync::OnceCell<PalaceContext>,
 }
@@ -58,6 +71,78 @@ use std::time::Duration;
 /// the initial startup connect where a longer wait is acceptable.
 const OPERATION_RECONNECT_ATTEMPTS: u32 = 2;
 
+/// Default in-flight concurrency cap for embedded mode. Matches RocksDB's
+/// PointLockManager default of 16 stripes per column family — beyond this,
+/// concurrent transactions on overlapping keys serialize at the storage
+/// engine and produce "lock timeout" / "serialization failure" errors.
+/// Bounding here turns that into honest backpressure. Override via
+/// `SURREAL_EMBEDDED_MAX_INFLIGHT`.
+const DEFAULT_EMBEDDED_MAX_INFLIGHT: usize = 16;
+
+/// Build the embedded-mode in-flight semaphore from the active config. Returns
+/// `None` in server mode (the remote DB handles its own scheduling).
+fn make_embedded_semaphore(config: &SurrealConfig) -> Option<Arc<tokio::sync::Semaphore>> {
+    match config.mode {
+        SurrealMode::Embedded => {
+            let n = std::env::var("SURREAL_EMBEDDED_MAX_INFLIGHT")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(DEFAULT_EMBEDDED_MAX_INFLIGHT);
+            Some(Arc::new(tokio::sync::Semaphore::new(n)))
+        }
+        SurrealMode::Server => None,
+    }
+}
+
+/// What the retry layer should do with an observed error.
+///
+/// Replaces the previous binary "retriable or not" verdict. Three states
+/// matter because the *response* differs: a server-busy error wants
+/// backoff-and-retry (do NOT reconnect — the connection is fine); a
+/// transport failure wants reconnect-then-retry; everything else is a
+/// hard failure that should not waste the retry budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryAction {
+    /// Backoff and retry on the same connection. Server-busy, lock
+    /// contention, query timeout, etc.
+    Retry,
+    /// Reconnect, then retry. Transport-level loss (refused, reset,
+    /// closed, DNS, network).
+    Reconnect,
+    /// Surface immediately. Schema, validation, auth, constraint errors.
+    FailFast,
+}
+
+/// Discriminate a typed `surrealdb::Error` into a `RetryAction`. Kept as a
+/// free function so it can be unit-tested without a live storage handle.
+fn classify_surreal_error(err: &surrealdb::Error) -> RetryAction {
+    // The exact variant set is SDK-version-specific; match on the
+    // stringified Display form scoped to the typed error (much narrower
+    // than matching on a fully-wrapped anyhow chain).
+    let msg = err.to_string().to_lowercase();
+    if msg.contains("connection refused")
+        || msg.contains("connection reset")
+        || msg.contains("connection closed")
+        || msg.contains("not connected")
+        || msg.contains("disconnect")
+    {
+        RetryAction::Reconnect
+    } else if msg.contains("timeout")
+        || msg.contains("timed out")
+        || msg.contains("too many connections")
+        || msg.contains("lock")
+        || msg.contains("serialization")
+        || msg.contains("backpressure")
+    {
+        RetryAction::Retry
+    } else {
+        // Schema, validation, query syntax, auth — do not retry, do not
+        // reconnect, just surface.
+        RetryAction::FailFast
+    }
+}
+
 /// Configuration for retry and reconnection behavior.
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
@@ -71,13 +156,17 @@ pub struct RetryConfig {
     /// a typed error instead of stalling. Prevents the nested
     /// retry × reconnect amplification that produced multi-minute hangs.
     ///
-    /// Note: individual SQL statements also carry their own `TIMEOUT` (e.g.
-    /// `create_record` uses `TIMEOUT 30s`). With the 30_000ms default, a single
-    /// slow-but-alive query can consume the whole budget before any retry — by
-    /// design: the deadline is a hard "fail fast" ceiling, not a guarantee of N
-    /// full retry cycles. Operators wanting guaranteed retries against a slow
-    /// (not dead) DB should raise this above the per-query SQL timeout.
+    /// Layering: the SDK enforces a per-query `query_timeout_ms` first; if a
+    /// query exceeds that, the SDK returns an error and the retry layer
+    /// observes it. `operation_deadline_ms` is the backstop ceiling for the
+    /// full retry × reconnect cycle. For guaranteed retries against a slow
+    /// (but alive) DB, keep `operation_deadline_ms` ≥ several × `query_timeout_ms`.
     pub operation_deadline_ms: u64,
+    /// SDK-level per-query timeout passed to `surrealdb::opt::Config::query_timeout`.
+    /// Bounds a single query at the protocol layer so a hung server-side query
+    /// does not head-of-line-block the multiplexed connection for unrelated
+    /// work. Configurable via `SURREAL_QUERY_TIMEOUT_MS`.
+    pub query_timeout_ms: u64,
 }
 
 impl Default for RetryConfig {
@@ -89,6 +178,7 @@ impl Default for RetryConfig {
             max_retry_delay_ms: 5000,
             jitter_factor: 0.25,
             operation_deadline_ms: 30_000,
+            query_timeout_ms: 10_000,
         }
     }
 }
@@ -126,26 +216,34 @@ struct ConnectionInfo {
 }
 
 /// Tracks the lifecycle state of the SurrealDB connection.
-pub(crate) enum ConnectionState {
+///
+/// Stored behind an `ArcSwap` so the hot path is a single atomic load and
+/// state transitions (reconnect → Connected) are a single atomic store.
+/// The previous design wrapped this in `std::sync::RwLock` and contended
+/// every storage call against every reconnect attempt — removed.
+#[derive(Clone)]
+pub(crate) enum ConnectionCell {
     /// Active connection, ready to use.
     Connected(Surreal<Any>),
-    /// Mid-reconnect; callers should wait or fail fast.
+    /// Mid-reconnect; callers should fail fast and let the retry layer
+    /// observe the new state on its next attempt.
     Reconnecting,
     /// Connection could not be established or lost permanently.
     Failed(String),
 }
 
 /// Cancellation-safety guard for `reconnect_with_attempts`. If the reconnect
-/// future is dropped while still in `Reconnecting` (e.g. the operation deadline
-/// fired mid-connect), the guard's `Drop` forces the state to `Failed` so the
-/// connection is never permanently stranded in `Reconnecting`. On a normal
-/// completion the caller calls `disarm()` before setting the final state.
+/// future is dropped while still in `Reconnecting` (e.g. the operation
+/// deadline fired mid-connect), the guard's `Drop` forces the cell to
+/// `Failed` so the connection is never permanently stranded in
+/// `Reconnecting`. On a normal completion the caller calls `disarm()`
+/// before publishing the final state.
 struct ReconnectGuard {
-    connection: Arc<std::sync::RwLock<ConnectionState>>,
+    connection: Arc<ArcSwap<ConnectionCell>>,
 }
 
 impl ReconnectGuard {
-    /// Disarm the guard once the caller is about to set the final state.
+    /// Disarm the guard once the caller is about to publish the final state.
     fn disarm(self) {
         std::mem::forget(self);
     }
@@ -153,13 +251,14 @@ impl ReconnectGuard {
 
 impl Drop for ReconnectGuard {
     fn drop(&mut self) {
-        let mut state = self
-            .connection
-            .write()
-            .expect("Connection lock poisoned - another thread panicked while holding the lock");
-        if matches!(*state, ConnectionState::Reconnecting) {
+        // Atomic-load to inspect; only force-publish Failed if we're still
+        // mid-reconnect (i.e. the caller did not disarm us).
+        let current = self.connection.load();
+        if matches!(**current, ConnectionCell::Reconnecting) {
             tracing::warn!("Reconnect cancelled before completion; marking connection Failed");
-            *state = ConnectionState::Failed("Reconnect cancelled before completion".to_string());
+            self.connection.store(Arc::new(ConnectionCell::Failed(
+                "Reconnect cancelled before completion".to_string(),
+            )));
         }
     }
 }
@@ -547,10 +646,13 @@ impl SurrealStorage {
         run_migrations(&db).await?;
         Self::ensure_embedding_indexes(&db, embedding_service.dimensions()).await?;
 
+        let embedded_semaphore = make_embedded_semaphore(&connection_info.config);
+
         Ok(Self {
-            connection: Arc::new(std::sync::RwLock::new(ConnectionState::Connected(db))),
+            connection: Arc::new(ArcSwap::new(Arc::new(ConnectionCell::Connected(db)))),
             connection_info,
             embedding_service,
+            embedded_semaphore,
             #[cfg(feature = "palace")]
             palace: tokio::sync::OnceCell::new(),
         })
@@ -599,7 +701,16 @@ impl SurrealStorage {
     }
 
     /// Establish connection without retry logic (called by connect_with_retry).
+    ///
+    /// Passes an SDK `Config::query_timeout(...)` so individual queries are
+    /// bounded at the protocol layer — a hung server-side query can no
+    /// longer head-of-line-block the multiplexed connection for unrelated
+    /// work. The retry-layer `operation_deadline_ms` becomes a backstop,
+    /// not the primary mechanism.
     async fn connect_with_config(config: &SurrealConfig) -> Result<Surreal<Any>> {
+        let sdk_config = surrealdb::opt::Config::default()
+            .query_timeout(Duration::from_millis(config.retry.query_timeout_ms));
+
         let db = match &config.mode {
             SurrealMode::Embedded => {
                 let path = config
@@ -607,7 +718,7 @@ impl SurrealStorage {
                     .as_ref()
                     .context("Embedded path required for embedded mode")?;
                 tracing::info!("Connecting to embedded SurrealDB at: {}", path);
-                surrealdb::engine::any::connect(format!("rocksdb://{}", path)).await?
+                surrealdb::engine::any::connect((format!("rocksdb://{}", path), sdk_config)).await?
             }
             SurrealMode::Server => {
                 let endpoint = config
@@ -615,7 +726,7 @@ impl SurrealStorage {
                     .as_ref()
                     .context("Endpoint required for server mode")?;
                 tracing::info!("Connecting to SurrealDB server at: {}", endpoint);
-                surrealdb::engine::any::connect(endpoint).await?
+                surrealdb::engine::any::connect((endpoint.clone(), sdk_config)).await?
             }
         };
 
@@ -757,36 +868,40 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
         Ok(())
     }
 
+    /// Hot-path accessor for the live `Surreal<Any>` handle.
+    ///
+    /// One atomic load, one `Arc::clone` of the inner SDK handle. No lock,
+    /// no contention, safe to call across `.await`. Every storage method
+    /// goes through here.
+    pub(crate) fn live_db(&self) -> Result<Surreal<Any>> {
+        let cell = self.connection.load();
+        match &**cell {
+            ConnectionCell::Connected(db) => Ok(db.clone()),
+            ConnectionCell::Reconnecting => {
+                anyhow::bail!("Connection is currently reconnecting, please retry later")
+            }
+            ConnectionCell::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+        }
+    }
+
     /// Ping the database to verify the connection is alive.
     ///
     /// Useful for liveness/readiness probes when running against a remote
     /// SurrealDB server.
     pub async fn health_check(&self) -> Result<bool> {
-        let db = {
-            let state = self.connection.read().expect("Connection lock poisoned");
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         db.health()
             .await
             .map(|_| true)
             .context("SurrealDB health check failed")
     }
 
-    /// Clone the live `Surreal<Any>` handle for shared use by subsystems (e.g. PalaceAdapter).
-    ///
-    /// `Surreal<Any>` is internally `Arc`-wrapped — cloning is cheap.
-    /// Returns `Err` if the connection is in `Reconnecting` or `Failed` state.
+    /// Clone the live `Surreal<Any>` handle for shared use by subsystems
+    /// (e.g. `PalaceAdapter`). `Surreal<Any>` is internally `Arc`-wrapped,
+    /// so this is cheap. Returns `Err` if the connection is in
+    /// `Reconnecting` or `Failed` state.
     pub fn db(&self) -> Result<Surreal<Any>> {
-        let state = self.connection.read().expect("Connection lock poisoned");
-        match &*state {
-            ConnectionState::Connected(db) => Ok(db.clone()),
-            ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-            ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-        }
+        self.live_db()
     }
 
     /// Return the namespace and database this storage instance is connected to.
@@ -799,55 +914,57 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
         )
     }
 
-    /// Return a cloneable reference to the connection state lock.
-    ///
-    /// Used by `PalaceAdapter` to build a closure that yields the live
+    /// Return a cloneable reference to the connection cell. Used by
+    /// `PalaceAdapter` to build a closure that yields the live
     /// `Surreal<Any>` handle on each operation (resilient to reconnection).
     #[cfg(feature = "palace")]
-    pub(crate) fn connection_arc(&self) -> Arc<std::sync::RwLock<ConnectionState>> {
+    pub(crate) fn connection_arc(&self) -> Arc<ArcSwap<ConnectionCell>> {
         Arc::clone(&self.connection)
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
-    /// Classify errors as retriable or non-retriable.
-    fn is_retriable_error(&self, error: &anyhow::Error) -> bool {
-        let error_msg = format!("{}", error).to_lowercase();
-
-        // Retriable: Network errors
-        if error_msg.contains("connection")
-            || error_msg.contains("timeout")
-            || error_msg.contains("dns")
-            || error_msg.contains("refused")
-            || error_msg.contains("reset")
-            || error_msg.contains("closed")
-        {
-            return true;
+    /// Classify a storage error into a `RetryAction`. Prefers downcasting to
+    /// the typed `surrealdb::Error` enum; falls back to substring matching
+    /// only when the typed source is not reachable through the anyhow
+    /// chain. This replaces the previous all-substring matcher whose
+    /// "field"/"timeout" co-occurrence produced the wrong verdict.
+    ///
+    /// `Reconnect` is reserved for true transport failures — the previous
+    /// code triggered a reconnect on "lock timeout" / "serialization
+    /// failure", which hammered the contended path instead of letting it
+    /// drain.
+    fn classify_error(&self, error: &anyhow::Error) -> RetryAction {
+        // Typed-source discrimination first.
+        if let Some(surreal_err) = error.downcast_ref::<surrealdb::Error>() {
+            return classify_surreal_error(surreal_err);
         }
-
-        // Retriable: Transient DB errors
-        if error_msg.contains("too many connections")
-            || error_msg.contains("backpressure")
-            || error_msg.contains("lock timeout")
-            || error_msg.contains("serialization failure")
+        // Fallback: string-based, but narrower and three-valued — replaces
+        // the legacy any-of-many matcher that conflated transport with
+        // server-busy.
+        let msg = format!("{}", error).to_lowercase();
+        if msg.contains("connection refused")
+            || msg.contains("connection reset")
+            || msg.contains("connection closed")
+            || msg.contains("connection uninitialised")
+            || msg.contains("not connected")
+            || msg.contains("dns")
+            || msg.contains("network")
         {
-            return true;
+            return RetryAction::Reconnect;
         }
-
-        // Non-retriable: Schema/validation errors
-        if error_msg.contains("field")
-            || error_msg.contains("table")
-            || error_msg.contains("invalid")
-            || error_msg.contains("credential")
-            || error_msg.contains("not found")
-            || error_msg.contains("constraint")
+        if msg.contains("timeout")
+            || msg.contains("timed out")
+            || msg.contains("too many connections")
+            || msg.contains("backpressure")
+            || msg.contains("lock")
+            || msg.contains("serialization failure")
         {
-            return false;
+            return RetryAction::Retry;
         }
-
-        // Default: don't retry unknown errors
-        false
+        RetryAction::FailFast
     }
+
 
     /// Reconnect with an explicit connect-attempt cap. `retry_operation` calls
     /// this with a small cap (`OPERATION_RECONNECT_ATTEMPTS`) so a reconnection
@@ -860,36 +977,27 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
     /// `Reconnecting` — it is forced to `Failed` on drop so the storage
     /// instance stays usable (subsequent calls retry rather than bail forever).
     async fn reconnect_with_attempts(&self, max_attempts: u32) -> Result<()> {
-        // Set state to Reconnecting, armed with a cancellation-safe guard.
-        let guard = {
-            let mut state = self.connection.write().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            *state = ConnectionState::Reconnecting;
-            tracing::warn!("Connection lost, attempting reconnection");
-            ReconnectGuard {
-                connection: Arc::clone(&self.connection),
-            }
+        // Publish Reconnecting state atomically; arm the cancellation guard.
+        self.connection
+            .store(Arc::new(ConnectionCell::Reconnecting));
+        tracing::warn!("Connection lost, attempting reconnection");
+        let guard = ReconnectGuard {
+            connection: Arc::clone(&self.connection),
         };
 
-        // Attempt to establish new connection
         match Self::connect_with_attempts(&self.connection_info.config, max_attempts).await {
             Ok(db) => {
                 guard.disarm();
-                let mut state = self.connection.write().expect(
-                    "Connection lock poisoned - another thread panicked while holding the lock",
-                );
-                *state = ConnectionState::Connected(db);
+                self.connection
+                    .store(Arc::new(ConnectionCell::Connected(db)));
                 tracing::info!("Reconnection successful");
                 Ok(())
             }
             Err(err) => {
                 guard.disarm();
                 let error_msg = format!("{}", err);
-                let mut state = self.connection.write().expect(
-                    "Connection lock poisoned - another thread panicked while holding the lock",
-                );
-                *state = ConnectionState::Failed(error_msg.clone());
+                self.connection
+                    .store(Arc::new(ConnectionCell::Failed(error_msg.clone())));
                 tracing::error!(error = %err, "Reconnection failed after exhausting retries");
                 Err(anyhow::anyhow!("Reconnection failed: {}", error_msg))
             }
@@ -909,6 +1017,23 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
         Fut: std::future::Future<Output = Result<R>>,
     {
         use tracing::Instrument as _;
+
+        // Acquire an embedded-mode permit (no-op in server mode). The
+        // permit is held for the entire retry × reconnect cycle so the
+        // application-layer concurrency cap holds end-to-end. The wait
+        // itself counts against the operation deadline below — this is
+        // the *honest* backpressure path that replaces the lock-timeout /
+        // serialization-failure error storm of the previous design.
+        let _permit = if let Some(sem) = &self.embedded_semaphore {
+            Some(
+                Arc::clone(sem)
+                    .acquire_owned()
+                    .await
+                    .context("embedded concurrency semaphore was closed")?,
+            )
+        } else {
+            None
+        };
 
         let deadline =
             Duration::from_millis(self.connection_info.config.retry.operation_deadline_ms);
@@ -941,59 +1066,49 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
 
         for attempt in 0..max_retries {
             // Extract current connection
-            let db = {
-                let state = self.connection.read().expect(
-                    "Connection lock poisoned - another thread panicked while holding the lock",
-                );
-                match &*state {
-                    ConnectionState::Connected(db) => db.clone(),
-                    ConnectionState::Reconnecting => {
-                        anyhow::bail!("Connection is currently reconnecting, please retry later")
-                    }
-                    ConnectionState::Failed(msg) => {
-                        anyhow::bail!("Connection failed: {}", msg)
-                    }
-                }
-            };
+            let db = self.live_db()?;
 
             // Attempt operation
             match op(db).await {
                 Ok(result) => return Ok(result),
                 Err(err) => {
+                    let action = self.classify_error(&err);
                     last_error = Some(err);
 
-                    if attempt < max_retries - 1
-                        && self.is_retriable_error(last_error.as_ref().unwrap())
-                    {
-                        // Reconnect with a small attempt cap — the operation
-                        // deadline is the real bound, not this count.
-                        if let Err(reconnect_err) = self
+                    if attempt >= max_retries - 1 || action == RetryAction::FailFast {
+                        break;
+                    }
+
+                    // Only `Reconnect` actions touch the connection cell.
+                    // `Retry` actions backoff and use the same handle —
+                    // the SDK multiplexes, so a busy/locked query does not
+                    // poison the connection.
+                    if action == RetryAction::Reconnect
+                        && let Err(reconnect_err) = self
                             .reconnect_with_attempts(OPERATION_RECONNECT_ATTEMPTS)
                             .await
-                        {
-                            tracing::warn!(
-                                operation = op_name,
-                                attempt = attempt + 1,
-                                error = %reconnect_err,
-                                "Reconnection failed during retry"
-                            );
-                        }
-
-                        let delay = self.connection_info.config.retry.calculate_delay(attempt);
-
+                    {
                         tracing::warn!(
                             operation = op_name,
                             attempt = attempt + 1,
-                            max_attempts = max_retries,
-                            error = %last_error.as_ref().unwrap(),
-                            next_delay_ms = delay.as_millis(),
-                            "Retrying operation after transient failure"
+                            error = %reconnect_err,
+                            "Reconnection failed during retry"
                         );
-
-                        tokio::time::sleep(delay).await;
-                    } else {
-                        break;
                     }
+
+                    let delay = self.connection_info.config.retry.calculate_delay(attempt);
+
+                    tracing::warn!(
+                        operation = op_name,
+                        attempt = attempt + 1,
+                        max_attempts = max_retries,
+                        action = ?action,
+                        error = %last_error.as_ref().unwrap(),
+                        next_delay_ms = delay.as_millis(),
+                        "Retrying operation after transient failure"
+                    );
+
+                    tokio::time::sleep(delay).await;
                 }
             }
         }
@@ -1049,16 +1164,7 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
         agent_id: Option<&str>,
         status: TaskStreamStatus,
     ) -> Result<TaskStream> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         let mut sql = "UPDATE task_stream SET status = $status WHERE name = $name".to_string();
         if user_id.is_some() {
             sql.push_str(" AND user_id = $uid");
@@ -1207,16 +1313,7 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
         updated_at: Datetime,
         op: &str,
     ) -> Result<MindMap> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         let (table, key) = Self::record_id_parts(id);
         let edge_values = serde_json::to_value(edges)
             .with_context(|| format!("{op}: edge serialization failed"))?;
@@ -1251,16 +1348,7 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
         updated_at: Datetime,
         op: &str,
     ) -> Result<MindMap> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         let (table, key) = Self::record_id_parts(id);
         let mut response = db
             .query(format!(
@@ -1292,16 +1380,7 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
         updated_at: Datetime,
         op: &str,
     ) -> Result<MindMap> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         let (table, key) = Self::record_id_parts(id);
         let edge_value = serde_json::to_value(edge)
             .with_context(|| format!("{op}: edge serialization failed"))?;
@@ -1383,16 +1462,7 @@ impl MemoryStorage for SurrealStorage {
     // ── Knowledge Graph ───────────────────────────────────────────────────────
 
     async fn create_entity(&self, mut entity: Entity) -> Result<Entity> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         let now = Datetime::default();
         entity.created_at = now;
         entity.updated_at = now;
@@ -1416,16 +1486,7 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn get_entity(&self, name: &str) -> Result<Option<Entity>> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         let result: Vec<Entity> = db
             .query("SELECT * FROM entity WHERE name = $name")
             .bind(("name", name.to_string()))
@@ -1435,16 +1496,7 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn update_entity(&self, mut entity: Entity) -> Result<Entity> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         entity.updated_at = Datetime::default();
         entity.embedding = Some(self.embed_entity(&entity).await?);
 
@@ -1461,16 +1513,7 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn delete_entity(&self, name: &str) -> Result<()> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         db.query("DELETE FROM entity WHERE name = $name; DELETE FROM relation WHERE from = $name OR to = $name")
             .bind(("name", name.to_string()))
             .await?;
@@ -1478,16 +1521,7 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn search_entities(&self, query: &str) -> Result<Vec<Entity>> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         let results: Vec<Entity> = db
             .query("SELECT * FROM entity WHERE name CONTAINS $q OR entity_type CONTAINS $q OR observations CONTAINS $q")
             .bind(("q", query.to_string()))
@@ -1497,16 +1531,7 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn create_relation(&self, mut relation: Relation) -> Result<Relation> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         relation.created_at = Datetime::default();
         let created: Option<Relation> = db
             .create("relation")
@@ -1525,16 +1550,7 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn get_relations(&self, entity_name: &str) -> Result<Vec<Relation>> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         let results: Vec<Relation> = db
             .query("SELECT * FROM relation WHERE from = $name OR to = $name")
             .bind(("name", entity_name.to_string()))
@@ -1544,16 +1560,7 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn delete_relation(&self, from: &str, to: &str, relation_type: &str) -> Result<()> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         db.query("DELETE FROM relation WHERE from = $from AND to = $to AND relation_type = $rt")
             .bind(("from", from.to_string()))
             .bind(("to", to.to_string()))
@@ -1563,16 +1570,7 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn get_graph(&self) -> Result<KnowledgeGraph> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         let entities: Vec<Entity> = db.query("SELECT * FROM entity").await?.take(0)?;
         let relations: Vec<Relation> = db.query("SELECT * FROM relation").await?.take(0)?;
         Ok(KnowledgeGraph {
@@ -1600,16 +1598,7 @@ impl MemoryStorage for SurrealStorage {
         limit: usize,
         threshold: f32,
     ) -> Result<Vec<SemanticSearchResult>> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         let query_emb = self.embed_text(query).await?;
         let all: Vec<Entity> = db
             .query("SELECT * FROM entity WHERE embedding IS NOT NONE")
@@ -1672,16 +1661,7 @@ impl MemoryStorage for SurrealStorage {
             }
         }
 
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
 
         let now = Datetime::default();
         memory.embedding = Some(emb);
@@ -1713,16 +1693,7 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn get_memory(&self, id: &str) -> Result<Option<Memory>> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         let (table, key) = Self::parse_record_id_str(id, "memory")?;
         let result: Vec<DbMemory> = db
             .query("SELECT * FROM type::record($table, $key)")
@@ -1738,16 +1709,7 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn update_memory(&self, id: &str, content: String) -> Result<Memory> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         let old = self
             .get_memory(id)
             .await?
@@ -1794,16 +1756,7 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn delete_memory(&self, id: &str) -> Result<()> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         if let Some(mem) = self.get_memory(id).await?
             && let Some(mem_id) = &mem.id
         {
@@ -1868,16 +1821,7 @@ impl MemoryStorage for SurrealStorage {
 
         query.push_str(&parts.join(" AND "));
 
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
 
         let mut q = db.query(query);
         if let Some(v) = uid {
@@ -1923,16 +1867,7 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn get_memory_history(&self, memory_id: &str) -> Result<Vec<MemoryHistory>> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         let results: Vec<MemoryHistory> = db
             .query("SELECT * FROM memory_history WHERE memory_id = $mid ORDER BY version ASC")
             .bind(("mid", memory_id.to_string()))
@@ -1960,16 +1895,7 @@ impl MemoryStorage for SurrealStorage {
         user_id: Option<&str>,
         agent_id: Option<&str>,
     ) -> Result<Option<TaskStream>> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         let mut sql = "SELECT * FROM task_stream WHERE name = $name".to_string();
         if user_id.is_some() {
             sql.push_str(" AND user_id = $uid");
@@ -2073,16 +1999,7 @@ impl MemoryStorage for SurrealStorage {
         // SurrealDB `LET`/response-index semantics.
         let memory_key = Uuid::new_v4().to_string();
 
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
 
         let mut txn_sql = "BEGIN TRANSACTION;\n\
              CREATE type::record('memory', $mkey) CONTENT $memory;\n\
@@ -2159,16 +2076,7 @@ impl MemoryStorage for SurrealStorage {
     ) -> Result<ContextWindow> {
         let budget = max_tokens.unwrap_or_else(|| Self::model_context_budget(model_name));
 
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
 
         let stream_id = {
             let stream = self
@@ -2229,16 +2137,7 @@ impl MemoryStorage for SurrealStorage {
             parts.push("true".into());
         }
 
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
 
         let query = format!(
             "SELECT * FROM task_stream WHERE {} ORDER BY last_active DESC",
@@ -2269,16 +2168,7 @@ impl MemoryStorage for SurrealStorage {
         let stream_id = stream.id.clone().context("TaskStream missing id")?;
 
         let memories: Vec<DbMemory> = {
-            let db = {
-                let state = self.connection.read().expect(
-                    "Connection lock poisoned - another thread panicked while holding the lock",
-                );
-                match &*state {
-                    ConnectionState::Connected(db) => db.clone(),
-                    ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                    ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-                }
-            };
+            let db = self.live_db()?;
             db.query("SELECT * FROM memory WHERE task_stream_id = $sid")
                 .bind(("sid", stream_id.clone()))
                 .await?
@@ -2292,16 +2182,7 @@ impl MemoryStorage for SurrealStorage {
             }
         }
 
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         db.query("UPDATE mindmap SET task_stream_id = NONE WHERE task_stream_id = $sid")
             .bind(("sid", stream_id.clone()))
             .await?;
@@ -2368,16 +2249,7 @@ impl MemoryStorage for SurrealStorage {
             scope_parts.push("session_id = $sid".into());
         }
 
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
 
         let bm25_sql = format!(
             "SELECT *, search::score(0) AS bm25_score FROM memory WHERE {} LIMIT {}",
@@ -2449,16 +2321,7 @@ impl MemoryStorage for SurrealStorage {
             conditions.push("session_id = $sid".into());
         }
 
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
 
         let sql = format!(
             "SELECT * FROM memory WHERE {} ORDER BY created_at ASC",
@@ -2546,16 +2409,7 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn expire_stale_memories(&self) -> Result<u64> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         let expired: Vec<DbMemory> = db
             .query(
                 "SELECT * FROM memory WHERE valid_until IS NOT NONE AND valid_until < time::now()",
@@ -2756,16 +2610,7 @@ impl MemoryStorage for SurrealStorage {
         user_id: Option<&str>,
         agent_id: Option<&str>,
     ) -> Result<Option<MindMap>> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         let mut sql = "SELECT * FROM mindmap WHERE name = $name".to_string();
         if user_id.is_some() {
             sql.push_str(" AND user_id = $uid");
@@ -2910,16 +2755,7 @@ impl MemoryStorage for SurrealStorage {
                 parts.join(" AND ")
             )
         };
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         let mut q = db.query(&sql);
         if let Some(v) = user_id {
             q = q.bind(("uid", v.to_string()));
@@ -2937,16 +2773,7 @@ impl MemoryStorage for SurrealStorage {
         user_id: Option<&str>,
         agent_id: Option<&str>,
     ) -> Result<()> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         if let Some(mm) = self.get_mindmap(name, user_id, agent_id).await?
             && let Some(id) = &mm.id
         {
@@ -2999,16 +2826,7 @@ impl MemoryStorage for SurrealStorage {
         if agent_id.is_some() {
             scope_parts.push("agent_id = $aid".into());
         }
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
 
         let sql = format!(
             "SELECT * FROM memory WHERE {} ORDER BY created_at ASC LIMIT 200",
@@ -3119,16 +2937,7 @@ impl MemoryStorage for SurrealStorage {
         user_id: &str,
         memory: &crate::memory::Memory,
     ) -> Result<()> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         // Look for a persona mindmap belonging to this user
         let maps: Vec<DbMindMap> = db
             .query("SELECT * FROM mindmap WHERE user_id = $uid AND map_type = 'radial' LIMIT 1")
@@ -3191,18 +3000,7 @@ impl MemoryStorage for SurrealStorage {
                     break;
                 }
                 // Expand forward relations
-                let db = {
-                    let state = self.connection.read().expect(
-                        "Connection lock poisoned - another thread panicked while holding the lock",
-                    );
-                    match &*state {
-                        ConnectionState::Connected(db) => db.clone(),
-                        ConnectionState::Reconnecting => {
-                            anyhow::bail!("Connection is reconnecting")
-                        }
-                        ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-                    }
-                };
+                let db = self.live_db()?;
                 let neighbors: Vec<crate::entity::Relation> = db
                     .query("SELECT * FROM relation WHERE from = $entity")
                     .bind(("entity", current.clone()))
@@ -3250,18 +3048,7 @@ impl MemoryStorage for SurrealStorage {
                 if let Some(e) = self.get_entity(&name).await? {
                     entities.push(e);
                 }
-                let db = {
-                    let state = self.connection.read().expect(
-                        "Connection lock poisoned - another thread panicked while holding the lock",
-                    );
-                    match &*state {
-                        ConnectionState::Connected(db) => db.clone(),
-                        ConnectionState::Reconnecting => {
-                            anyhow::bail!("Connection is reconnecting")
-                        }
-                        ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-                    }
-                };
+                let db = self.live_db()?;
                 let rels: Vec<crate::entity::Relation> = db
                     .query("SELECT * FROM relation WHERE from = $n OR to = $n")
                     .bind(("n", name.clone()))
@@ -3310,16 +3097,7 @@ impl MemoryStorage for SurrealStorage {
         if let Some(rt) = relation_type {
             conditions.push(format!("relation_type = '{}'", rt));
         }
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
 
         let sql = format!(
             "SELECT * FROM relation WHERE {} LIMIT {}",
@@ -3345,16 +3123,7 @@ impl MemoryStorage for SurrealStorage {
     // ── Phase 4: Temporal Entity History ─────────────────────────────────────
 
     async fn get_entity_history(&self, name: &str) -> Result<Vec<crate::memory::MemoryHistory>> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         let rows: Vec<crate::memory::MemoryHistory> = db
             .query("SELECT * FROM memory_history WHERE memory_id = $n ORDER BY changed_at DESC")
             .bind(("n", name.to_string()))
@@ -3368,16 +3137,7 @@ impl MemoryStorage for SurrealStorage {
         &self,
         before_rfc3339: &str,
     ) -> Result<crate::entity::KnowledgeGraph> {
-        let db = {
-            let state = self.connection.read().expect(
-                "Connection lock poisoned - another thread panicked while holding the lock",
-            );
-            match &*state {
-                ConnectionState::Connected(db) => db.clone(),
-                ConnectionState::Reconnecting => anyhow::bail!("Connection is reconnecting"),
-                ConnectionState::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
-            }
-        };
+        let db = self.live_db()?;
         let entities: Vec<crate::entity::Entity> = db
             .query("SELECT * FROM entity WHERE created_at <= type::datetime($t)")
             .bind(("t", before_rfc3339.to_string()))
@@ -3440,10 +3200,13 @@ impl SurrealStorage {
         run_migrations(&db).await?;
         Self::ensure_embedding_indexes(&db, embedding_service.dimensions()).await?;
 
+        let embedded_semaphore = make_embedded_semaphore(&connection_info.config);
+
         Ok(Self {
-            connection: Arc::new(std::sync::RwLock::new(ConnectionState::Connected(db))),
+            connection: Arc::new(ArcSwap::new(Arc::new(ConnectionCell::Connected(db)))),
             connection_info,
             embedding_service,
+            embedded_semaphore,
             #[cfg(feature = "palace")]
             palace: tokio::sync::OnceCell::new(),
         })
@@ -3699,37 +3462,64 @@ mod retry_tests {
     }
 
     #[test]
-    fn test_retriable_network_errors() {
+    fn test_classify_transport_errors_as_reconnect() {
         let storage = mock_storage();
-
-        let err = anyhow::anyhow!("Connection uninitialised");
-        assert!(storage.is_retriable_error(&err));
-
-        let err = anyhow::anyhow!("connection closed");
-        assert!(storage.is_retriable_error(&err));
-
-        let err = anyhow::anyhow!("Connection timeout");
-        assert!(storage.is_retriable_error(&err));
-
-        let err = anyhow::anyhow!("too many connections");
-        assert!(storage.is_retriable_error(&err));
+        for raw in [
+            "Connection uninitialised",
+            "connection closed",
+            "connection refused",
+            "connection reset by peer",
+            "network unreachable",
+            "DNS lookup failed",
+        ] {
+            let err = anyhow::anyhow!(raw);
+            assert_eq!(
+                storage.classify_error(&err),
+                RetryAction::Reconnect,
+                "{raw} should be Reconnect"
+            );
+        }
     }
 
     #[test]
-    fn test_non_retriable_errors() {
+    fn test_classify_server_busy_as_retry_not_reconnect() {
         let storage = mock_storage();
+        // These previously triggered a reconnect — wrong. The connection
+        // is fine; the server-side is busy. Backoff-and-retry is correct.
+        for raw in [
+            "Operation timeout",
+            "query timed out",
+            "too many connections",
+            "backpressure applied",
+            "lock timeout while writing",
+            "serialization failure on commit",
+        ] {
+            let err = anyhow::anyhow!(raw);
+            assert_eq!(
+                storage.classify_error(&err),
+                RetryAction::Retry,
+                "{raw} should be Retry (not Reconnect)"
+            );
+        }
+    }
 
-        let err = anyhow::anyhow!("Found field 'foo', but no such field exists");
-        assert!(!storage.is_retriable_error(&err));
-
-        let err = anyhow::anyhow!("invalid credentials");
-        assert!(!storage.is_retriable_error(&err));
-
-        let err = anyhow::anyhow!("table doesn't exist");
-        assert!(!storage.is_retriable_error(&err));
-
-        let err = anyhow::anyhow!("record not found");
-        assert!(!storage.is_retriable_error(&err));
+    #[test]
+    fn test_classify_schema_errors_as_fail_fast() {
+        let storage = mock_storage();
+        for raw in [
+            "Found field 'foo', but no such field exists",
+            "invalid credentials",
+            "table doesn't exist",
+            "record not found",
+            "syntax error in query",
+        ] {
+            let err = anyhow::anyhow!(raw);
+            assert_eq!(
+                storage.classify_error(&err),
+                RetryAction::FailFast,
+                "{raw} should be FailFast"
+            );
+        }
     }
 
     #[tokio::test]
@@ -3760,17 +3550,17 @@ mod retry_tests {
         // After reconnect, state should be either Connected (if DB available) or Failed (if not)
         // The important thing is that it's no longer in the initial Failed/Reconnecting state
         {
-            let state = storage.connection.read().unwrap();
-            match &*state {
-                ConnectionState::Connected(_) => {
+            let cell = storage.connection.load();
+            match &**cell {
+                ConnectionCell::Connected(_) => {
                     // Reconnection succeeded
                     assert!(result.is_ok());
                 }
-                ConnectionState::Failed(_) => {
+                ConnectionCell::Failed(_) => {
                     // Reconnection failed
                     assert!(result.is_err());
                 }
-                ConnectionState::Reconnecting => {
+                ConnectionCell::Reconnecting => {
                     panic!("State should not remain Reconnecting after reconnect() completes");
                 }
             }
@@ -3903,9 +3693,9 @@ mod retry_tests {
         // Give the dropped future's guard a moment to run.
         tokio::time::sleep(Duration::from_millis(20)).await;
 
-        let state = storage.connection.read().unwrap();
+        let cell = storage.connection.load();
         assert!(
-            !matches!(&*state, ConnectionState::Reconnecting),
+            !matches!(&**cell, ConnectionCell::Reconnecting),
             "connection must not be stranded in Reconnecting after cancellation"
         );
     }
@@ -3968,11 +3758,12 @@ mod retry_tests {
         };
 
         SurrealStorage {
-            connection: Arc::new(std::sync::RwLock::new(ConnectionState::Failed(
+            connection: Arc::new(ArcSwap::new(Arc::new(ConnectionCell::Failed(
                 "test".to_string(),
-            ))),
+            )))),
             connection_info,
             embedding_service: Arc::new(MockEmbedding),
+            embedded_semaphore: None,
             #[cfg(feature = "palace")]
             palace: tokio::sync::OnceCell::new(),
         }

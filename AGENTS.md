@@ -2,6 +2,63 @@
 
 This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
+## Code-Quality Discipline (read this first)
+
+Two layered disciplines apply to every change. They are not advisory.
+
+### Karpathy's 4 Rules (`karpathy-guidelines` skill)
+
+1. **Think Before Coding** — State assumptions; surface multiple
+   interpretations; stop and ask when unclear. Do not assume; do not hide
+   confusion.
+2. **Simplicity First** — Minimum code that solves the problem. No
+   speculative features, abstractions, configurability, or error handling
+   for impossible scenarios.
+3. **Surgical Changes** — Touch only what the task requires. Match existing
+   style. If you notice unrelated dead code, mention it; do not delete it.
+   Every changed line must trace directly to the request.
+4. **Goal-Driven Execution** — Convert to verifiable goals: "Fix the bug" →
+   "write a test that reproduces it, then make it pass."
+
+### Boris Cherny's 3 Core Principles + self-improvement loop
+
+1. **Simplicity First** — Prefer deleting lines to adding them.
+2. **No Laziness** — Find root causes. No band-aids, no temporary fixes,
+   no "tune a knob to make the symptom go away."
+3. **Minimal Impact** — Only touch what is necessary. No new bugs while
+   fixing old ones.
+
+**Self-improvement loop**: when you do something wrong in this repo, append
+the lesson as a one-line rule to [`docs/lessons.md`](docs/lessons.md).
+Read it before any non-trivial change. Create the file the first time you
+would have appended to it.
+
+### Why these are here
+
+This repo has accumulated defects (e.g. the connection topology tracked in
+`.kbd-orchestrator/phases/surrealdb-connection-architecture/`) that are
+exactly the failure mode these rules prevent: wrapping a clone-safe handle
+in a blocking lock (laziness + non-surgical), then adding retry knobs to
+mask the contention (root cause not addressed).
+
+## Rust Skills to Invoke
+
+Before writing Rust code, invoke the relevant skill via the Skill tool.
+
+| Skill | Reach for when… |
+|---|---|
+| `rust-skills:m01-ownership` / `rust-ownership-system` | `Arc<T>` clone semantics, borrow/lifetime questions. |
+| `rust-skills:m06-error-handling` / `rust-error-handling` | Typed errors, `Result` design, error propagation, retry classification. |
+| `rust-skills:m07-concurrency` / `rust-async-patterns` | **Critical** for any `Mutex`/`RwLock`/`ArcSwap`/`tokio::sync` work — the active connection-architecture defect lives here. |
+| `rust-skills:m10-performance` | Benchmarks, hot-path allocation. |
+| `rust-skills:m15-anti-pattern` | Catches "wrap it in a lock to make it Send/Sync." |
+| `rust-skills:domain-cloud-native` | MCP transport, Docker, the `src/mcp/` boundary. |
+| `rust-skills:coding-guidelines` | Naming, formatting, clippy expectations. |
+| `prometheus-rust-auditor` | Pre-merge review pass on any non-trivial Rust diff. |
+
+If a skill you expect is not listed, check `~/.agents/skills/` and
+`~/.claude/skills/` before assuming it exists.
+
 ## Project Overview
 
 This is a high-performance Model Context Protocol (MCP) memory server built in Rust, providing semantic search capabilities with multiple embedding providers. It has TWO artifacts:
@@ -187,10 +244,17 @@ Migrations live in `crates/surreal-memory/src/storage/migrations/mod.rs`.
 - v2: Memory table (scoped, mem0-compatible)
 - v3: TaskStream table
 - v4: MemoryHistory audit log
-- v5: HNSW vector indexes (entity + memory)
+- v5: HNSW vector indexes (entity + memory, 1536d)
 - v6: Mindmap table + BM25 full-text indexes
 - v7: TaskStream auto-summarization fields (`auto_summarize`, `summary_count`, `model_id`)
 - v8: Memory metadata FLEXIBLE (allows arbitrary nested JSON)
+- v9–v13: Mindmap schema refinements (flexible nodes/edges, nested fields)
+- v14: Legacy enum string normalization (repair migration)
+- v15: Enum fields as strings for portability
+- v16: Palace `drawers` table with 384d HNSW, BM25, wing/room/hall taxonomy indexes (palace feature)
+
+Always check `crates/surreal-memory/src/storage/migrations/mod.rs` for the
+canonical list — this section can lag.
 
 ## Common Patterns
 
@@ -212,13 +276,41 @@ Migrations live in `crates/surreal-memory/src/storage/migrations/mod.rs`.
 3. Add variant to `EmbeddingProvider` enum
 4. Wire into `create_embedding_service()` factory
 
+## SurrealDB Skill References
+
+This project benefits from official SurrealDB and community agent skills.
+**Invoke the relevant skill before writing SurrealDB-touching code** — they
+encode best practices that this codebase has historically gotten wrong
+(see the architectural defects in
+`.kbd-orchestrator/phases/surrealdb-connection-architecture/`).
+
+| Skill | Reach for when… |
+|---|---|
+| `surrealql` | Authoring SurrealQL — DDL, DML, transactions, control flow. SurrealQL is **NOT ANSI-SQL**; do not assume SQL idioms transfer. |
+| `surrealdb-vector` | Touching HNSW indexes (v5 = 1536d, v16 = 384d palace). Use when tuning `DIMENSION`, `DIST`, `EFC`, `M`, `M0`, or KNN queries. |
+| `surrealdb-expert` | Connection management, permissions, RBAC, row-level security, performance patterns. Directly relevant to the connection-architecture work. |
+| `surrealdb-python` | Only for Python SDK consumers. Rarely applies in this Rust-only repo. |
+
+There is no `surrealdb-export` skill in the official SurrealDB skill set.
+For backups, use the `surreal export` / `surreal import` CLI directly.
+
+## Palace Feature
+
+The `palace` feature flag opts into a separate vector store (`drawers` table,
+384d HNSW, BM25, wing/room/hall taxonomy). It is initialized lazily via
+`PalaceContext` (OnceCell) and exposes `palace_*` methods on the
+`PalaceStorage` trait. Treat it as an independent vector space from the
+1536d memory/entity store — never cross-query them.
+
 ## SurrealDB Gotchas
 
 1. **SCHEMAFULL rejects unknown fields** — If a Rust struct has a field not in the schema, INSERT/CREATE fails silently with "Found field X, but no such field exists". Always check migrations match structs.
 2. **`option<object>` is NOT flexible** — It accepts `None` or a flat `{}`, but rejects nested JSON like `{"key": {"nested": "value"}}`. Use `FLEXIBLE TYPE option<object>` for arbitrary JSON.
-3. **HNSW index dimensions must match embeddings** — The v5 migration hardcodes `DIMENSION 1536`. If you switch to a model with different dimensions, you need a new migration to recreate the index.
+3. **HNSW index dimensions must match embeddings** — The v5 migration hardcodes `DIMENSION 1536` (memory/entity). The v16 palace migration uses `DIMENSION 384` (drawers). These are independent vector spaces — do not mix them.
 4. **`IF NOT EXISTS` is idempotent** — All DDL uses this, so migrations are safe to re-run.
 5. **Embedded mode creates RocksDB files** — Multiple processes CANNOT share the same embedded DB path simultaneously. For multi-process access, use server mode (`SURREAL_MODE=server`).
+6. **`Surreal<Any>` is already `Arc`-wrapped and clone-safe** — Do NOT wrap it in `std::sync::RwLock` / `Mutex`. Clone the handle per task; the SDK multiplexes queries internally. The current `Arc<std::sync::RwLock<ConnectionState>>` in `crates/surreal-memory/src/storage/surreal.rs:44` is a known defect being remediated (see `openspec/changes/fix-surrealdb-connection-architecture/`). Consult the `surrealdb-expert` skill before touching it.
+7. **Embedded mode is a first-class production target** — but RocksDB's stripe-locking (default 16 stripes/CF) means concurrent transactions on overlapping keys serialize at the storage engine. Any application-layer lock layered on top compounds this. The fix is (a) no application lock around `Surreal<Any>` (see Gotcha #6) and (b) bound in-flight ops with a semaphore sized to the stripe count (`SURREAL_EMBEDDED_MAX_INFLIGHT`, default 16). Do NOT frame embedded mode as "dev-only."
 
 ## Performance Considerations
 

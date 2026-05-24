@@ -2,6 +2,86 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Code-Quality Discipline (read this first)
+
+Two layered disciplines apply to every change in this repository. They are
+not advisory. They are why this codebase keeps accumulating defects like
+the connection-architecture issue tracked in
+`.kbd-orchestrator/phases/surrealdb-connection-architecture/`.
+
+### Karpathy's 4 Rules (invoke the `karpathy-guidelines` skill)
+
+1. **Think Before Coding** — State assumptions. If multiple interpretations
+   exist, surface them; don't pick silently. If something is unclear, stop
+   and ask. **Do not assume; do not hide confusion.**
+2. **Simplicity First** — Minimum code that solves the problem. No
+   speculative features, abstractions, configurability, or error handling
+   for impossible scenarios. *"Would a senior engineer say this is
+   overcomplicated?"* If yes, simplify.
+3. **Surgical Changes** — Touch only what the task requires. No "improving"
+   adjacent code, comments, or formatting. Match existing style even if you
+   disagree with it. If you notice unrelated dead code, **mention it; do
+   not delete it.** Every changed line must trace directly to the request.
+4. **Goal-Driven Execution** — Convert tasks to verifiable goals before
+   coding. "Add validation" → "write tests for invalid input, then make
+   them pass." For multi-step work, state the plan with explicit verify
+   steps before touching code.
+
+### Boris Cherny's 3 Core Principles + self-improvement loop
+
+1. **Simplicity First** — Prefer deleting lines over adding them. The best
+   change is often a smaller one than first proposed.
+2. **No Laziness** — Find root causes. No band-aids, no "fix this with a
+   timeout knob", no temporary workarounds. Hold yourself to senior
+   developer standards. (The whole point of the surrealdb-connection-
+   architecture phase is that retry-knob tweaking was exactly this
+   anti-pattern.)
+3. **Minimal Impact** — Only touch what is necessary. No side effects. Do
+   not introduce new bugs while fixing old ones.
+
+**Self-improvement loop (the most important rule):** When you (Claude) do
+something wrong in this repo, append the lesson to
+[`docs/lessons.md`](docs/lessons.md) as a one-line rule that will prevent
+the same mistake. Over time this file becomes the project's accumulated
+wisdom. Read it at the start of any non-trivial change. If `docs/lessons.md`
+does not exist yet, create it the first time you would have appended.
+
+### Synthesis (the working ruleset)
+
+| Principle | When it bites in this repo |
+|---|---|
+| Think before coding | Don't reach for `cargo edit` before reading `surreal.rs:38-42` — the answer to "should I wrap this in a lock?" is in the existing doc comment. |
+| Simplicity first | Don't add `arc-swap` + a supervisor task + a session pool in one PR. Sequence the changes per the plan. |
+| Surgical changes | The ArcSwap refactor touches 47 sites. Do not also reformat the file or rename anything else. |
+| Goal-driven | "Fix the timeouts" is not a goal. "Load harness shows ≥3× p99 improvement on concurrent hybrid_search" is. |
+| No laziness | Tuning `SURREAL_*_RETRIES` is laziness. Replacing the blocking lock is the root-cause fix. |
+| Minimal impact | The `MemoryStorage` trait surface must not change — UAR depends on it. Validate at every change. |
+| lessons.md loop | Every time the build or load harness exposes a missed rule, write it down. |
+
+## Rust Skills to Invoke
+
+For any Rust change in this repo, **invoke the relevant skill via the Skill
+tool before writing code.** These exist; using them prevents the kind of
+defects this repo has historically accumulated.
+
+| Skill | Reach for when… |
+|---|---|
+| `rust-skills:m01-ownership` | Borrow checker, lifetimes, `Arc<T>` clone semantics. Directly relevant to the `Surreal<Any>` clone-don't-lock pattern. |
+| `rust-skills:m06-error-handling` | Designing typed errors (Change 4 of the connection-architecture phase replaces string-matching with `surrealdb::Error` variant discrimination). |
+| `rust-skills:m07-concurrency` | **Critical** — any work touching `Mutex`, `RwLock`, `ArcSwap`, `tokio::sync::*`, `Send`/`Sync`, async deadlock risk. The current connection-architecture defect is exactly this layer. |
+| `rust-skills:m10-performance` | Benchmarking the load harness (Change 1), avoiding allocation in hot paths. |
+| `rust-skills:m15-anti-pattern` | Catches "wrap it in a lock to make it safe" — the exact anti-pattern that produced our `Arc<RwLock<Surreal>>`. |
+| `rust-skills:domain-cloud-native` | MCP transport, Docker, gRPC-adjacent concerns; consult when touching `src/mcp/` or `docker-compose.yaml`. |
+| `rust-skills:domain-web` | Only for HTTP transport (axum) work in `src/mcp/mod.rs`. |
+| `rust-skills:coding-guidelines` | Naming, formatting, clippy lints; default for any non-trivial Rust diff. |
+| `rust-async-patterns` (prometheus-skill-pack) | Tokio runtime, spawn, channels, cancellation — sister skill to `m07-concurrency`. |
+| `rust-error-handling` (prometheus-skill-pack) | Sister skill to `m06-error-handling`. |
+| `rust-ownership-system` (prometheus-skill-pack) | Sister skill to `m01-ownership`. |
+| `prometheus-rust-auditor` | Pre-merge review pass on any non-trivial Rust diff in this repo. Treat as the gate before `commit-push-pr`. |
+
+If you do not see a skill listed here that you think exists, do not invent
+it. Check `~/.agents/skills/` and `~/.claude/skills/` first; ask if absent.
+
 ## Project Overview
 
 This is a high-performance Model Context Protocol (MCP) memory server built in Rust, providing semantic search capabilities with multiple embedding providers. It has TWO artifacts:
@@ -242,6 +322,27 @@ Migrations live in `crates/surreal-memory/src/storage/migrations/mod.rs`.
 3. Add variant to `EmbeddingProvider` enum
 4. Wire into `create_embedding_service()` factory
 
+## SurrealDB Skill References
+
+This project benefits from the official and community SurrealDB agent skills.
+**Invoke the relevant skill before writing SurrealDB-touching code** — they
+encode best practices that this codebase has historically gotten wrong
+(see the architectural defects tracked in
+`.kbd-orchestrator/phases/surrealdb-connection-architecture/`).
+
+| Skill | Reach for when… |
+|---|---|
+| `surrealql` | Authoring any SurrealQL — DDL, DML, transactions, control flow. Reminder: SurrealQL is **NOT ANSI-SQL**; do not assume SQL idioms transfer. Use `surreal validate` and `npx @surrealdb/surql-fmt` per the skill's guidance. |
+| `surrealdb-vector` | Touching HNSW indexes (migrations v5 = 1536d memory/entity, v16 = 384d palace `drawers`). Use when tuning `DIMENSION`, `DIST`, `EFC`, `M`, `M0`, or KNN `<\|K, EF\|>` queries. |
+| `surrealdb-expert` | Architecture decisions: connection management (pooling, single shared client, sessions), permissions / RBAC, row-level security, schema design, performance patterns. Most directly relevant to the connection-architecture work in this repo. |
+| `surrealdb-python` | Only when working with Python SDK consumers. This repo is Rust-only, so it rarely applies — but UAR adjacent tooling may use it. |
+
+There is no `surrealdb-export` skill in the official SurrealDB skill set
+(only `surrealql`, `surrealdb-vector`, `surrealdb-python`). For backups and
+data migration, use the `surreal export` / `surreal import` CLI commands
+directly; document any non-trivial usage in a migration runbook rather than
+a skill.
+
 ## SurrealDB Gotchas
 
 1. **SCHEMAFULL rejects unknown fields** — If a Rust struct has a field not in the schema, INSERT/CREATE fails silently with "Found field X, but no such field exists". Always check migrations match structs.
@@ -249,6 +350,8 @@ Migrations live in `crates/surreal-memory/src/storage/migrations/mod.rs`.
 3. **HNSW index dimensions must match embeddings** — The v5 migration hardcodes `DIMENSION 1536` for memory/entity tables. The v16 palace migration uses `DIMENSION 384` for drawers. These are independent vector spaces — do not mix them.
 4. **`IF NOT EXISTS` is idempotent** — All DDL uses this, so migrations are safe to re-run.
 5. **Embedded mode creates RocksDB files** — Multiple processes CANNOT share the same embedded DB path simultaneously. For multi-process access, use server mode (`SURREAL_MODE=server`).
+6. **`Surreal<Any>` is already `Arc`-wrapped and clone-safe** — Do NOT wrap it in `std::sync::RwLock`, `tokio::sync::RwLock`, or `Mutex`. Clone the handle per task; the SDK multiplexes queries internally. The current `Arc<std::sync::RwLock<ConnectionState>>` in `crates/surreal-memory/src/storage/surreal.rs:44` is a known architectural defect being remediated (see `openspec/changes/fix-surrealdb-connection-architecture/`). Consult the `surrealdb-expert` skill before touching this code path.
+7. **Embedded mode is a first-class production target** — but its concurrency primitives are different from server mode. RocksDB's stripe-locking (default 16 stripes per column family) means concurrent transactions on overlapping keys serialize at the storage engine. Any application-layer lock layered on top compounds this into "lock timeout" / "serialization failure" errors. The fix is (a) remove application-layer locks (see Gotcha #6) and (b) bound in-flight ops with a semaphore sized to the stripe count (`SURREAL_EMBEDDED_MAX_INFLIGHT`, default 16). The connection-architecture phase produces benchmarks proving the embedded path scales to production workloads under that discipline; do NOT regress to "embedded is dev-only" framing.
 
 ## Performance Considerations
 

@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "skills": {
+    "surrealdb-expert": {
+      "source": "martinholovsky/claude-skills-generator",
+      "sourceType": "github",
+      "skillPath": "skills/surrealdb-expert/SKILL.md",
+      "computedHash": "193e7e210b4db1842cc5ae0d040ce1492d82371ab648a82821ea6ec91d9cbc65"
+    },
+    "surrealdb-python": {
+      "source": "surrealdb/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/surrealdb-python/SKILL.md",
+      "computedHash": "dec5efb3627aae9d3d207ead1d1cbdd0950e4002a86a40fe686b56c78e021f50"
+    },
+    "surrealdb-vector": {
+      "source": "surrealdb/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/surrealdb-vector/SKILL.md",
+      "computedHash": "6983f571753cb8fb3888bf68fe7a9991815fa2b68e00d564af07e3b4599d65df"
+    },
+    "surrealql": {
+      "source": "surrealdb/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/surrealql/SKILL.md",
+      "computedHash": "f8f661ff2a75f87f16c3253da8fcd36ae86772c102979396d4276d7f9dbf322e"
+    }
+  }
+}

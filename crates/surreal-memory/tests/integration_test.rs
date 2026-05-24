@@ -1617,6 +1617,7 @@ async fn test_operation_survives_transient_failure() {
         max_retry_delay_ms: 100,
         jitter_factor: 0.1,
         operation_deadline_ms: 30_000,
+        query_timeout_ms: 10_000,
     };
 
     let config = SurrealConfig {

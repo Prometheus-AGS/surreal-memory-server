@@ -1,12 +1,19 @@
 {
-  "active_phase": "uar-consumer-resync",
+  "active_phase": "surrealdb-connection-architecture",
   "active_phase_status": "executing",
   "completed_phases": ["task-stream-reliability", "write-path-reliability"],
+  "paused_phases": [
+    {"name": "uar-consumer-resync", "previous_status": "executing", "reason": "deferred to address higher-priority architectural defect in connection topology"}
+  ],
   "last_phase": "uar-consumer-resync",
-  "last_phase_status": "executing",
+  "last_phase_status": "paused",
   "change_backend": "openspec",
-  "recommended_next_phase": "uar-consumer-resync",
-  "next_step": "kbd-execute resync-librefang-consumer",
+  "active_change": "load-repro-harness",
+  "active_change_path": "openspec/changes/fix-surrealdb-connection-architecture",
+  "changes_total": 7,
+  "changes_completed": 1,
+  "recommended_next_phase": "surrealdb-connection-architecture",
+  "next_step": "Implement Change 1 — load-repro harness against local docker-compose SurrealDB + embedded mode; commit baseline numbers before starting Change 2",
   "created": "2026-05-17",
-  "updated": "2026-05-19"
+  "updated": "2026-05-24"
 }

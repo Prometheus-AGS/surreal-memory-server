@@ -90,7 +90,15 @@
       "Bash(cp -r ./data/uar.db /tmp/uar-migration-check.db)",
       "Bash(SURREAL_PATH=/tmp/uar-migration-check.db cargo run --quiet --bin test_db_setup)",
       "Bash(timeout 40 env SURREAL_MODE=embedded SURREAL_PATH=/tmp/uar-migration-check.db EMBEDDING_PROVIDER=local MCP_STDIO=false API_PORT=23099 ./target/release/surreal-memory-server)",
-      "Bash(echo \"EXIT: $?\")"
+      "Bash(echo \"EXIT: $?\")",
+      "mcp__tavily-mcp__tavily_research",
+      "Bash(ls ~/.claude/skills/ 2>/dev/null | grep -iE \"surreal|surrealql|surrealdb\" ; echo \"---plugins---\"; ls ~/.claude/plugins/ 2>/dev/null | head -20; echo \"---\"; find ~/.claude -maxdepth 5 -type d -iname \"*surreal*\" 2>/dev/null | head -20)",
+      "Bash(ls ~/.agents/skills/surrealdb-expert/ ~/.agents/skills/surrealql/ ~/.agents/skills/surrealdb-vector/ 2>&1 | head -80)",
+      "Bash(ls ~/.agents/skills/surrealql/references/ 2>&1 | head -40)",
+      "Read(//Users/gqadonis/.TOOLS/skills/agents/**)",
+      "Bash(find ~/.agents/skills/prometheus-skill-pack -maxdepth 3 -type f -name \"*.md\" 2>/dev/null | head -30; echo \"---\"; ls ~/.claude/skills/karpathy-guidelines/ 2>/dev/null; echo \"---\"; ls ~/.agents/skills/ | grep -iE \"^\\(karpathy|tokenizer|micrograd|nanogpt|llm.c|backprop\\)\" | head -10)",
+      "Bash(python3)",
+      "Bash(grep -n \"embedding_service,\\\\s*$\\\\|embedding_service: Arc::new\\(MockEmbedding\\)\" crates/surreal-memory/src/storage/surreal.rs)"
     ]
   }
 }

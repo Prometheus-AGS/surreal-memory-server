@@ -54,6 +54,11 @@ fn parse_retry_config_from_env() -> surreal_memory::RetryConfig {
         .and_then(|v| v.parse().ok())
         .unwrap_or(30_000);
 
+    let query_timeout_ms = env::var("SURREAL_QUERY_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10_000);
+
     surreal_memory::RetryConfig {
         max_connect_retries,
         max_operation_retries,
@@ -61,6 +66,7 @@ fn parse_retry_config_from_env() -> surreal_memory::RetryConfig {
         max_retry_delay_ms,
         jitter_factor,
         operation_deadline_ms,
+        query_timeout_ms,
     }
 }
 

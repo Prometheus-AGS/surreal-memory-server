@@ -6,7 +6,7 @@
 
 use crate::palace::adapter::PalaceAdapter;
 use crate::palace::embedding::FastEmbedService;
-use crate::storage::surreal::{ConnectionState, SurrealStorage};
+use crate::storage::surreal::{ConnectionCell, SurrealStorage};
 use anyhow::{Context, Result};
 use mempalace_core::{
     dialect::compress::{Dialect, DialectConfig},
@@ -39,16 +39,17 @@ impl PalaceContext {
     /// This reuses the same `Surreal<Any>` connection as the rest of
     /// surreal-memory, so there is no extra connection cost.
     pub async fn from_storage(storage: &SurrealStorage) -> Result<Self> {
-        // Capture connection arc for the adapter closure
+        // Capture connection cell for the adapter closure — atomic load,
+        // no lock, no contention with the rest of surreal-memory.
         let conn = storage.connection_arc();
         let adapter = Arc::new(PalaceAdapter::new(move || {
-            let state = conn.read().expect("Connection lock poisoned");
-            match &*state {
-                ConnectionState::Connected(db) => Ok(db.clone()),
-                ConnectionState::Reconnecting => {
+            let cell = conn.load();
+            match &**cell {
+                ConnectionCell::Connected(db) => Ok(db.clone()),
+                ConnectionCell::Reconnecting => {
                     anyhow::bail!("Connection is reconnecting")
                 }
-                ConnectionState::Failed(msg) => {
+                ConnectionCell::Failed(msg) => {
                     anyhow::bail!("Connection failed: {}", msg)
                 }
             }
@@ -81,13 +82,13 @@ impl PalaceContext {
     pub fn from_storage_noop(storage: &SurrealStorage) -> Self {
         let conn = storage.connection_arc();
         let adapter = Arc::new(PalaceAdapter::new(move || {
-            let state = conn.read().expect("Connection lock poisoned");
-            match &*state {
-                ConnectionState::Connected(db) => Ok(db.clone()),
-                ConnectionState::Reconnecting => {
+            let cell = conn.load();
+            match &**cell {
+                ConnectionCell::Connected(db) => Ok(db.clone()),
+                ConnectionCell::Reconnecting => {
                     anyhow::bail!("Connection is reconnecting")
                 }
-                ConnectionState::Failed(msg) => {
+                ConnectionCell::Failed(msg) => {
                     anyhow::bail!("Connection failed: {}", msg)
                 }
             }
