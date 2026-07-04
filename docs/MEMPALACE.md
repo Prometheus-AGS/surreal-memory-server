@@ -47,7 +47,7 @@ surreal-memory-server/
 ```
 
 **Key constraints:**
-- `surrealdb = "3.1.5"` (workspace pinned)
+- `surrealdb = "3.2.0"` (workspace pinned)
 - `EmbeddingProvider::Local` path exists but requires `local-embeddings` feature
   (pulls in `candle-core`, `candle-nn`, `candle-transformers`, `tokenizers`, `hf-hub`)
 - Cold-start default is `EMBEDDING_PROVIDER=local` → resolves to `BAAI/bge-small-en-v1.5`
@@ -88,7 +88,7 @@ mempalace-rs/
 - The `Drawer` schema (`wing`, `room`, `hall`, `importance`, `embedding`, `content_hash`)
   is orthogonal to surreal-memory's `Memory` schema — they coexist cleanly
 - `surrealdb = { version = "3", features = ["kv-mem", "protocol-ws"] }` in
-  `mempalace-surreal` — compatible with `3.1.5` in surreal-memory-server workspace
+  `mempalace-surreal` — compatible with `3.2.0` in surreal-memory-server workspace
 
 ---
 
@@ -526,7 +526,7 @@ for backward compatibility when `EMBEDDING_PROVIDER=local` is explicitly set.
 
 | Crate | surreal-memory-server | mempalace-core | Resolution |
 |---|---|---|---|
-| `surrealdb` | `3.1.5` | `3.x` (via mempalace-surreal) | Compatible; mempalace-core has no direct SurrealDB dep |
+| `surrealdb` | `3.2.0` | `3.x` (via mempalace-surreal) | Compatible; mempalace-core has no direct SurrealDB dep |
 | `fastembed` | absent | `4.x` | Add to workspace; no conflicts |
 | `rusqlite` | absent | `0.31` (bundled, dev-dep only) | No conflict; only in test code |
 | `walkdir` | absent | `2.x` | Add to workspace |
