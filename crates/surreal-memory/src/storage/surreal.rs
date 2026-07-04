@@ -965,7 +965,6 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
         RetryAction::FailFast
     }
 
-
     /// Reconnect with an explicit connect-attempt cap. `retry_operation` calls
     /// this with a small cap (`OPERATION_RECONNECT_ATTEMPTS`) so a reconnection
     /// cannot amplify into a long stall; the surrounding operation deadline is

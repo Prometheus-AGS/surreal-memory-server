@@ -195,7 +195,11 @@ impl LatencyReport {
             .map(|(k, v)| format!("{k}:{v}"))
             .collect::<Vec<_>>()
             .join(" ");
-        let errs = if errs.is_empty() { "—".to_string() } else { errs };
+        let errs = if errs.is_empty() {
+            "—".to_string()
+        } else {
+            errs
+        };
         format!(
             "| {label} | {} | {p50} | {p95} | {p99} | {} | {errs} |",
             self.samples_ms.len(),
@@ -264,11 +268,7 @@ fn append_baseline(section: &str, header: &str, rows: &[String]) {
     let ts = chrono::Utc::now().to_rfc3339();
     writeln!(file, "\n## {section} — {ts}\n").unwrap();
     writeln!(file, "{header}").unwrap();
-    writeln!(
-        file,
-        "|---|---|---|---|---|---|---|"
-    )
-    .unwrap();
+    writeln!(file, "|---|---|---|---|---|---|---|").unwrap();
     for row in rows {
         writeln!(file, "{row}").unwrap();
     }
