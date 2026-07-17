@@ -98,7 +98,8 @@
       "Read(//Users/gqadonis/.TOOLS/skills/agents/**)",
       "Bash(find ~/.agents/skills/prometheus-skill-pack -maxdepth 3 -type f -name \"*.md\" 2>/dev/null | head -30; echo \"---\"; ls ~/.claude/skills/karpathy-guidelines/ 2>/dev/null; echo \"---\"; ls ~/.agents/skills/ | grep -iE \"^\\(karpathy|tokenizer|micrograd|nanogpt|llm.c|backprop\\)\" | head -10)",
       "Bash(python3)",
-      "Bash(grep -n \"embedding_service,\\\\s*$\\\\|embedding_service: Arc::new\\(MockEmbedding\\)\" crates/surreal-memory/src/storage/surreal.rs)"
+      "Bash(grep -n \"embedding_service,\\\\s*$\\\\|embedding_service: Arc::new\\(MockEmbedding\\)\" crates/surreal-memory/src/storage/surreal.rs)",
+      "Bash(git rev-list *)"
     ]
   }
 }
