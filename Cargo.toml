@@ -39,7 +39,17 @@ edition = "2024"
 surreal-memory = { path = "crates/surreal-memory", default-features = false }
 
 # MCP SDK
-rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", features = [
+# `rev` is REQUIRED, not decorative. Without it this dependency floats to the
+# default branch HEAD, and `cargo update` re-resolves straight past the
+# committed Cargo.lock — picking an rmcp whose `model::Content` no longer
+# exists (it is `ContentBlock` in 2.x). Reproduced 2026-07-31:
+# `rm Cargo.lock && cargo check` fails with E0432 + E0639, while a plain
+# `cargo check` succeeds on the stale lock. A lockfile records a resolution; it
+# does not constrain the next one.
+#
+# a64be231 is what the committed lockfile already resolves to, so pinning it
+# changes nothing today — it only stops the drift.
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "a64be231527f923e9f84d4dd7bf3c3bd695ee53e", features = [
     "server",
     "transport-io",
     "macros",
