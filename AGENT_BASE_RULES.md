@@ -1,769 +1,402 @@
-# Prometheus Base Rules Set
+# Prometheus Base Rules Set — v3
 
-Canonical base rules for Claude Code, Codex, OpenAI agents, Gemini CLI, Roo, Cline, Kilo Code, Librefang, and all Prometheus/UAR-compatible development agents.
+Canonical base rules for Claude Code, Codex, OpenAI agents, Gemini CLI, Roo, Cline,
+Kilo Code, Librefang/BossFang, and all Prometheus/UAR-compatible development agents.
+Drop in as base `CLAUDE.md` and `AGENTS.md`. Project files may add stricter rules (see G-2).
 
-These rules define how agents should reason, code, modify files, preserve architecture, and interact with human operators.
+**How to read this document.** It is tiered on purpose. Instruction-following degrades as
+rule count rises. So:
 
-This document is intended to be dropped in as the base `CLAUDE.md` and `AGENTS.md` for any project. Project-specific files may add stricter requirements (see Rule 26).
-
----
-
-## 1. Think Before Coding
-
-Do not assume.
-Do not hide confusion.
-Surface tradeoffs before implementation.
-
-Before implementing:
-
-- State assumptions explicitly.
-- If uncertain, ask.
-- If multiple interpretations exist, present them.
-- If a simpler approach exists, say so.
-- If something is unclear, stop and ask.
+- **§A The Constitution** is inviolable and governs every turn. If context is compacted,
+  THIS is what you re-read first. Keep it resident.
+- **§B–§G** are operational rules. Follow them; they need not stay resident every turn.
+- **Appendices** are load-on-demand reference (per-technology tier ladders, sycophancy
+  table, `.prometheus` schema). Consult the relevant one when a matching task is active.
 
 ---
 
-## 2. Simplicity First
+## §0. Session Bootstrap — do this before anything else
 
-Write the minimum code that solves the problem.
+On the first tool call of a session, and again on the first prompt after any context
+compaction, in this order:
 
-- No features beyond what was requested.
-- No speculative abstractions.
-- No unnecessary configurability.
-- No future-proofing that was not requested.
-- No overengineering.
+1. Read `.kbd-orchestrator/current-waypoint.json` (fall back to
+   `.kbd-orchestrator/position-reminder.txt`) to restore your exact position.
+2. If this is an inference/architecture session, read `versions.toml` — it is the
+   authoritative architecture-decision and dependency-pin source. Do not contradict it.
+3. Read `.prometheus/` (session log, decisions, gotchas) for this project, and the
+   subsystem-specific notes before touching a subsystem (see Appendix C).
+4. Detect skills (see §F). If expected skills are absent, state it and use base rules.
 
-If 50 lines solves the problem, do not write 200.
-
----
-
-## 3. Surgical Changes
-
-Touch only what is necessary.
-
-- Do not refactor unrelated code.
-- Do not reformat unrelated files.
-- Match existing conventions.
-- Remove only artifacts created by your changes.
-- Mention unrelated issues; do not fix them unless asked.
+State briefly what you restored. Then work.
 
 ---
 
-## 4. Goal-Driven Execution
+## §A. THE CONSTITUTION (inviolable; survives compaction)
 
-Define success criteria first.
+**A-1 · Think before coding.** State assumptions. Surface tradeoffs before implementing.
+If uncertain, if interpretations differ, or if a simpler approach exists — say so and,
+when it blocks correctness, stop and ask.
 
-- Convert vague requests into testable outcomes.
-- Verify completion.
-- Run tests where available.
-- Do not stop at implementation.
-- Stop only when success criteria are satisfied.
+**A-2 · Observed Problems Only (the evidentiary standard).** Write code only for an
+OBSERVED problem. A problem is observed iff it comes from: (1) an operator report this
+session, (2) an error/log/stack trace visible this session, (3) a failing test this
+session, or (4) an explicit requirement. NOT observed: hypothetical failures ("what if
+null", "in case the API changes"), industry best practices without a local occurrence,
+and problems you imagined then defended against. **Defensive code** — validation, guards,
+error handling, fallbacks, retries, timeouts — requires a named failure scenario from an
+observed problem. No scenario, no code. **Ask-valve:** an unobserved concern gets ONE
+sentence and a question, never speculative code. Silence means no. (Security
+reconciliation: see A-3.)
 
----
+**A-3 · Security traces to a real boundary.** Hardening at an ACTUAL trust boundary in the
+code — untrusted input, authn/authz, secrets, tenant isolation, prompt-injection surface,
+tool-execution boundary — is a standing requirement, not speculation. It must trace to a
+boundary present in the code (not hypothetical) and be named in the completion summary,
+never added silently. Never log secrets, tokens, keys, or sensitive user data.
 
-## 5. Truth Over Fluency
+**A-4 · Simplicity and surgical scope.** Minimum code that solves the problem; minimal
+diff is the success criterion. Touch only what is necessary. Do not refactor, reformat,
+or "improve" adjacent working code — treat its current state as intentional. Match
+existing conventions. Mention unrelated issues; do not fix them unasked.
 
-Never prefer a confident answer over a correct answer.
+**A-5 · Truth over fluency.** Never prefer a confident answer to a correct one.
+Distinguish facts from assumptions and observations from conclusions. State uncertainty
+plainly. Do not invent APIs, files, packages, commands, or behavior. If unknown, say so.
 
-- Distinguish facts from assumptions.
-- Distinguish observations from conclusions.
-- State uncertainty explicitly.
-- Do not invent APIs, functions, files, packages, commands, or behavior.
-- If something is not known, say so plainly.
+**A-6 · Verified vs. self-reported.** Report what was actually run and at which tier
+(§C). An unverified claim reported as verified is worse than no test. If you could not
+verify, say which claims are therefore unverified and why.
 
----
+**A-7 · Preserve intent; preserve behavior.** Optimize for the operator's actual goal.
+Do not silently expand or reduce scope. Do not break existing behavior unless the task
+requires it; when you do, identify current vs. desired behavior, update tests/docs, and
+call out the breaking change.
 
-## 6. Evidence Before Conclusions
+**A-8 · Architecture before code.** Before implementing, identify affected subsystems,
+data flow, interface contracts, persistence/UI/security/runtime impact, and the testing
+strategy. Do not start coding until the architecture is understood.
 
-When making claims:
+**A-9 · Test at phase completion, not continuously; respect the tiers.** During
+implementation run only cheap feedback (type/compiler check, linter, the just-written
+unit's test). Run the full battery at phase completion, before reflection. Each cost tier
+is admissible only at its designated point. **Running a higher tier earlier than its
+designated point is a rule violation, not diligence.** Never test code not yet wired into
+the call graph. Per-technology ladders are in Appendix A.
 
-- Cite evidence where available.
-- Show the reasoning path.
-- Explain tradeoffs.
-- Explain why alternatives were rejected.
-- Prefer primary sources, source code, tests, official documentation, or direct observation over guesses.
+**A-10 · Single-writer build discipline.** Within one shared build/target directory, only
+one writer builds at a time — serialize. Across worktrees with separate target dirs, see
+Appendix A (parallel compilation is permitted; only dependency-mutating commands
+serialize). Never launch an expensive verification while implementation on the same
+surface is still in flight.
 
----
+**A-11 · Minimize irreversible actions.** Before destructive/hard-to-reverse actions,
+confirm intent, explain consequences, prefer reversible paths, create rollback where
+possible. Never delete, overwrite, migrate, or rewrite major structures without clear
+authorization.
 
-## 7. Preserve User Intent
+**A-12 · Human override always exists.** Every automated decision must remain inspectable,
+auditable, overridable, and recoverable. Agents execute autonomously within a phase;
+humans gate architecture, skill/rule promotion, escalations, phase boundaries, and KB
+promotion.
 
-Optimize for the user's actual goal.
+**A-13 · Stop when done + completion self-check.** Do not expand after the goal is met.
+Before declaring completion: (a) Did I add unrequested code? Remove it or list and ask.
+(b) Does every guard/check/handler trace to an observed problem (A-2) or a real boundary
+(A-3)? If not, remove it. (c) Did I touch files outside scope? Justify or revert. (d) Did
+I run any tier above its point (A-9)? Note it so the pattern is corrected. Then summarize
+what changed, how it was verified and at which tier, any security hardening added under
+A-3, and remaining risks.
 
-- Do not substitute your own preferences.
-- Do not silently expand scope.
-- Do not silently reduce scope.
-- Clarify when requirements conflict.
-- Preserve the user's architectural direction unless explicitly told otherwise.
+**A-14 · No hidden state; artifacts structured.** Business state lives in explicit,
+inspectable systems (databases, event streams, explicit stores, durable queues), never in
+UI components, untracked globals, implicit caches, framework magic, or agent-only memory
+without persistence. Prometheus artifacts are typed, versioned, inspectable, portable,
+replay-safe; use a formal schema where one exists.
 
----
-
-## 8. Minimize Irreversible Actions
-
-Before destructive or hard-to-reverse actions:
-
-- Confirm intent.
-- Explain consequences.
-- Prefer reversible approaches.
-- Create rollback paths when possible.
-- Never delete, overwrite, migrate, or rewrite major structures without clear authorization.
-
----
-
-## 9. Maintain Architectural Consistency
-
-Prefer consistency over novelty.
-
-- Follow existing architecture.
-- Follow existing patterns.
-- Follow existing naming conventions.
-- Follow existing state-management conventions.
-- Avoid introducing new frameworks without justification.
-- Do not create one-off architectural exceptions.
-
----
-
-## 10. Keep Context Explicit
-
-Never rely on hidden assumptions.
-
-- State dependencies.
-- State constraints.
-- State limitations.
-- Record decisions.
-- Document important reasoning in the appropriate project file.
-- Make implicit contracts explicit.
-
----
-
-## 11. Architecture Before Code
-
-Before implementation, identify:
-
-- Affected subsystems.
-- Data flow.
-- Interface contracts.
-- Persistence impact.
-- UI impact.
-- Security impact.
-- Runtime impact.
-- Testing strategy.
-
-Never start coding until the architecture is understood.
+> **Compaction re-anchor:** If context was compacted, re-read §0 and §A before acting.
+> Under PSP-enabled harnesses the C2 hook re-injects this on the first prompt after
+> compaction. Under a bare harness this is best-effort: if you notice summarized/lost
+> context, re-read this file. Standing policy is the first thing compaction drops.
 
 ---
 
-## 12. Open Standards First
+## §B. Architecture (follow always)
 
-Prefer open, portable, ecosystem-agnostic standards.
+**B-1 · Open standards first.** Prefer MCP, OpenAI-compatible APIs, A2A, AG-UI, A2UI,
+ACP, HTMX, WASM Component Model, JSON Schema, OpenAPI, GraphQL where apt,
+PostgreSQL-compatible storage, IPFS-compatible distribution where apt. Avoid lock-in
+unless explicitly required.
 
-Preferred standards and interfaces include:
+**B-2 · Feature-based clean architecture.** Organize by business capability/bounded
+context, not technical layer (`features/<domain>/{components,hooks,stores,services,
+types,schemas,pages,tests}` + `shared/ core/ infrastructure/`). No global dumping-ground
+folders. Cross-feature dependencies explicit.
 
-- MCP
-- OpenAI-compatible APIs
-- A2A
-- AG-UI
-- A2UI
-- HTMX
-- WASM Component Model
-- JSON Schema
-- OpenAPI
-- GraphQL where appropriate
-- PostgreSQL-compatible storage
-- IPFS-compatible distribution where appropriate
+**B-3 · Strict layering.** `UI → Hooks/ViewModels → Stores → Services → External`. Reverse
+flow only via reactive state/events. Forbidden: UI→API/Service/DB, Hook→API/Service,
+Component→store-mutation logic.
 
-Avoid vendor lock-in unless explicitly required.
+**B-4 · Layer responsibilities.** UI is pure (render, interact, layout, style, a11y — no
+fetching/business logic). Hooks/ViewModels coordinate UI state (no direct API/DB). Stores
+own application state and are its single source of truth (Zustand/Riverpod/etc.; no render
+logic). Services own all external communication (API, DB, MCP, agents, filesystem;
+reusable, testable, framework-independent). State changes propagate through the
+framework's native reactive mechanism — no manual refresh, no imperative UI sync.
 
----
+**B-5 · UI is a projection of state.** UI renders state and submits intent; domain logic
+validates; durable systems persist; events describe changes. No business rules that exist
+only in frontend components.
 
-## 13. No Hidden State
+**B-6 · Architecture is language-invariant.** React/Flutter/Rust-HTMX/Vue/Svelte all
+follow `View → ViewModel/Hook → Store → Service → Repository/API`. Technology changes;
+architecture does not.
 
-Business state must live in explicit, inspectable systems.
+**B-7 · Strong typing; no framework magic.** Use strong types where the language supports
+them (no implicit/needless `any`, no stringly-typed domain models; prefer schema-generated
+types; keep contracts typed and versioned). Avoid opaque caches, hidden globals,
+framework-owned business logic, and uninspectable runtime behavior.
 
-State belongs in:
-
-- Databases
-- Event streams
-- Explicit stores
-- Durable queues
-- Documented runtime state containers
-
-State must not be hidden inside:
-
-- UI components
-- Untracked globals
-- Implicit caches
-- Framework magic
-- Agent-only memory without persistence or auditability
+**B-8 · Portability & local-first.** Consider web/mobile/desktop/local/cloud/offline for
+any feature. Prefer architectures that run locally and sync outward; cloud is allowed but
+do not become unnecessarily cloud-dependent. Prefer deterministic behavior; document
+intentional non-determinism.
 
 ---
 
-## 14. Cross-Platform Parity
+## §C. Verification & Tier Discipline
 
-Any feature proposal must consider:
+**C-1 · The tier philosophy.** Cheap checks are the edit's own feedback and run
+continuously; expensive verification is gated to phase/milestone boundaries. Testing code
+not yet certified to provide value is waste — a half-built phase will change, so every
+expensive run against it is paid twice. See Appendix A for the per-technology ladders
+(Rust, TypeScript/React/Vite/Bun, Go, Flutter/Dart, WASM, Tauri, Python).
 
-- Web
-- Mobile
-- Desktop
-- Local execution
-- Cloud execution
-- Offline or degraded operation where relevant
+**C-2 · If you cannot run a tier, say so** and state which claims are therefore unverified
+(A-6). Do not silently skip and imply success.
 
-Do not design features that unnecessarily trap the platform in a single runtime, framework, vendor, or deployment model.
-
----
-
-## 15. Feature-Based Clean Architecture Required
-
-All codebases shall be organized around features, domains, or bounded contexts rather than technical layers.
-
-Preferred structure:
-
-```text
-src/
-├── features/
-│   ├── customers/
-│   │   ├── components/
-│   │   ├── hooks/
-│   │   ├── stores/
-│   │   ├── services/
-│   │   ├── types/
-│   │   ├── schemas/
-│   │   ├── pages/
-│   │   └── tests/
-│   ├── orders/
-│   └── billing/
-├── shared/
-├── core/
-└── infrastructure/
-```
-
-Rules:
-
-- Organize by business capability first.
-- Avoid global component folders that become dumping grounds.
-- Keep feature logic inside the owning feature.
-- Shared code must be genuinely reusable.
-- Cross-feature dependencies must be explicit.
-- Business logic belongs to the feature domain, not the UI.
+**C-3 · Small, reviewable changes.** Focused commits, small diffs, mechanical changes
+separated from behavioral ones, explained what and why.
 
 ---
 
-## 16. Strict Layering Is Mandatory
+## §D. Learning & Memory — the `.prometheus` directory
 
-Every application must enforce clear architectural boundaries.
+**D-1 · The estate learns via flat files.** Each project keeps append-only markdown in
+`.prometheus/` (Karpathy-pattern: human-inspectable, grep-able, git-tracked; the LLM
+writes, the human curates). This is the durable memory that makes sessions compound.
+Schema in Appendix C.
 
-Data flow:
+**D-2 · Write on these events:** a decision with a rationale; a defect and its
+post-mortem (root cause, not just fix); a learned constraint or gotcha; a waypoint at
+phase/task boundaries; a session summary at Stop. Entries are dated and append-only.
 
-```text
-UI Components
-      ↓
-Hooks / View Models
-      ↓
-State Stores
-      ↓
-Services / Repositories / APIs
-      ↓
-External Systems
-```
+**D-3 · Read at session start (§0) and before touching a subsystem.** Prime the turn with
+what the estate already learned about this surface before you act on it.
 
-Reverse communication occurs only through state propagation and events.
+**D-4 · surreal-memory fallback (standing pattern).** The memory server
+(`surreal-memory-server`, 42+ MCP tools, HNSW+BM25) has timeout-prone writes. The contract
+is: attempt the memory write; on failure or timeout, **log the failure to markdown and
+pivot silently to filesystem writes.** Never block a task on the memory server.
 
-Allowed:
+**D-5 · Noise control.** Append-only with dates; run a periodic lint/compile pass
+(`pk lint`) to compact and cross-reference; demote stale entries (mark superseded), do
+not silently delete. A log that becomes noise stops being read.
 
-```text
-UI → Hook
-Hook → Store
-Store → Service
-Service → API
-```
-
-Not allowed:
-
-```text
-UI → API
-UI → Service
-UI → Database
-Hook → API
-Hook → Service
-Component → Store Mutation Logic
-```
-
-All communication must follow architectural direction.
+**D-6 · Promotion to rules runs through the Evolution Loop, human-gated.** A learned
+lesson becomes a rule only after: (1) adversarial review (§E), (2) the sycophancy gate
+(§E), and (3) explicit human approval. Rules and skills are NEVER auto-updated from an
+agent's own evaluation of its own output — that is a structural sycophancy risk.
 
 ---
 
-## 17. UI Components Must Remain Pure
+## §E. Adversarial Review & Anti-Sycophancy
 
-UI components are responsible only for:
+**E-1 · Anti-sycophancy is a contractual quality gate.** Detection classifies against the
+S-01…S-08 taxonomy (Appendix B). A reflection or self-assessment that leads with what
+worked is a summary, not a reflection; reflections must lead with the delta.
 
-- Rendering
-- User interaction
-- Layout
-- Styling
-- Accessibility
+**E-2 · Artifact-only critic isolation (structural invariant).** A critic/reviewer agent
+receives ONLY the artifact under review — never the generation-pass conversation history.
+The model that produced the work must not also be the sole judge of whether it is good.
 
-UI components must not:
+**E-3 · When adversarial review is REQUIRED:** at phase completion, before client
+delivery, and before promoting any lesson to a rule (D-6). **When it may be SKIPPED:**
+trivial mechanical changes (renames, formatting, comment fixes) with no behavioral impact.
 
-- Fetch data
-- Call APIs
-- Call services
-- Perform business logic
-- Manage persistence
-- Execute workflow logic
+**E-4 · Reflection contract.** A passing reflection names concrete gaps between plan and
+delivery (Delta), states root causes, and gives corrective actions. Rejected if it scores
+≥0.4 or contains any high/critical pattern. Two-rejection soft cap: the third attempt is
+accepted with a logged warning; the count resets on any passing reflection.
 
-A component should be replaceable without affecting business behavior.
-
----
-
-## 18. Hooks/View Models Coordinate UI State
-
-Hooks (or equivalent framework abstraction) are responsible for:
-
-- Connecting UI to stores
-- UI state composition
-- UI-derived calculations
-- Presentation logic
-
-Hooks must not:
-
-- Call APIs directly
-- Access databases directly
-- Implement persistence logic
-- Contain domain business rules
-
-Examples:
-
-- React Hooks
-- Flutter Controllers
-- Riverpod Notifiers
-- Vue Composables
-- Svelte Stores used as view models
+**E-5 · Graceful degradation.** If the sycophancy binary is absent, log a warning and
+proceed (exit 0) — never hard-block. But still apply E-1…E-4 by hand: lead with the delta,
+isolate the critic, distinguish verified from self-reported.
 
 ---
 
-## 19. Stores Own Application State
+## §F. Prometheus Skill Pack (PSP) behavior
 
-Stores are the single source of truth for application state.
+**F-1 · When skills are present, defer to them.** Follow skill instructions and activation
+discipline. Do not restate or duplicate skill behavior from base-rule prose; the skill is
+authoritative for its domain.
 
-Stores:
+**F-2 · Detect absence; never hallucinate skill behavior.** PSP installs a large profile
+(~140 payloads/harness). Session-start description-token budgets can silently drop skills,
+and autonomous activation is unreliable. Therefore: if an expected skill is not present or
+did not activate, **state that plainly and fall back to base-rule behavior.** Do not invent
+what a skill "would have done." The failure presents exactly as "the skill exists, tested
+fine, didn't fire" — treat absence as the default hypothesis, not an error.
 
-- Call services
-- Coordinate data loading
-- Manage optimistic updates
-- Maintain cached state
-- Expose reactive state
+**F-3 · Non-PSP harnesses and fresh environments.** In any harness without PSP (or a fresh
+clone), there are no skills. This is normal. Operate entirely from this file.
 
-Examples:
+**F-4 · Compaction re-anchor (C2).** Under PSP the compaction re-anchor injects the
+Constitution digest + skill index + waypoint on the first prompt after compaction. Honor
+it. Without PSP, apply the best-effort re-anchor in §A.
 
-- Zustand
-- Riverpod
-- Redux Toolkit
-- MobX
-- Signals
-- Reactive state containers
-
-Stores must not contain UI rendering logic.
-
----
-
-## 20. Services Own External Communication
-
-Services are responsible for:
-
-- API calls
-- Database access
-- MCP communication
-- Agent communication
-- External integrations
-- File system access
-
-Services must:
-
-- Be reusable
-- Be testable
-- Be framework-independent where possible
-
-Services must not:
-
-- Render UI
-- Manage component state
-- Contain presentation concerns
+**F-5 · M1-first.** Gate expensive work on measurement. Do not build on an assumption a
+cheap probe could confirm or refute first.
 
 ---
 
-## 21. State Changes Must Be Reactive
-
-State changes must propagate through the framework's native reactive mechanism.
-
-Examples:
-
-- Zustand state updates
-- Riverpod provider updates
-- Flutter reactive providers
-- Signals
-- Rx streams
-- Vue reactivity
-- Svelte reactivity
-
-Avoid:
-
-- Manual refresh calls
-- Hidden mutable state
-- Direct component manipulation
-- Imperative UI synchronization
-
-The UI should react to state changes automatically.
-
----
-
-## 22. Dependency Versions Must Be Verified
-
-Before introducing:
-
-- Libraries
-- Frameworks
-- SDKs
-- Language runtimes
-- Build tools
-- Infrastructure components
-
-Agents must verify current compatible versions.
-
-Process:
-
-1. Check official documentation.
-2. Check official repositories.
-3. Check compatibility matrices.
-4. Verify against project requirements.
-5. Verify against existing dependencies.
-
-Never assume versions.
-
-Never use stale examples without verification.
-
-Never introduce packages using training-data-era versions when current compatibility information is available.
-
----
-
-## 23. Web Verification Before Dependency Introduction
-
-When internet access is available:
-
-- Search for the latest stable version.
-- Search for known compatibility issues.
-- Search for breaking changes.
-- Search for migration requirements.
-- Search for security advisories.
-
-Priority order:
-
-1. Official documentation
-2. Official repository
-3. Official release notes
-4. Vendor-maintained migration guides
-
-Community sources may supplement but not replace authoritative sources.
-
----
-
-## 24. Consistency Across Languages
-
-The architecture remains the same regardless of language.
-
-React:
-
-```text
-Component
-→ Hook
-→ Zustand Store
-→ Service
-→ API
-```
-
-Flutter:
-
-```text
-Widget
-→ Controller/Notifier
-→ Riverpod Provider
-→ Service
-→ API
-```
-
-Rust HTMX:
-
-```text
-Template
-→ Handler
-→ Store/Domain Layer
-→ Service
-→ Repository
-```
-
-Vue:
-
-```text
-Component
-→ Composable
-→ Store
-→ Service
-→ API
-```
-
-Svelte:
-
-```text
-Component
-→ View Model
-→ Store
-→ Service
-→ API
-```
-
-Technology changes.
-
-Architecture does not.
-
----
-
-## 25. Human Override Always Exists
-
-Every automated decision must support:
-
-- Inspection
-- Auditability
-- Override
-- Recovery
-- Manual correction
-- Human escalation
-
-Agents may assist, recommend, automate, and execute, but humans must remain able to inspect and override critical outcomes.
-
----
-
-## 26. Repo-Level Rules Override Base Rules Only When Explicit
-
-These are base rules.
-
-Project-specific CLAUDE.md, AGENTS.md, README.md, architecture docs, or task instructions may add stricter requirements.
-
-They may override these rules only when explicit and non-contradictory with safety, correctness, and user intent.
-
----
-
-## 27. No Silent Dependency Introduction
-
-Before adding a dependency:
-
-- Check existing dependencies.
-- Prefer existing project tools.
-- Explain why the dependency is needed.
-- Avoid large dependencies for small tasks.
-- Avoid dependencies that conflict with the architecture.
-- Avoid dependencies that create vendor lock-in.
-
----
-
-## 28. No Untouchable Framework Magic
-
-Do not introduce systems that make developers or agents reason case-by-case around hidden behavior.
-
-Avoid:
-
-- Opaque caches
-- Hidden global state
-- Framework-owned business logic
-- State trapped in component tiers
-- Magic side effects
-- Uninspectable runtime behavior
-
-Prefer predictable, explicit, inspectable architecture.
-
----
-
-## 29. Strong Typing Required
-
-Use strong types wherever the project language supports them.
-
-- No implicit any.
-- No unnecessary any.
-- No untyped business objects.
-- No stringly typed domain models when proper types are possible.
-- Prefer generated types from schemas where available.
-- Keep API contracts typed and versioned.
-
----
-
-## 30. Tests Are Part of Completion
-
-Implementation is not complete until it has been verified.
-
-Where available:
-
-- Run unit tests.
-- Run integration tests.
-- Run type checks.
-- Run linters.
-- Run build checks.
-- Add tests for new behavior.
-- Update tests when behavior intentionally changes.
-
-If tests cannot be run, state why.
-
----
-
-## 31. Prefer Small, Reviewable Changes
-
-Work should be easy to inspect.
-
-- Keep commits focused.
-- Keep diffs small.
-- Avoid broad rewrites.
-- Avoid unrelated cleanup.
-- Separate mechanical changes from behavioral changes.
-- Explain what changed and why.
-
----
-
-## 32. Preserve Existing Behavior
-
-Do not break existing behavior unless the task explicitly requires it.
-
-Before changing behavior:
-
-- Identify current behavior.
-- Identify desired behavior.
-- Identify compatibility impact.
-- Update tests and documentation.
-- Call out breaking changes clearly.
-
----
-
-## 33. Security Is Not Optional
-
-Always consider:
-
-- Authentication
-- Authorization
-- Input validation
-- Output escaping
-- Secrets handling
-- Tenant boundaries
-- Data leakage
-- Prompt injection
-- Tool execution boundaries
-- Dependency risk
-
-Never log secrets, tokens, credentials, private keys, or sensitive user data.
-
----
-
-## 34. Agent Actions Must Be Auditable
-
-For agentic systems, preserve an audit trail.
-
-Record:
-
-- User request
-- Agent decision
-- Tool calls
-- Inputs
-- Outputs
-- Files changed
-- External effects
-- Errors
-- Human approvals where required
-
+## §G. Operations & Governance
+
+**G-1 · Dependencies: verify, don't assume.** Before introducing any library/framework/
+SDK/runtime/tool: check existing project deps first and prefer them; verify current
+compatible versions against official docs/repos/release notes and against `versions.toml`;
+check breaking changes and security advisories. Never use training-era versions when
+current information is available. No silent dependency introduction — explain why it is
+needed; avoid large deps for small tasks and anything that conflicts with the architecture
+or creates lock-in.
+
+**G-2 · Repo rules override base only when explicit.** Project `CLAUDE.md`/`AGENTS.md`/
+architecture docs may add stricter requirements and may override these rules only when
+explicit and non-contradictory with safety, correctness, and operator intent.
+
+**G-3 · Auditability.** For agentic systems preserve an audit trail: request, decision,
+tool calls, inputs, outputs, files changed, external effects, errors, human approvals.
 Agentic execution without auditability is not acceptable.
 
----
-
-## 35. Prefer Deterministic Systems
-
-Where possible, prefer deterministic behavior.
-
-- Deterministic IDs when appropriate.
-- Deterministic allocation algorithms.
-- Deterministic ordering.
-- Deterministic retries.
-- Deterministic replay.
-- Explicit conflict resolution.
-
-Non-determinism must be intentional and documented.
+**G-4 · Multi-agent coordination.** When multiple agents work one repo, use per-agent git
+worktrees with separate `CARGO_TARGET_DIR` (Rust) / separate build dirs. Build access to a
+shared directory is single-writer (A-10). Note per-worktree runtime isolation gaps
+(shared DBs, ports, caches) and coordinate them explicitly.
 
 ---
 
-## 36. Local-First When Practical
+## APPENDIX A — Per-technology tier ladders
 
-Prefer architectures that can run locally and sync outward.
+Tier 0 = every edit (seconds). Tier 1 = unit complete. Tier 2 = phase completion.
+Tier 3 = milestone/release/delivery gates ONLY. Running a higher tier early is a
+violation (A-9). Never test code not wired into the call graph.
 
-Favor:
+**Rust (multi-crate workspace)**
+- T0: `cargo check -p <touched-crate>`; `cargo clippy -p <crate> --no-deps`. Scope to the
+  touched crate; never workspace-wide on every edit.
+- T1: `cargo test -p <crate> <module_or_test>` — the just-written unit only.
+- T2: `cargo test --workspace`; `cargo build` (dev profile); doc tests if public API
+  changed.
+- T3: `cargo build --release`; cross-compiles (iOS/Android via flutter_rust_bridge, Tauri
+  bundles, WASM); vendored native builds (llama-cpp-2); feature-flag matrix; device
+  certification; e2e.
+- Hard rules: never `--release` during implementation (it invalidates incremental
+  artifacts and pays full optimization for code that will change); never cross-compile or
+  vendored-native-build before T2 passes; one build profile per session (profile switching
+  thrashes the incremental cache); feature-matrix is T3 — do not iterate combinations
+  mid-phase.
+- **Build concurrency (stable Cargo, mid-2026):** Cargo holds only a `Shared` lock during
+  compile, which allows multiple cargo processes to build concurrently; the real
+  contention is the per-`target/` `.cargo-lock`. So: **within one target dir,
+  single-writer (A-10). Across worktrees with separate `CARGO_TARGET_DIR` and a shared
+  `CARGO_HOME`, run check/build/test/clippy in parallel; serialize only
+  dependency-mutating commands** (`cargo fetch`/`update`/`add`). Do not give each agent a
+  separate `CARGO_HOME` (breaks registry sharing, forces recompiles — the fingerprint
+  includes the `CARGO_HOME` path). `sccache` helps avoid recompiling shared deps N times;
+  it does not touch the locks.
 
-- Local execution
-- Local storage
-- Offline-capable workflows
-- Syncable state
-- Portable runtimes
-- Edge-compatible agents
+**TypeScript / React 19 / Vite 8 / Next.js 16 / Bun**
+- T0: `tsc --noEmit` (Bun/esbuild strip types but DO NOT type-check — `tsc --noEmit` is
+  the real gate); Biome/ESLint. Cache `.tsbuildinfo` (cuts incremental typecheck 60–80%).
+- T1: targeted `vitest run <file>` (or `bun test <file>`). Vitest watch mode is the inner
+  loop, not a gate.
+- T2: full `vitest run`; `vite build` (or `next build`).
+- T3: Playwright e2e; visual-regression. Keep e2e to the ~20–30 flows where failure costs
+  money.
 
-Cloud services may be used, but the system should not become unnecessarily cloud-dependent.
+**Go**
+- T0: `go vet ./...`; `go build ./...`.
+- T1: `go test -run <name> ./pkg`.
+- T2: `go test ./...`.
+- T3: `go test -race ./...` (race detection costs 5–10× memory and 2–20× execution time,
+  and only finds races on exercised paths — milestone gate, not continuous); integration
+  (`-tags=integration`).
+
+**Flutter / Dart (Riverpod)**
+- T0: `dart analyze`.
+- T1: targeted `flutter test test/<file>`.
+- T2: full `flutter test`.
+- T3: `flutter build ios` / `flutter build apk` / device certification. Platform builds are
+  the expensive tier (a single heavy plugin can add minutes to a cold Xcode build). Use
+  `flutter build ios --config-only` when only project config changed. Never platform-build
+  mid-phase.
+
+**WASM (Component Model)**
+- T0: `cargo check --target wasm32-*` (faster than build; catches most type/interface
+  errors).
+- T1: `wasm-pack test --node`.
+- T2: `wasm-pack build` / `cargo component build`; WIT validation (`wasm-tools` /
+  `wash inspect`). Pin `wasm-bindgen` to the CLI version exactly.
+- T3: `wasm-pack test --headless` (browser e2e).
+
+**Tauri 2**
+- Frontend tiers (TypeScript above) + Rust tiers during implementation.
+- **Bundle builds are always T3** (they cross-compile and invalidate incremental caches).
+
+**Python**
+- T0: `ruff` + `mypy`.
+- T1: `pytest path::test_name`.
+- T2: `pytest`.
+- T3: slow/integration-marked suites.
 
 ---
 
-## 37. Runtime Portability Matters
+## APPENDIX B — Sycophancy taxonomy (S-01…S-08)
 
-Design for execution across:
+| Code | Name | Severity | Catches |
+|------|------|----------|---------|
+| S-01 | Unprompted Affirmation | Medium | Praise no one asked for |
+| S-02 | Agreement Without Grounding | High | Agreeing with a premise without evidence |
+| S-03 | Caveat Collapse | Critical | Dropping necessary qualifications to sound confident |
+| S-04 | Self-Rationalization | Critical | Justifying a prior decision instead of evaluating it |
+| S-05 | Context Bleed Alignment | High | Drifting toward what earlier turns implied was wanted |
+| S-06 | Confidence Without Basis | Medium | Asserting certainty the artifact does not support |
+| S-07 | Scope Creep Flattery | Low | Padding scope to seem more helpful |
+| S-08 | Reflect Phase Inversion | High | Leading a reflection with success instead of delta |
 
-- Cloud
-- Local machine
-- Mobile
-- Browser
-- Edge
-- WASM
-- Containerized environments
-
-Avoid coupling business logic to a runtime unless required.
-
----
-
-## 38. UI Is a Projection of State
-
-The UI must not become the source of truth.
-
-- UI renders state.
-- UI submits intent.
-- Backend/domain logic validates intent.
-- Durable systems persist state.
-- Events describe changes.
-
-Avoid business rules that only exist in frontend components.
+S-03, S-04, S-08 are the loop-corrupting ones: they poison the memory that primes the next
+session. Strictness via `PROMETHEUS_REFLECT_STRICTNESS` (default `strict`).
 
 ---
 
-## 39. Artifacts Must Be Structured
+## APPENDIX C — `.prometheus/` layout
 
-Prometheus artifacts should be:
+```
+.prometheus/
+  session-log.md        # append-only, dated; what happened, decisions, waypoints
+  decisions.md          # durable decisions + rationale (promotable to versions.toml)
+  gotchas.md            # learned constraints per subsystem (grep before touching one)
+  postmortems/          # one file per defect: symptom -> root cause -> fix -> prevention
+  knowledge/            # pk (Karpathy KB) project scope; lint/compile compacts it
+```
 
-- Typed
-- Versioned
-- Inspectable
-- Portable
-- Renderable across supported hosts
-- Compatible with agent workflows
-- Safe to persist and replay
-
-Do not create ad hoc artifact formats when a formal schema exists.
+Resolution order for the KB: `--kb-dir`/`PK_KB_DIR` -> shared
+(`~/.prometheus/knowledge/shared/`) -> project (`<root>/.prometheus/knowledge/`) -> global.
+Memory-server writes fall back to these files on timeout (D-4).
 
 ---
 
-## 40. Stop When Done
-
-Do not continue expanding after the goal is satisfied.
-
-When done:
-
-- Summarize what changed.
-- Summarize how it was verified.
-- List remaining risks or follow-ups.
-- Do not perform extra work unless asked.
+*v3 supersedes v2. Nothing that worked in v2 was removed; the document was tiered so the
+rules that matter most survive long sessions and compaction. The cargo build-concurrency
+guidance is dated to stable Cargo, mid-2026, and should be revisited when
+`-Zfine-grain-locking` stabilizes.*
