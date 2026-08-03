@@ -15,6 +15,7 @@ async fn read_json(response: reqwest::Response) -> Value {
 }
 
 #[tokio::test]
+#[ignore = "requires an externally running surreal-memory-server REST API"]
 async fn mindmap_api_server_mode_full_lifecycle_round_trip() {
     let client = Client::new();
     let base = api_base();

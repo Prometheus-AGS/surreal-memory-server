@@ -1,6 +1,7 @@
 //! Integration tests for the `surreal-memory` library.
 //!
-//! All tests use `mem://` SurrealDB — zero external dependencies, runs with just `cargo test`.
+//! Most tests use `mem://` SurrealDB. The server-mode storage cases use
+//! `TEST_SURREAL_ENDPOINT` (default `ws://127.0.0.1:28000`).
 
 use std::sync::Arc;
 use surreal_memory::mindmap::{MapType, MindMap, MindMapNode};
