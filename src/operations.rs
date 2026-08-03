@@ -1498,6 +1498,11 @@ mod tests {
         })
     }
 
+    fn openapi_spec() -> Value {
+        serde_json::from_str(include_str!("../openapi/surreal-memory-v2.openapi.json"))
+            .expect("OpenAPI document must be valid JSON")
+    }
+
     async fn post(router: Router, body: Value) -> axum::response::Response {
         router
             .oneshot(
@@ -1576,6 +1581,88 @@ mod tests {
             payload_hash(&payload).unwrap(),
             payload_hash(&payload).unwrap()
         );
+    }
+
+    #[test]
+    fn openapi_examples_match_serialized_request_and_receipt_contracts() {
+        let spec = openapi_spec();
+        assert_eq!(spec["openapi"], "3.1.0");
+        assert_eq!(spec["info"]["version"], "1.6.1");
+
+        let request_value = spec["components"]["examples"]["AddMemoryRequest"]["value"].clone();
+        let request: OperationRequest =
+            serde_json::from_value(request_value.clone()).expect("request example");
+        request.validate().expect("request example must validate");
+        assert_eq!(
+            payload_hash(&request.payload).expect("canonical payload hash"),
+            request.payload_hash
+        );
+        assert_eq!(
+            serde_json::to_value(request).expect("serialize request"),
+            request_value
+        );
+
+        let receipt_value = spec["components"]["examples"]["CommittedReceipt"]["value"].clone();
+        let receipt: OperationReceipt =
+            serde_json::from_value(receipt_value.clone()).expect("receipt example");
+        assert_eq!(
+            serde_json::to_value(receipt).expect("serialize receipt"),
+            receipt_value
+        );
+
+        let long_value = spec["paths"]["/api/v2/operations"]["post"]["requestBody"]
+            ["content"]["application/json"]["examples"]["longLogicalMemory"]["value"]
+            .clone();
+        let long_request: OperationRequest =
+            serde_json::from_value(long_value).expect("long-memory example");
+        long_request
+            .validate()
+            .expect("long-memory example must use its canonical hash");
+
+        for status in ["200", "202", "400", "409", "503"] {
+            assert!(
+                spec["paths"]["/api/v2/operations"]["post"]["responses"]
+                    .get(status)
+                    .is_some(),
+                "OpenAPI POST response {status} is missing"
+            );
+        }
+        for status in ["200", "404", "503"] {
+            assert!(
+                spec["paths"]["/api/v2/operations/{operation_id}"]["get"]["responses"]
+                    .get(status)
+                    .is_some(),
+                "OpenAPI GET response {status} is missing"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn openapi_replay_and_conflict_examples_match_http_statuses() {
+        let spec = openapi_spec();
+        let request = spec["components"]["examples"]["AddMemoryRequest"]["value"].clone();
+        let id = request["operation_id"].as_str().expect("operation id");
+        let (router, service) = test_router().await;
+
+        let created = post(router.clone(), request.clone()).await;
+        assert_eq!(created.status(), StatusCode::ACCEPTED);
+        assert!(spec["paths"]["/api/v2/operations"]["post"]["responses"]["202"].is_object());
+        wait_for_state(router.clone(), &service, id, OperationState::Committed).await;
+
+        let replay = post(router.clone(), request.clone()).await;
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay_receipt: OperationReceipt =
+            serde_json::from_slice(&to_bytes(replay.into_body(), usize::MAX).await.unwrap())
+                .expect("replay receipt");
+        assert_eq!(replay_receipt.state, OperationState::Committed);
+
+        let mut conflict = request;
+        conflict["payload"] =
+            json!({"content":"Different payload","user_id":"prometheus-skill-pack"});
+        conflict["payload_hash"] = Value::String(payload_hash(&conflict["payload"]).unwrap());
+        let conflict_response = post(router, conflict).await;
+        assert_eq!(conflict_response.status(), StatusCode::CONFLICT);
+        assert!(spec["paths"]["/api/v2/operations"]["post"]["responses"]["409"].is_object());
     }
 
     #[test]

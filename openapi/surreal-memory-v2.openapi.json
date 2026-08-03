@@ -1,0 +1,168 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Surreal Memory Durable Operations API",
+    "version": "1.6.1",
+    "description": "Receipt-driven ingestion for deterministic, replayable memory and task operations. POST acceptance is the durability boundary; terminal success is proven only by a committed receipt."
+  },
+  "servers": [
+    { "url": "http://127.0.0.1:23001", "description": "Default local service" }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "health",
+        "summary": "Report process liveness",
+        "responses": {
+          "200": {
+            "description": "The HTTP process is live; this does not prove ingestion readiness.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Health" }, "example": { "service": "surreal-memory-server", "status": "ok", "version": "1.6.1" } } }
+          }
+        }
+      }
+    },
+    "/ready": {
+      "get": {
+        "operationId": "ready",
+        "summary": "Report durable-ledger and model readiness",
+        "responses": {
+          "200": {
+            "description": "The durable operation ledger can accept and reconcile writes. Search/model capabilities may still be warming.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Readiness" }, "examples": { "ready": { "$ref": "#/components/examples/Ready" } } } }
+          },
+          "503": {
+            "description": "The durable ledger is unavailable; callers must not submit new operations.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Readiness" }, "example": { "capabilities": { "coordinator": false, "ledger": false, "model_executor": false, "search_index": false, "storage": false, "tokenizer": false }, "ingestion_ready": false, "search_ready": false, "status": "not_ready" } } }
+          }
+        }
+      }
+    },
+    "/api/v2/operations": {
+      "post": {
+        "operationId": "submitOperation",
+        "summary": "Durably accept or exactly replay an operation",
+        "description": "The caller supplies a stable operation_id and SHA-256 payload_hash. The hash is computed over the compact JSON payload with object keys sorted lexicographically and array order preserved. A new ID returns 202. Replaying the same ID and hash returns the exact stored receipt with 200. Reusing an ID with another hash returns 409.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/OperationRequest" },
+              "examples": {
+                "addMemory": { "$ref": "#/components/examples/AddMemoryRequest" },
+                "responseLossReconciliation": { "$ref": "#/components/examples/AddMemoryRequest" },
+                "longLogicalMemory": {
+                  "summary": "A long logical memory is planned into persisted tokenizer parts",
+                  "value": {
+                    "dependencies": [],
+                    "kind": "add_memory",
+                    "operation_id": "memory-long-20260803",
+                    "payload": { "content": "A caller may provide content longer than one model window; the supervised executor persists and resumes each tokenizer-planned part.", "user_id": "prometheus-skill-pack" },
+                    "payload_hash": "f253183895943fd544ec79d9b3efdff5ec366346a09d8f4cfa466c7db4d35aca",
+                    "schema_version": 2
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": { "description": "New operation durably accepted.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationReceipt" }, "examples": { "accepted": { "$ref": "#/components/examples/AcceptedReceipt" } } } } },
+          "200": { "description": "Exact same-ID/same-hash replay; returns the currently stored receipt without duplicating work.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationReceipt" }, "examples": { "committedReplay": { "$ref": "#/components/examples/CommittedReceipt" } } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v2/operations/{operation_id}": {
+      "parameters": [ { "$ref": "#/components/parameters/OperationId" } ],
+      "get": {
+        "operationId": "getOperation",
+        "summary": "Reconcile an operation by caller-supplied ID",
+        "description": "Use after response loss, timeout, reconnect, worker restart, or process restart. Never infer failure from elapsed time.",
+        "responses": {
+          "200": { "description": "The latest durable receipt.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationReceipt" }, "examples": { "committed": { "$ref": "#/components/examples/CommittedReceipt" } } } } },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v2/operations/{operation_id}/events": {
+      "parameters": [ { "$ref": "#/components/parameters/OperationId" } ],
+      "get": {
+        "operationId": "streamOperationEvents",
+        "summary": "Replay and follow ordered operation events",
+        "description": "The server first replays durable events whose sequence is greater than after, then follows live events. Each SSE id equals the event sequence. Reconnect with after=<last processed id>; duplicates are harmless when clients deduplicate by sequence.",
+        "parameters": [ { "in": "query", "name": "after", "required": false, "schema": { "type": "integer", "format": "uint64", "minimum": 0, "default": 0 }, "description": "Exclusive last processed event sequence." } ],
+        "responses": {
+          "200": { "description": "Historical events followed by live events.", "content": { "text/event-stream": { "schema": { "type": "string" }, "example": "id: 1\nevent: operation_state\ndata: {\"operation_id\":\"memory-release-20260803\",\"sequence\":1,\"from_state\":null,\"to_state\":\"accepted\",\"detail\":null,\"executor_generation\":0,\"occurred_at\":\"2026-08-03T12:00:00Z\"}\n\n" } } },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "OperationId": { "in": "path", "name": "operation_id", "required": true, "schema": { "type": "string", "minLength": 1 }, "description": "Stable caller-generated idempotency and reconciliation key." }
+    },
+    "schemas": {
+      "Health": { "type": "object", "required": ["service", "status", "version"], "properties": { "service": { "const": "surreal-memory-server" }, "status": { "const": "ok" }, "version": { "type": "string" } }, "additionalProperties": false },
+      "Readiness": {
+        "type": "object", "required": ["status", "capabilities", "ingestion_ready", "search_ready"],
+        "properties": {
+          "status": { "type": "string", "enum": ["ready", "not_ready"] },
+          "capabilities": { "$ref": "#/components/schemas/ReadinessCapabilities" },
+          "ingestion_ready": { "type": "boolean" },
+          "search_ready": { "type": "boolean" }
+        }, "additionalProperties": false
+      },
+      "ReadinessCapabilities": { "type": "object", "required": ["ledger", "storage", "coordinator", "tokenizer", "model_executor", "search_index"], "properties": { "ledger": { "type": "boolean" }, "storage": { "type": "boolean" }, "coordinator": { "type": "boolean" }, "tokenizer": { "type": "boolean" }, "model_executor": { "type": "boolean" }, "search_index": { "type": "boolean" } }, "additionalProperties": false },
+      "OperationKind": { "type": "string", "enum": ["add_memory", "create_task_stream", "add_task_step", "complete_step"] },
+      "OperationState": { "type": "string", "enum": ["accepted", "validated", "blocked", "planned", "processing", "indexed", "committed", "rejected"] },
+      "OperationRequest": {
+        "type": "object", "required": ["operation_id", "schema_version", "kind", "payload_hash", "payload"],
+        "properties": {
+          "operation_id": { "type": "string", "minLength": 1 },
+          "schema_version": { "const": 2 },
+          "kind": { "$ref": "#/components/schemas/OperationKind" },
+          "dependencies": { "type": "array", "items": { "type": "string", "minLength": 1 }, "default": [] },
+          "payload_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "payload": { "type": "object", "description": "Kind-specific payload. add_memory accepts content, optional user_id/agent_id/session_id, and optional category strings." }
+        }, "additionalProperties": false
+      },
+      "OperationReceipt": {
+        "type": "object",
+        "required": ["operation_id", "schema_version", "kind", "payload_hash", "dependencies", "state", "blocked_by", "result", "error", "executor_generation", "executor_progress_seq", "executor_exit_count", "executor_last_exit", "executor_error", "progress_seq", "created_at", "updated_at"],
+        "properties": {
+          "operation_id": { "type": "string" }, "schema_version": { "const": 2 }, "kind": { "$ref": "#/components/schemas/OperationKind" }, "payload_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "dependencies": { "type": "array", "items": { "type": "string" } }, "state": { "$ref": "#/components/schemas/OperationState" }, "blocked_by": { "type": "array", "items": { "type": "string" } },
+          "result": { "type": ["object", "array", "string", "number", "boolean", "null"] }, "error": { "type": ["string", "null"] },
+          "executor_generation": { "type": "integer", "format": "uint64" }, "executor_progress_seq": { "type": "integer", "format": "uint64" }, "executor_exit_count": { "type": "integer", "format": "uint64" },
+          "executor_last_exit": { "type": ["string", "null"] }, "executor_error": { "type": ["string", "null"] }, "progress_seq": { "type": "integer", "format": "uint64" },
+          "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }
+        }, "additionalProperties": false
+      },
+      "OperationEvent": { "type": "object", "required": ["operation_id", "sequence", "from_state", "to_state", "detail", "executor_generation", "occurred_at"], "properties": { "operation_id": { "type": "string" }, "sequence": { "type": "integer", "format": "uint64" }, "from_state": { "type": ["string", "null"] }, "to_state": { "type": "string" }, "detail": { "type": ["object", "array", "string", "number", "boolean", "null"] }, "executor_generation": { "type": "integer", "format": "uint64" }, "occurred_at": { "type": "string", "format": "date-time" } }, "additionalProperties": false },
+      "Error": { "type": "object", "required": ["error"], "properties": { "error": { "type": "string" } }, "additionalProperties": false }
+    },
+    "responses": {
+      "BadRequest": { "description": "Malformed JSON, unsupported schema/kind, empty dependency, invalid kind payload, or payload hash mismatch.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "payload_hash mismatch: request supplied 0000..., canonical payload is a026d7fd..." } } } },
+      "Conflict": { "description": "The operation ID already belongs to a different payload hash.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "operation_id 'memory-release-20260803' already exists with payload_hash a026d7fd122070a74973fa27e3ba92d438ba60e7fa84fd7fd3c8d769e3339a09" } } } },
+      "NotFound": { "description": "No durable receipt exists for the operation ID.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "operation 'missing-operation' not found" } } } },
+      "Unavailable": { "description": "The ledger/storage layer cannot complete the request.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "operation ledger unavailable" } } } }
+    },
+    "examples": {
+      "Ready": { "summary": "Ledger ready while model search may still be warming", "value": { "capabilities": { "coordinator": true, "ledger": true, "model_executor": false, "search_index": false, "storage": true, "tokenizer": false }, "ingestion_ready": true, "search_ready": false, "status": "ready" } },
+      "AddMemoryRequest": { "summary": "Deterministic add-memory operation", "value": { "dependencies": [], "kind": "add_memory", "operation_id": "memory-release-20260803", "payload": { "categories": ["architecture", "durability"], "content": "Receipts are the acknowledgement boundary.", "user_id": "prometheus-skill-pack" }, "payload_hash": "a026d7fd122070a74973fa27e3ba92d438ba60e7fa84fd7fd3c8d769e3339a09", "schema_version": 2 } },
+      "AcceptedReceipt": { "value": { "blocked_by": [], "created_at": "2026-08-03T12:00:00Z", "dependencies": [], "error": null, "executor_error": null, "executor_exit_count": 0, "executor_generation": 0, "executor_last_exit": null, "executor_progress_seq": 0, "kind": "add_memory", "operation_id": "memory-release-20260803", "payload_hash": "a026d7fd122070a74973fa27e3ba92d438ba60e7fa84fd7fd3c8d769e3339a09", "progress_seq": 1, "result": null, "schema_version": 2, "state": "accepted", "updated_at": "2026-08-03T12:00:00Z" } },
+      "CommittedReceipt": { "summary": "Terminal receipt returned by GET and exact POST replay", "value": { "blocked_by": [], "created_at": "2026-08-03T12:00:00Z", "dependencies": [], "error": null, "executor_error": null, "executor_exit_count": 0, "executor_generation": 1, "executor_last_exit": null, "executor_progress_seq": 4, "kind": "add_memory", "operation_id": "memory-release-20260803", "payload_hash": "a026d7fd122070a74973fa27e3ba92d438ba60e7fa84fd7fd3c8d769e3339a09", "progress_seq": 6, "result": { "id": "memory:example" }, "schema_version": 2, "state": "committed", "updated_at": "2026-08-03T12:00:02Z" } }
+    }
+  },
+  "x-correctness-scenarios": {
+    "same-id-same-hash": "Repeat POST after response loss; 200 returns the stored receipt and never duplicates logical work.",
+    "same-id-different-hash": "Repeat the operation ID with another canonical payload hash; 409 preserves the original receipt.",
+    "response-loss": "Discard POST response, then GET by operation_id until committed or rejected.",
+    "long-logical-memory": "Persist tokenizer-planned parts and per-part embeddings; restart resumes only unfinished parts and commits one logical memory."
+  }
+}
