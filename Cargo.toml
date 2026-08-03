@@ -77,7 +77,8 @@ tower-http = { workspace = true }
 
 # HTTP SSE Transport
 dashmap = "6.1.0"
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = "0.3"
 uuid = { workspace = true }
 
 # Binary-only

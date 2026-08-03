@@ -1,19 +1,15 @@
-use super::{Embedding, EmbeddingService};
+use super::{Embedding, EmbeddingPlanPart, EmbeddingService};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config as BertConfig};
 use hf_hub::{Repo, RepoType, api::tokio::Api};
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 use tokenizers::Tokenizer;
 use tokio::sync::{Mutex, OnceCell};
-
-/// Upper bound on a cold-cache HuggingFace model download. Exceeding it yields a
-/// typed error instead of an open-ended hang on the write path.
-const MODEL_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Inner struct that holds the actual loaded model
 /// The mutex protects all GPU operations to prevent Metal command buffer conflicts
@@ -23,6 +19,7 @@ struct CandleEmbeddingsInner {
     device: Device,
     #[allow(dead_code)] // Kept for potential future use in dimension validation
     dimensions: usize,
+    max_input_tokens: usize,
 }
 
 /// Thread-safe wrapper that serializes all GPU operations.
@@ -75,10 +72,9 @@ impl CandleEmbeddings {
     /// Ensures the model is loaded, downloading if necessary.
     /// This is called lazily on first embed request.
     ///
-    /// The HuggingFace download is bounded by `MODEL_DOWNLOAD_TIMEOUT` so a cold
-    /// cache or unreachable network fails fast with a typed error rather than
-    /// hanging the write path. The CPU-heavy model build runs on a blocking
-    /// thread (`spawn_blocking`) so it never starves the async runtime.
+    /// Download and model construction run outside the durable operation
+    /// acceptance boundary. Production inference is supervised by the executor
+    /// process; elapsed time never determines whether an operation succeeded.
     async fn ensure_loaded(&self) -> Result<&Arc<Mutex<CandleEmbeddingsInner>>> {
         self.inner
             .get_or_try_init(|| async {
@@ -88,21 +84,10 @@ impl CandleEmbeddings {
                 let device = Self::get_device().context("Failed to get compute device")?;
                 tracing::info!("Using device: {:?}", device);
 
-                // Download model files — bounded so a cold cache or network
-                // failure surfaces as a clear error instead of an open hang.
-                let (config_path, tokenizer_path, weights_path) = tokio::time::timeout(
-                    MODEL_DOWNLOAD_TIMEOUT,
-                    Self::download_model(&self.model_id, &self.cache_dir),
-                )
-                .await
-                .with_context(|| {
-                    format!(
-                        "Embedding model download exceeded {}s timeout for '{}'",
-                        MODEL_DOWNLOAD_TIMEOUT.as_secs(),
-                        self.model_id
-                    )
-                })?
-                .context("Failed to download model files")?;
+                let (config_path, tokenizer_path, weights_path) =
+                    Self::download_model(&self.model_id, &self.cache_dir)
+                        .await
+                        .context("Failed to download model files")?;
 
                 tracing::debug!("Config path: {:?}", config_path);
                 tracing::debug!("Tokenizer path: {:?}", tokenizer_path);
@@ -161,6 +146,7 @@ impl CandleEmbeddings {
         .context("Failed to parse config.json")?;
 
         let dimensions = config.hidden_size;
+        let max_input_tokens = config.max_position_embeddings;
         tracing::info!("Model config loaded: {} dimensions", dimensions);
 
         tracing::info!("Loading model weights from: {:?}", weights_path);
@@ -191,6 +177,7 @@ impl CandleEmbeddings {
             tokenizer,
             device,
             dimensions,
+            max_input_tokens,
         })
     }
 
@@ -312,6 +299,7 @@ impl CandleEmbeddings {
             .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
 
         let tokens = encoding.get_ids();
+        validate_model_input_len(tokens.len(), inner.max_input_tokens)?;
         let attention_mask = encoding.get_attention_mask();
         tracing::debug!("Tokenized into {} tokens", tokens.len());
 
@@ -399,14 +387,157 @@ impl EmbeddingService for CandleEmbeddings {
         self.expected_dimensions
     }
 
+    async fn plan(&self, text: &str) -> Result<Vec<EmbeddingPlanPart>> {
+        let inner = Arc::clone(self.ensure_loaded().await?);
+        let text = text.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let inner = inner.blocking_lock();
+            plan_token_windows(&inner.tokenizer, inner.max_input_tokens, &text)
+        })
+        .await
+        .context("Embedding token planner task panicked")?
+    }
+
     fn is_ready(&self) -> bool {
         self.is_loaded()
+    }
+}
+
+fn validate_model_input_len(actual: usize, maximum: usize) -> Result<()> {
+    if actual > maximum {
+        anyhow::bail!(
+            "input_too_long: tokenizer produced {actual} tokens for model capacity {maximum}"
+        );
+    }
+    Ok(())
+}
+
+fn plan_token_windows(
+    tokenizer: &Tokenizer,
+    max_input_tokens: usize,
+    text: &str,
+) -> Result<Vec<EmbeddingPlanPart>> {
+    let with_special = tokenizer
+        .encode("", true)
+        .map_err(|error| anyhow::anyhow!("Tokenization failed: {error}"))?;
+    let special_tokens = with_special.len();
+    let usable = max_input_tokens
+        .checked_sub(special_tokens)
+        .filter(|value| *value > 0)
+        .context("embedding model capacity does not leave room for content tokens")?;
+    let source = tokenizer
+        .encode(text, false)
+        .map_err(|error| anyhow::anyhow!("Tokenization failed: {error}"))?;
+    let ids = source.get_ids();
+    if ids.len() + special_tokens <= max_input_tokens {
+        return Ok(vec![plan_part(0, 0, ids.len(), ids, text.to_owned())]);
+    }
+
+    // The overlap is a fixed token-domain constant, not a timing heuristic.
+    // It preserves boundary context while every encoded part is proven below
+    // to fit the active model's exact capacity.
+    let overlap = 32usize.min(usable.saturating_sub(1));
+    let step = usable - overlap;
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    while start < ids.len() {
+        let mut end = (start + usable).min(ids.len());
+        let mut content = tokenizer
+            .decode(&ids[start..end], true)
+            .map_err(|error| anyhow::anyhow!("Token decode failed: {error}"))?;
+
+        // Decoding and encoding can normalize whitespace differently for some
+        // tokenizers. Shrink deterministically until the actual model input,
+        // including special tokens, is within capacity.
+        loop {
+            let verified = tokenizer
+                .encode(content.as_str(), true)
+                .map_err(|error| anyhow::anyhow!("Token verification failed: {error}"))?;
+            if verified.len() <= max_input_tokens {
+                break;
+            }
+            end = end
+                .checked_sub(1)
+                .filter(|candidate| *candidate > start)
+                .context("unable to construct a model-safe token window")?;
+            content = tokenizer
+                .decode(&ids[start..end], true)
+                .map_err(|error| anyhow::anyhow!("Token decode failed: {error}"))?;
+        }
+
+        parts.push(plan_part(
+            parts.len(),
+            start,
+            end,
+            &ids[start..end],
+            content,
+        ));
+        if end == ids.len() {
+            break;
+        }
+        start = start.saturating_add(step).min(end);
+    }
+    Ok(parts)
+}
+
+fn plan_part(
+    part_index: usize,
+    token_start: usize,
+    token_end: usize,
+    ids: &[u32],
+    content: String,
+) -> EmbeddingPlanPart {
+    let mut bytes = Vec::with_capacity(ids.len() * std::mem::size_of::<u32>());
+    for id in ids {
+        bytes.extend_from_slice(&id.to_le_bytes());
+    }
+    EmbeddingPlanPart {
+        part_index,
+        token_start,
+        token_end,
+        token_count: token_end.saturating_sub(token_start),
+        token_hash: Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+        content,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokenizers::{
+        models::wordlevel::WordLevel, pre_tokenizers::whitespace::Whitespace,
+        processors::template::TemplateProcessing,
+    };
+
+    fn boundary_tokenizer() -> Tokenizer {
+        let vocab = [
+            ("[UNK]".to_owned(), 0),
+            ("[CLS]".to_owned(), 1),
+            ("[SEP]".to_owned(), 2),
+            ("word".to_owned(), 3),
+        ]
+        .into_iter()
+        .collect();
+        let model = WordLevel::builder()
+            .vocab(vocab)
+            .unk_token("[UNK]".to_owned())
+            .build()
+            .unwrap();
+        let mut tokenizer = Tokenizer::new(model);
+        tokenizer.with_pre_tokenizer(Some(Whitespace));
+        tokenizer.with_post_processor(Some(
+            TemplateProcessing::builder()
+                .try_single("[CLS] $A [SEP]")
+                .unwrap()
+                .special_tokens(vec![("[CLS]", 1), ("[SEP]", 2)])
+                .build()
+                .unwrap(),
+        ));
+        tokenizer
+    }
 
     #[test]
     fn new_does_not_load_model_eagerly() {
@@ -419,44 +550,6 @@ mod tests {
         assert_eq!(embedder.dimensions(), 384);
     }
 
-    #[test]
-    fn download_timeout_is_bounded() {
-        // A cold-cache download must be bounded so the write path cannot hang
-        // open-endedly. The bound is enforced via tokio::time::timeout in
-        // ensure_loaded; this guards against the constant being removed.
-        assert!(MODEL_DOWNLOAD_TIMEOUT.as_secs() > 0);
-        assert!(MODEL_DOWNLOAD_TIMEOUT.as_secs() <= 600);
-    }
-
-    #[tokio::test]
-    async fn warmup_with_unresolvable_model_fails_bounded() {
-        // An unresolvable model id must surface a typed error within the
-        // download bound — never an open-ended hang.
-        let embedder = CandleEmbeddings::new(
-            "surreal-memory-test/definitely-not-a-real-model",
-            &std::env::temp_dir()
-                .join("candle-warmup-test")
-                .to_string_lossy(),
-        )
-        .expect("construct lazy embedder");
-
-        let result = tokio::time::timeout(
-            MODEL_DOWNLOAD_TIMEOUT + Duration::from_secs(5),
-            embedder.warmup(),
-        )
-        .await;
-
-        assert!(
-            result.is_ok(),
-            "warmup must return within the bounded download timeout"
-        );
-        assert!(
-            result.unwrap().is_err(),
-            "warmup with an unresolvable model must return a typed error"
-        );
-        assert!(!embedder.is_loaded(), "failed warmup must not mark loaded");
-    }
-
     fn estimate(model_id: &str) -> usize {
         CandleEmbeddings::estimate_dimensions(model_id)
     }
@@ -467,5 +560,43 @@ mod tests {
         assert_eq!(estimate("BAAI/bge-base-en-v1.5"), 768);
         assert_eq!(estimate("BAAI/bge-large-en-v1.5"), 1024);
         assert_eq!(estimate("sentence-transformers/all-MiniLM-L6-v2"), 384);
+    }
+
+    #[test]
+    fn model_boundary_guard_accepts_below_and_at_capacity_only() {
+        assert!(validate_model_input_len(510, 512).is_ok());
+        assert!(validate_model_input_len(512, 512).is_ok());
+        assert!(validate_model_input_len(513, 512).is_err());
+    }
+
+    #[test]
+    fn planner_uses_exact_special_token_capacity_and_stable_token_windows() {
+        let tokenizer = boundary_tokenizer();
+        let below = plan_token_windows(&tokenizer, 6, "word word word").unwrap();
+        let at = plan_token_windows(&tokenizer, 6, "word word word word").unwrap();
+        let above = plan_token_windows(&tokenizer, 6, "word word word word word").unwrap();
+
+        assert_eq!(below.len(), 1);
+        assert_eq!(below[0].token_count, 3);
+        assert_eq!(at.len(), 1);
+        assert_eq!(at[0].token_count, 4);
+        assert!(above.len() > 1);
+        assert_eq!(above.first().unwrap().token_start, 0);
+        assert_eq!(above.last().unwrap().token_end, 5);
+        assert!(
+            above
+                .windows(2)
+                .all(|pair| pair[1].token_start <= pair[0].token_end)
+        );
+        assert!(above.iter().all(|part| {
+            tokenizer
+                .encode(part.content.as_str(), true)
+                .map(|encoding| encoding.len() <= 6)
+                .unwrap_or(false)
+        }));
+        assert_eq!(
+            above,
+            plan_token_windows(&tokenizer, 6, "word word word word word").unwrap()
+        );
     }
 }

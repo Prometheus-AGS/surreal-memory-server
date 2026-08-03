@@ -6,5 +6,6 @@ pub mod config;
 pub mod contracts;
 pub mod embeddings;
 pub mod mcp;
+pub mod operations;
 pub mod storage;
 pub mod workers;
