@@ -35,7 +35,33 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace -- -D warnings
 
+      - name: Start SurrealDB test dependency
+        run: |
+          docker run --detach --rm \
+            --name surrealdb-ci \
+            --publish 28000:8000 \
+            surrealdb/surrealdb:v3.0.5@sha256:f703abfda71faa20572c9b0e99a1e2cb89494525ecc7a88345306c0fd3333845 \
+            start \
+            --log=warn \
+            --user=root \
+            --pass=root \
+            --bind=0.0.0.0:8000 \
+            memory
+
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:28000/health >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          docker logs surrealdb-ci
+          exit 1
+
       - name: cargo test
         run: cargo test --workspace
         env:
           RUST_BACKTRACE: 1
+          TEST_SURREAL_ENDPOINT: ws://127.0.0.1:28000
+          TEST_SURREAL_USERNAME: root
+          TEST_SURREAL_PASSWORD: root
