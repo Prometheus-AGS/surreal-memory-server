@@ -916,7 +916,7 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
         record_key: &str,
         mut memory: Memory,
         embedding: Vec<f32>,
-        token_count: u32,
+        token_count: Option<u32>,
     ) -> Result<Memory> {
         if let Some(existing) = self.get_memory(record_key).await? {
             return Ok(existing);
@@ -924,7 +924,7 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
 
         let now = Datetime::default();
         memory.embedding = Some(embedding);
-        memory.token_count = Some(token_count);
+        memory.token_count = token_count;
         memory.created_at = now;
         memory.updated_at = now;
         memory.version = 1;
@@ -2067,27 +2067,58 @@ impl MemoryStorage for SurrealStorage {
         }
         txn_sql.push_str(";\nCOMMIT TRANSACTION;");
 
-        let mut txn_q = db
-            .query(txn_sql)
-            .bind(("mkey", memory_key.clone()))
-            .bind(("memory", db_memory.clone()))
-            .bind(("content", db_memory.content.clone()))
-            .bind(("tokens", added_tokens))
-            .bind(("now", now))
-            .bind(("name", stream_name.to_string()));
-        if let Some(v) = user_id {
-            txn_q = txn_q.bind(("uid", v.to_string()));
+        loop {
+            let mut txn_q = db
+                .query(txn_sql.clone())
+                .bind(("mkey", memory_key.clone()))
+                .bind(("memory", db_memory.clone()))
+                .bind(("content", db_memory.content.clone()))
+                .bind(("tokens", added_tokens))
+                .bind(("now", now))
+                .bind(("name", stream_name.to_string()));
+            if let Some(v) = user_id {
+                txn_q = txn_q.bind(("uid", v.to_string()));
+            }
+            if let Some(v) = agent_id {
+                txn_q = txn_q.bind(("aid", v.to_string()));
+            }
+            let mut response = txn_q
+                .await
+                .context("add_to_task_stream transaction failed")?;
+            let errors = response.take_errors();
+            if errors.is_empty() {
+                break;
+            }
+            let transaction_conflict = errors.values().any(|error| {
+                matches!(
+                    error.query_details(),
+                    Some(surrealdb_types::QueryError::TransactionConflict)
+                ) || error.to_string().contains("Transaction conflict")
+            });
+            let transaction_abort_only = errors.values().all(|error| {
+                matches!(
+                    error.query_details(),
+                    Some(
+                        surrealdb_types::QueryError::TransactionConflict
+                            | surrealdb_types::QueryError::NotExecuted
+                    )
+                ) || error.to_string().contains("Transaction conflict")
+                    || error.to_string().contains("failed transaction")
+            });
+            if !transaction_conflict || !transaction_abort_only {
+                let error = errors
+                    .into_values()
+                    .next()
+                    .context("transaction response reported an error without details")?;
+                return Err(error).context("add_to_task_stream transaction was rejected");
+            }
+
+            // The database authoritatively rejected the entire transaction,
+            // so the stable memory key is absent and the same write can be
+            // resubmitted safely. No elapsed time or retry count decides the
+            // outcome; an explicit commit or a non-conflict error does.
+            tokio::task::yield_now().await;
         }
-        if let Some(v) = agent_id {
-            txn_q = txn_q.bind(("aid", v.to_string()));
-        }
-        let res = txn_q
-            .await
-            .context("add_to_task_stream transaction failed")?;
-        // `.check()` surfaces any per-statement error so a rejected transaction
-        // fails loudly rather than silently dropping the write.
-        res.check()
-            .context("add_to_task_stream transaction was rejected")?;
 
         // Index-stability: whether BEGIN/COMMIT occupy result-set slots is
         // driver-dependent, so we do NOT rely on a hardcoded statement index

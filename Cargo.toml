@@ -79,6 +79,7 @@ tower-http = { workspace = true }
 dashmap = "6.1.0"
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = "0.3"
+async-stream = "0.3"
 uuid = { workspace = true }
 
 # Binary-only

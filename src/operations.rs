@@ -5,7 +5,12 @@
 //! action is recoverable from explicit database state.  Wall-clock duration is
 //! never used to infer whether an operation succeeded.
 
-use std::{convert::Infallible, sync::Arc};
+use std::{
+    collections::{HashSet, VecDeque},
+    convert::Infallible,
+    pin::Pin,
+    sync::Arc,
+};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -22,12 +27,12 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use surreal_memory::{
     EmbeddingService, MemoryStorage, SurrealStorage, TaskStep, TaskStream,
-    embeddings::EmbeddingPlanPart,
+    embeddings::{EmbeddingPlanPart, ExecutorEvent, ExecutorSnapshot},
 };
 use surrealdb::types::{Datetime, RecordId};
 use surrealdb_types::SurrealValue;
 use tokio::sync::{broadcast, mpsc};
-use tokio_stream::{StreamExt, wrappers::BroadcastStream};
+use tokio_stream::StreamExt;
 
 use crate::contracts::AddMemoryRequest;
 
@@ -123,6 +128,10 @@ pub struct OperationReceipt {
     pub result: Option<Value>,
     pub error: Option<String>,
     pub executor_generation: u64,
+    pub executor_progress_seq: u64,
+    pub executor_exit_count: u64,
+    pub executor_last_exit: Option<String>,
+    pub executor_error: Option<String>,
     pub progress_seq: u64,
     pub created_at: String,
     pub updated_at: String,
@@ -154,6 +163,14 @@ struct DbOperation {
     result: Option<Value>,
     error: Option<String>,
     executor_generation: u64,
+    #[serde(default)]
+    executor_progress_seq: u64,
+    #[serde(default)]
+    executor_exit_count: u64,
+    #[serde(default)]
+    executor_last_exit: Option<String>,
+    #[serde(default)]
+    executor_error: Option<String>,
     progress_seq: u64,
     created_at: Datetime,
     updated_at: Datetime,
@@ -188,6 +205,18 @@ struct DbOperationPart {
     updated_at: Datetime,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
+struct DbExecutorEvent {
+    #[serde(default)]
+    id: Option<RecordId>,
+    operation_id: String,
+    generation: u64,
+    progress_seq: u64,
+    kind: String,
+    message: Option<String>,
+    occurred_at: Datetime,
+}
+
 impl TryFrom<DbOperation> for OperationReceipt {
     type Error = anyhow::Error;
 
@@ -203,6 +232,10 @@ impl TryFrom<DbOperation> for OperationReceipt {
             result: value.result,
             error: value.error,
             executor_generation: value.executor_generation,
+            executor_progress_seq: value.executor_progress_seq,
+            executor_exit_count: value.executor_exit_count,
+            executor_last_exit: value.executor_last_exit,
+            executor_error: value.executor_error,
             progress_seq: value.progress_seq,
             created_at: value.created_at.to_string(),
             updated_at: value.updated_at.to_string(),
@@ -233,9 +266,9 @@ pub struct OperationService {
 }
 
 #[derive(Debug)]
-enum SubmitError {
+pub enum SubmitError {
     Invalid(anyhow::Error),
-    Conflict(OperationReceipt),
+    Conflict(Box<OperationReceipt>),
     Storage(anyhow::Error),
 }
 
@@ -244,14 +277,27 @@ impl OperationService {
         storage: Arc<dyn MemoryStorage>,
         embedding_service: Arc<dyn EmbeddingService>,
     ) -> Self {
-        let (wake_tx, wake_rx) = mpsc::channel(256);
-        let (events_tx, _) = broadcast::channel(1024);
+        Self::start_with_capacities(storage, embedding_service, 256, 1024)
+    }
+
+    fn start_with_capacities(
+        storage: Arc<dyn MemoryStorage>,
+        embedding_service: Arc<dyn EmbeddingService>,
+        wake_capacity: usize,
+        event_capacity: usize,
+    ) -> Self {
+        let (wake_tx, wake_rx) = mpsc::channel(wake_capacity);
+        let (events_tx, _) = broadcast::channel(event_capacity);
         let service = Self {
             storage,
             embedding_service,
             wake_tx,
             events_tx,
         };
+        if let Some(executor_events) = service.embedding_service.subscribe_executor_events() {
+            let journal = service.clone();
+            tokio::spawn(async move { journal.record_executor_events(executor_events).await });
+        }
         let coordinator = service.clone();
         tokio::spawn(async move { coordinator.run(wake_rx).await });
         service
@@ -264,7 +310,7 @@ impl OperationService {
             .context("durable operations require SurrealStorage")
     }
 
-    async fn submit(
+    pub async fn submit(
         &self,
         request: OperationRequest,
     ) -> Result<(OperationReceipt, bool), SubmitError> {
@@ -275,7 +321,7 @@ impl OperationService {
             .map_err(SubmitError::Storage)?
         {
             if existing.payload_hash != request.payload_hash {
-                return Err(SubmitError::Conflict(existing));
+                return Err(SubmitError::Conflict(Box::new(existing)));
             }
             if !existing.state.is_terminal() {
                 let _ = self.wake_tx.send(existing.operation_id.clone()).await;
@@ -298,6 +344,10 @@ impl OperationService {
             result: None,
             error: None,
             executor_generation: 0,
+            executor_progress_seq: 0,
+            executor_exit_count: 0,
+            executor_last_exit: None,
+            executor_error: None,
             progress_seq: 1,
             created_at: now,
             updated_at: now,
@@ -343,7 +393,7 @@ impl OperationService {
                 if existing.payload_hash == request_payload_hash {
                     return Ok((existing, false));
                 }
-                return Err(SubmitError::Conflict(existing));
+                return Err(SubmitError::Conflict(Box::new(existing)));
             }
             return Err(SubmitError::Storage(error.into()));
         }
@@ -584,23 +634,133 @@ impl OperationService {
             .await;
     }
 
-    async fn run(self, mut wake_rx: mpsc::Receiver<String>) {
-        match self.list_nonterminal_ids().await {
-            Ok(ids) => {
-                for id in ids {
-                    if self.wake_tx.send(id).await.is_err() {
-                        return;
+    async fn record_executor_events(&self, mut events: broadcast::Receiver<ExecutorEvent>) {
+        loop {
+            match events.recv().await {
+                Ok(event) => {
+                    if let Err(error) = self.persist_executor_event(event).await {
+                        tracing::error!(%error, "executor journal write failed");
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::error!(skipped, "executor journal receiver lagged");
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    }
+
+    async fn persist_executor_event(&self, event: ExecutorEvent) -> Result<()> {
+        let Some(operation_id) = event.operation_id else {
+            return Ok(());
+        };
+        if self.get(&operation_id).await?.is_none() {
+            return Ok(());
+        }
+        let kind = serde_json::to_value(&event.kind)?
+            .as_str()
+            .context("executor event kind must serialize as a string")?
+            .to_owned();
+        let row = DbExecutorEvent {
+            id: None,
+            operation_id: operation_id.clone(),
+            generation: event.generation,
+            progress_seq: event.progress_seq,
+            kind,
+            message: event.message,
+            occurred_at: Datetime::default(),
+        };
+        let key = format!(
+            "{}-{:016}-{:016}",
+            record_key(&operation_id),
+            event.generation,
+            event.progress_seq
+        );
+        self.surreal()?
+            .db()?
+            .query("CREATE type::record('memory_executor_event', $key) CONTENT $event")
+            .bind(("key", key))
+            .bind(("event", row))
+            .await?
+            .check()?;
+        Ok(())
+    }
+
+    async fn persist_executor_snapshot(&self, operation_id: &str) -> Result<()> {
+        let Some(snapshot) = self
+            .embedding_service
+            .executor_snapshot_for_operation(operation_id)
+        else {
+            return Ok(());
+        };
+        self.surreal()?
+            .db()?
+            .query(
+                "UPDATE memory_operation SET executor_generation = $generation, executor_progress_seq = $progress, executor_exit_count = $exit_count, executor_last_exit = $last_exit, executor_error = $executor_error, updated_at = $now WHERE operation_id = $id",
+            )
+            .bind(("generation", snapshot.generation))
+            .bind(("progress", snapshot.progress_seq))
+            .bind(("exit_count", snapshot.exit_count))
+            .bind(("last_exit", snapshot.last_exit))
+            .bind(("executor_error", snapshot.error))
+            .bind(("now", Datetime::default()))
+            .bind(("id", operation_id.to_owned()))
+            .await?
+            .check()?;
+        Ok(())
+    }
+
+    async fn drain_pending(&self, initial: Vec<String>) {
+        let mut pending = VecDeque::from(initial);
+        let mut queued = pending.iter().cloned().collect::<HashSet<_>>();
+
+        while let Some(operation_id) = pending.pop_front() {
+            queued.remove(&operation_id);
+            if let Err(error) = self.process(&operation_id).await {
+                tracing::error!(%operation_id, %error, "operation processing paused");
+                self.record_processing_error(&operation_id, &error).await;
+                continue;
+            }
+            let committed_now = match self.get(&operation_id).await {
+                Ok(Some(receipt)) => receipt.state == OperationState::Committed,
+                Ok(None) => false,
+                Err(error) => {
+                    tracing::error!(%operation_id, %error, "operation post-process read failed");
+                    false
+                }
+            };
+            if committed_now {
+                match self.list_nonterminal_ids().await {
+                    Ok(ids) => {
+                        for id in ids {
+                            if queued.insert(id.clone()) {
+                                pending.push_back(id);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "dependent operation reconciliation failed")
                     }
                 }
             }
+        }
+    }
+
+    async fn reconcile_nonterminal(&self) -> Result<usize> {
+        let ids = self.list_nonterminal_ids().await?;
+        let count = ids.len();
+        self.drain_pending(ids).await;
+        Ok(count)
+    }
+
+    async fn run(self, mut wake_rx: mpsc::Receiver<String>) {
+        match self.reconcile_nonterminal().await {
+            Ok(_) => {}
             Err(error) => tracing::error!(%error, "operation startup reconciliation failed"),
         }
 
         while let Some(operation_id) = wake_rx.recv().await {
-            if let Err(error) = self.process(&operation_id).await {
-                tracing::error!(%operation_id, %error, "operation processing paused");
-                self.record_processing_error(&operation_id, &error).await;
-            }
+            self.drain_pending(vec![operation_id]).await;
         }
     }
 
@@ -661,14 +821,53 @@ impl OperationService {
             self.finish_operation(operation_id, result).await?;
         }
 
-        // A committed prerequisite is an explicit event that makes blocked
-        // dependents runnable; no timer or polling loop is involved.
-        for id in self.list_nonterminal_ids().await? {
-            if id != operation_id {
-                let _ = self.wake_tx.send(id).await;
-            }
-        }
         Ok(())
+    }
+
+    pub async fn event_stream(
+        &self,
+        operation_id: &str,
+        after: u64,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<OperationEvent>> + Send>>> {
+        // Subscribe before reading the durable history. A racing transition is
+        // present in either the snapshot or the receiver, and sequence checks
+        // remove the harmless overlap.
+        let mut live = self.events_tx.subscribe();
+        let history = self.events_after(operation_id, after).await?;
+        let service = self.clone();
+        let operation_id = operation_id.to_owned();
+        let stream = async_stream::try_stream! {
+            let mut last_sequence = after;
+            for event in history {
+                if event.sequence > last_sequence {
+                    last_sequence = event.sequence;
+                    yield event;
+                }
+            }
+
+            loop {
+                match live.recv().await {
+                    Ok(event)
+                        if event.operation_id == operation_id
+                            && event.sequence > last_sequence =>
+                    {
+                        last_sequence = event.sequence;
+                        yield event;
+                    }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        for event in service.events_after(&operation_id, last_sequence).await? {
+                            if event.sequence > last_sequence {
+                                last_sequence = event.sequence;
+                                yield event;
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        };
+        Ok(Box::pin(stream))
     }
 
     async fn process_add_memory(
@@ -678,9 +877,27 @@ impl OperationService {
     ) -> Result<()> {
         let request: AddMemoryRequest = serde_json::from_value(operation.payload.clone())
             .context("invalid add_memory payload")?;
+        self.embedding_service
+            .prepare_operation(
+                &operation.operation_id,
+                &ExecutorSnapshot {
+                    generation: operation.executor_generation,
+                    progress_seq: operation.executor_progress_seq,
+                    exit_count: operation.executor_exit_count,
+                    last_exit: operation.executor_last_exit.clone(),
+                    error: operation.executor_error.clone(),
+                },
+            )
+            .await?;
         let mut stored_parts = self.operation_parts(&operation.operation_id).await?;
         if stored_parts.is_empty() {
-            let plan = self.embedding_service.plan(&request.content).await?;
+            let planned = self
+                .embedding_service
+                .plan_for_operation(&operation.operation_id, &request.content)
+                .await;
+            self.persist_executor_snapshot(&operation.operation_id)
+                .await?;
+            let plan = planned?;
             if plan.is_empty() {
                 anyhow::bail!("embedding planner returned no parts");
             }
@@ -723,7 +940,17 @@ impl OperationService {
                 if part.state == "indexed" && part.embedding.is_some() {
                     continue;
                 }
-                let embedding = self.embedding_service.embed(&part.content).await?;
+                let embedded = self
+                    .embedding_service
+                    .embed_for_operation(
+                        &operation.operation_id,
+                        part.part_index as usize,
+                        &part.content,
+                    )
+                    .await;
+                self.persist_executor_snapshot(&operation.operation_id)
+                    .await?;
+                let embedding = embedded?;
                 self.mark_part_indexed(&operation.operation_id, part.part_index, embedding.clone())
                     .await?;
                 part.embedding = Some(embedding);
@@ -741,13 +968,20 @@ impl OperationService {
             anyhow::bail!("operation parts are not fully indexed");
         }
         let aggregate = aggregate_embeddings(&stored_parts)?;
-        let token_count = stored_parts
+        let exact_token_count = stored_parts
             .iter()
             .map(|part| part.token_end)
             .max()
-            .unwrap_or(0)
-            .try_into()
-            .context("logical memory token count exceeds u32")?;
+            .unwrap_or(0);
+        let token_count = if exact_token_count == 0 {
+            None
+        } else {
+            Some(
+                exact_token_count
+                    .try_into()
+                    .context("logical memory token count exceeds u32")?,
+            )
+        };
         let memory = request.into_memory();
         let stored = self
             .surreal()?
@@ -1092,31 +1326,26 @@ async fn operation_events(
         return Err(not_found(format!("operation '{id}' not found")));
     }
 
-    // Subscribe before reading history. Any transition racing with the query
-    // is either present in the snapshot or delivered by the live receiver;
-    // sequence filtering removes the harmless overlap.
-    let live = state.operations.events_tx.subscribe();
-    let history = state
+    let events = state
         .operations
-        .events_after(&id, query.after)
+        .event_stream(&id, query.after)
         .await
         .map_err(crate::api::api_error)?;
-    let history_max = history
-        .last()
-        .map(|event| event.sequence)
-        .unwrap_or(query.after);
-    let history_stream = tokio_stream::iter(history.into_iter());
-    let id_for_filter = id.clone();
-    let live_stream = BroadcastStream::new(live).filter_map(move |item| match item {
-        Ok(event) if event.operation_id == id_for_filter && event.sequence > history_max => {
-            Some(event)
-        }
-        _ => None,
-    });
-    let stream = history_stream.chain(live_stream).map(|event| {
-        let id = event.sequence.to_string();
+    let stream = events.map(|item| {
+        let event = match item {
+            Ok(event) => event,
+            Err(error) => {
+                return Ok(Event::default()
+                    .event("ledger_error")
+                    .data(bounded_error(&format!("{error:#}"))));
+            }
+        };
+        let sequence = event.sequence.to_string();
         let data = serde_json::to_string(&event).expect("operation event serializes");
-        Ok(Event::default().event("operation_state").id(id).data(data))
+        Ok(Event::default()
+            .event("operation_state")
+            .id(sequence)
+            .data(data))
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
@@ -1237,14 +1466,25 @@ mod tests {
         }
     }
 
-    async fn test_router() -> Router {
+    async fn test_router() -> (Router, OperationService) {
         let embedder: Arc<dyn EmbeddingService> = Arc::new(NoOpEmbedder);
         let storage: Arc<dyn MemoryStorage> = Arc::new(
             SurrealStorage::new_mem(Arc::clone(&embedder))
                 .await
                 .expect("in-memory SurrealStorage"),
         );
-        crate::api::build_router(storage, embedder)
+        let operations = OperationService::start(Arc::clone(&storage), Arc::clone(&embedder));
+        let state = AppState {
+            storage,
+            embedding_service: embedder,
+            operations: operations.clone(),
+        };
+        (
+            Router::new()
+                .nest("/api/v2/operations", router())
+                .with_state(state),
+            operations,
+        )
     }
 
     fn operation_request(id: &str, kind: &str, dependencies: Vec<&str>, payload: Value) -> Value {
@@ -1287,20 +1527,25 @@ mod tests {
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap()
     }
 
-    async fn wait_for_state(router: Router, id: &str, expected: OperationState) {
-        // Iteration-bounded cooperative scheduling: runtime correctness does
-        // not use elapsed time, and this test never sleeps to guess machine
-        // performance.
-        let mut last = None;
-        for _ in 0..10_000 {
+    async fn wait_for_state(
+        router: Router,
+        service: &OperationService,
+        id: &str,
+        expected: OperationState,
+    ) {
+        let mut events = service.events_tx.subscribe();
+        loop {
             let receipt = get_receipt(router.clone(), id).await;
             if receipt.state == expected {
                 return;
             }
-            last = Some(receipt);
-            tokio::task::yield_now().await;
+            match events.recv().await {
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => {
+                    panic!("operation event stream closed before {id} reached {expected:?}")
+                }
+            }
         }
-        panic!("operation {id} did not reach {expected:?}; last receipt: {last:?}");
     }
 
     async fn wait_for_service_state(
@@ -1309,16 +1554,19 @@ mod tests {
         expected: OperationState,
         require_error: bool,
     ) -> OperationReceipt {
-        let mut last = None;
-        for _ in 0..10_000 {
+        let mut events = service.events_tx.subscribe();
+        loop {
             let receipt = service.get(id).await.unwrap().unwrap();
             if receipt.state == expected && (!require_error || receipt.error.is_some()) {
                 return receipt;
             }
-            last = Some(receipt);
-            tokio::task::yield_now().await;
+            match events.recv().await {
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => {
+                    panic!("operation event stream closed before {id} reached {expected:?}")
+                }
+            }
         }
-        panic!("operation {id} did not reach {expected:?}; last receipt: {last:?}");
     }
 
     #[test]
@@ -1360,7 +1608,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_duplicate_submission_returns_one_receipt() {
-        let router = test_router().await;
+        let (router, service) = test_router().await;
         let body = operation_request(
             "same-id",
             "add_memory",
@@ -1379,7 +1627,13 @@ mod tests {
             right.status(),
             StatusCode::ACCEPTED | StatusCode::OK
         ));
-        wait_for_state(router.clone(), "same-id", OperationState::Committed).await;
+        wait_for_state(
+            router.clone(),
+            &service,
+            "same-id",
+            OperationState::Committed,
+        )
+        .await;
 
         let receipt = get_receipt(router, "same-id").await;
         assert_eq!(receipt.operation_id, "same-id");
@@ -1388,7 +1642,7 @@ mod tests {
 
     #[tokio::test]
     async fn reusing_operation_id_with_another_hash_is_conflict() {
-        let router = test_router().await;
+        let (router, _) = test_router().await;
         let first = operation_request(
             "conflict-id",
             "add_memory",
@@ -1409,8 +1663,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_without_exact_tokenizer_leaves_token_count_unknown() {
+        let embedder: Arc<dyn EmbeddingService> = Arc::new(NoOpEmbedder);
+        let storage = Arc::new(
+            SurrealStorage::new_mem(Arc::clone(&embedder))
+                .await
+                .expect("in-memory SurrealStorage"),
+        );
+        let service =
+            OperationService::start(Arc::clone(&storage) as Arc<dyn MemoryStorage>, embedder);
+        let payload = json!({"content":"memory 📚","user_id":"test"});
+        service
+            .submit(OperationRequest {
+                operation_id: "unknown-token-count".to_owned(),
+                schema_version: OPERATION_SCHEMA_VERSION,
+                kind: "add_memory".to_owned(),
+                dependencies: Vec::new(),
+                payload_hash: payload_hash(&payload).unwrap(),
+                payload,
+            })
+            .await
+            .unwrap();
+        wait_for_service_state(
+            &service,
+            "unknown-token-count",
+            OperationState::Committed,
+            false,
+        )
+        .await;
+
+        let stored = storage
+            .get_memory(&record_key("unknown-token-count"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.token_count, None);
+    }
+
+    #[tokio::test]
     async fn explicit_dependencies_unblock_in_topological_order() {
-        let router = test_router().await;
+        let (router, service) = test_router().await;
         let complete = operation_request(
             "op-complete",
             "complete_step",
@@ -1455,9 +1747,21 @@ mod tests {
             post(router.clone(), stream).await.status(),
             StatusCode::ACCEPTED
         );
-        wait_for_state(router.clone(), "op-stream", OperationState::Committed).await;
-        wait_for_state(router.clone(), "op-step", OperationState::Committed).await;
-        wait_for_state(router, "op-complete", OperationState::Committed).await;
+        wait_for_state(
+            router.clone(),
+            &service,
+            "op-stream",
+            OperationState::Committed,
+        )
+        .await;
+        wait_for_state(
+            router.clone(),
+            &service,
+            "op-step",
+            OperationState::Committed,
+        )
+        .await;
+        wait_for_state(router, &service, "op-complete", OperationState::Committed).await;
     }
 
     #[tokio::test]
@@ -1510,6 +1814,31 @@ mod tests {
                 .is_some(),
             "the operation must materialize exactly one stable logical memory key"
         );
+        let db = storage.db().unwrap();
+        let memory_rows: Vec<Value> = db
+            .query("SELECT id FROM memory WHERE id = type::record('memory', $key)")
+            .bind(("key", record_key("restart-parts")))
+            .await
+            .unwrap()
+            .check()
+            .unwrap()
+            .take(0)
+            .unwrap();
+        let history_rows: Vec<Value> = db
+            .query("SELECT id FROM memory_history WHERE memory_id = type::record('memory', $key)")
+            .bind(("key", record_key("restart-parts")))
+            .await
+            .unwrap()
+            .check()
+            .unwrap()
+            .take(0)
+            .unwrap();
+        assert_eq!(memory_rows.len(), 1, "one logical memory row is committed");
+        assert_eq!(
+            history_rows.len(),
+            1,
+            "one logical creation event is committed"
+        );
         assert_eq!(
             first_embedder.calls.load(Ordering::SeqCst),
             2,
@@ -1520,5 +1849,104 @@ mod tests {
             2,
             "restart embedded only two unfinished parts"
         );
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_exceeds_the_wake_channel_capacity() {
+        let embedder: Arc<dyn EmbeddingService> = Arc::new(NoOpEmbedder);
+        let storage = Arc::new(
+            SurrealStorage::new_mem(Arc::clone(&embedder))
+                .await
+                .expect("in-memory SurrealStorage"),
+        );
+        let service = OperationService::start_with_capacities(
+            Arc::clone(&storage) as Arc<dyn MemoryStorage>,
+            embedder,
+            4,
+            16,
+        );
+
+        for index in 0..12 {
+            let payload = json!({
+                "name": format!("blocked-{index}"),
+                "description": "startup reconciliation fixture",
+                "agent_id": null,
+                "user_id": "test"
+            });
+            service
+                .submit(OperationRequest {
+                    operation_id: format!("startup-{index:02}"),
+                    schema_version: OPERATION_SCHEMA_VERSION,
+                    kind: "create_task_stream".to_owned(),
+                    dependencies: vec!["missing-prerequisite".to_owned()],
+                    payload_hash: payload_hash(&payload).unwrap(),
+                    payload,
+                })
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(service.reconcile_nonterminal().await.unwrap(), 12);
+    }
+
+    #[tokio::test]
+    async fn lagged_event_subscriber_backfills_every_durable_sequence() {
+        let embedder: Arc<dyn EmbeddingService> = Arc::new(NoOpEmbedder);
+        let storage = Arc::new(
+            SurrealStorage::new_mem(Arc::clone(&embedder))
+                .await
+                .expect("in-memory SurrealStorage"),
+        );
+        let service = OperationService::start_with_capacities(
+            storage as Arc<dyn MemoryStorage>,
+            embedder,
+            16,
+            4,
+        );
+        let payload = json!({
+            "name": "event-stream",
+            "description": "lag recovery fixture",
+            "agent_id": null,
+            "user_id": "test"
+        });
+        service
+            .submit(OperationRequest {
+                operation_id: "lagged-events".to_owned(),
+                schema_version: OPERATION_SCHEMA_VERSION,
+                kind: "create_task_stream".to_owned(),
+                dependencies: vec!["missing-prerequisite".to_owned()],
+                payload_hash: payload_hash(&payload).unwrap(),
+                payload,
+            })
+            .await
+            .unwrap();
+        wait_for_service_state(&service, "lagged-events", OperationState::Blocked, false).await;
+
+        let mut events = service.event_stream("lagged-events", 0).await.unwrap();
+        for marker in 0..8 {
+            service
+                .transition(
+                    "lagged-events",
+                    OperationState::Blocked,
+                    vec!["missing-prerequisite".to_owned()],
+                    None,
+                    None,
+                    Some(json!({"marker":marker})),
+                )
+                .await
+                .unwrap();
+        }
+
+        let final_sequence = service
+            .get("lagged-events")
+            .await
+            .unwrap()
+            .unwrap()
+            .progress_seq;
+        let mut sequences = Vec::new();
+        while sequences.last().copied().unwrap_or(0) < final_sequence {
+            sequences.push(events.next().await.unwrap().unwrap().sequence);
+        }
+        assert_eq!(sequences, (1..=final_sequence).collect::<Vec<_>>());
     }
 }
