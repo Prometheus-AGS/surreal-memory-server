@@ -33,11 +33,12 @@ pub struct AppState {
     /// distinguish "process up" from "write path actually ready" — accurate
     /// whether the model was loaded via startup warmup or lazily on first use.
     pub embedding_service: Arc<dyn EmbeddingService>,
+    pub operations: crate::operations::OperationService,
 }
 
 #[derive(Serialize)]
 pub(crate) struct ApiError {
-    error: String,
+    pub(crate) error: String,
 }
 
 pub(crate) type ApiFailure = (StatusCode, Json<ApiError>);
@@ -89,9 +90,14 @@ pub fn build_router(
     storage: Arc<dyn MemoryStorage>,
     embedding_service: Arc<dyn EmbeddingService>,
 ) -> Router {
+    let operations = crate::operations::OperationService::start(
+        Arc::clone(&storage),
+        Arc::clone(&embedding_service),
+    );
     let state = AppState {
         storage: Arc::clone(&storage),
         embedding_service,
+        operations,
     };
 
     // The MCP HTTP service captures storage in its factory closure, returning Router<()>.
@@ -101,6 +107,8 @@ pub fn build_router(
 
     let router = Router::new()
         .route("/health", get(health_handler))
+        .route("/ready", get(ready_handler))
+        .nest("/api/v2/operations", crate::operations::router())
         .nest("/api/v1/memory", memory::router())
         .nest("/api/v1/entities", entities::router())
         .nest("/api/v1/taskstreams", taskstreams::router())
@@ -119,12 +127,43 @@ pub fn build_router(
 }
 
 async fn health_handler(State(state): State<AppState>) -> axum::Json<serde_json::Value> {
-    let embedding_ready = state.embedding_service.is_ready();
+    let _ = state;
     axum::Json(json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
-        "service": "surreal-memory-server",
-        "embedding_ready": embedding_ready,
-        "write_path_ready": embedding_ready
+        "service": "surreal-memory-server"
     }))
+}
+
+async fn ready_handler(
+    State(state): State<AppState>,
+) -> (StatusCode, axum::Json<serde_json::Value>) {
+    let ledger_ready = state
+        .storage
+        .as_any()
+        .downcast_ref::<surreal_memory::SurrealStorage>()
+        .map(|storage| storage.db().is_ok())
+        .unwrap_or(false);
+    let embedding_ready = state.embedding_service.is_ready();
+    let status = if ledger_ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        status,
+        axum::Json(json!({
+            "status": if ledger_ready { "ready" } else { "not_ready" },
+            "capabilities": {
+                "ledger": ledger_ready,
+                "storage": ledger_ready,
+                "coordinator": ledger_ready,
+                "tokenizer": embedding_ready,
+                "model_executor": embedding_ready,
+                "search_index": embedding_ready
+            },
+            "ingestion_ready": ledger_ready,
+            "search_ready": embedding_ready
+        })),
+    )
 }

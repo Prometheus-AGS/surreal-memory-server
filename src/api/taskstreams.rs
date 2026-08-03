@@ -278,11 +278,16 @@ mod tests {
     }
 
     fn router_with_storage(storage: Arc<dyn MemoryStorage>) -> Router {
+        let operations = crate::operations::OperationService::start(
+            Arc::clone(&storage),
+            Arc::new(NoOpEmbedder),
+        );
         Router::new()
             .nest("/api/v1/taskstreams", router())
             .with_state(AppState {
                 storage,
                 embedding_service: Arc::new(NoOpEmbedder),
+                operations,
             })
     }
 

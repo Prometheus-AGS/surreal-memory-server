@@ -904,6 +904,57 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
         self.live_db()
     }
 
+    /// Persist a fully planned and embedded logical memory under a stable key.
+    ///
+    /// The durable-operation coordinator derives `record_key` from its caller
+    /// supplied operation id. Replaying after a crash therefore returns the
+    /// same row instead of creating a duplicate. Semantic similarity is not
+    /// consulted here: transport identity and semantic relatedness are
+    /// intentionally separate concerns.
+    pub async fn store_indexed_memory(
+        &self,
+        record_key: &str,
+        mut memory: Memory,
+        embedding: Vec<f32>,
+        token_count: u32,
+    ) -> Result<Memory> {
+        if let Some(existing) = self.get_memory(record_key).await? {
+            return Ok(existing);
+        }
+
+        let now = Datetime::default();
+        memory.embedding = Some(embedding);
+        memory.token_count = Some(token_count);
+        memory.created_at = now;
+        memory.updated_at = now;
+        memory.version = 1;
+        let payload = DbMemory::from(memory);
+        let db = self.live_db()?;
+        let response = db
+            .query(
+                "BEGIN TRANSACTION;\n\
+                 CREATE type::record('memory', $key) CONTENT $memory;\n\
+                 CREATE type::record('memory_history', $history_key) CONTENT { memory_id: type::record('memory', $key), version: 1, old_content: NONE, new_content: $content, changed_at: $now, change_type: 'created' };\n\
+                 COMMIT TRANSACTION;",
+            )
+            .bind(("key", record_key.to_owned()))
+            .bind(("memory", payload.clone()))
+            .bind(("history_key", format!("operation-{record_key}")))
+            .bind(("content", payload.content.clone()))
+            .bind(("now", now))
+            .await
+            .context("store_indexed_memory transaction failed")?;
+        if let Err(error) = response.check() {
+            if let Some(existing) = self.get_memory(record_key).await? {
+                return Ok(existing);
+            }
+            return Err(error.into());
+        }
+        self.get_memory(record_key)
+            .await?
+            .context("indexed memory disappeared after commit")
+    }
+
     /// Return the namespace and database this storage instance is connected to.
     ///
     /// Useful for diagnostics, logging, and multi-tenant routing.
