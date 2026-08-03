@@ -38,9 +38,9 @@ The `crates/surreal-memory` library owns storage and embedding abstractions. The
 
 ```bash
 cargo fmt --all -- --check
-cargo check --workspace --all-targets --all-features
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
+cargo check --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 cargo build --release
 ```
 
