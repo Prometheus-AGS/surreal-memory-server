@@ -507,6 +507,37 @@ fn plan_part(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokenizers::{
+        models::wordlevel::WordLevel, pre_tokenizers::whitespace::Whitespace,
+        processors::template::TemplateProcessing,
+    };
+
+    fn boundary_tokenizer() -> Tokenizer {
+        let vocab = [
+            ("[UNK]".to_owned(), 0),
+            ("[CLS]".to_owned(), 1),
+            ("[SEP]".to_owned(), 2),
+            ("word".to_owned(), 3),
+        ]
+        .into_iter()
+        .collect();
+        let model = WordLevel::builder()
+            .vocab(vocab)
+            .unk_token("[UNK]".to_owned())
+            .build()
+            .unwrap();
+        let mut tokenizer = Tokenizer::new(model);
+        tokenizer.with_pre_tokenizer(Some(Whitespace));
+        tokenizer.with_post_processor(Some(
+            TemplateProcessing::builder()
+                .try_single("[CLS] $A [SEP]")
+                .unwrap()
+                .special_tokens(vec![("[CLS]", 1), ("[SEP]", 2)])
+                .build()
+                .unwrap(),
+        ));
+        tokenizer
+    }
 
     #[test]
     fn new_does_not_load_model_eagerly() {
@@ -536,5 +567,36 @@ mod tests {
         assert!(validate_model_input_len(510, 512).is_ok());
         assert!(validate_model_input_len(512, 512).is_ok());
         assert!(validate_model_input_len(513, 512).is_err());
+    }
+
+    #[test]
+    fn planner_uses_exact_special_token_capacity_and_stable_token_windows() {
+        let tokenizer = boundary_tokenizer();
+        let below = plan_token_windows(&tokenizer, 6, "word word word").unwrap();
+        let at = plan_token_windows(&tokenizer, 6, "word word word word").unwrap();
+        let above = plan_token_windows(&tokenizer, 6, "word word word word word").unwrap();
+
+        assert_eq!(below.len(), 1);
+        assert_eq!(below[0].token_count, 3);
+        assert_eq!(at.len(), 1);
+        assert_eq!(at[0].token_count, 4);
+        assert!(above.len() > 1);
+        assert_eq!(above.first().unwrap().token_start, 0);
+        assert_eq!(above.last().unwrap().token_end, 5);
+        assert!(
+            above
+                .windows(2)
+                .all(|pair| pair[1].token_start <= pair[0].token_end)
+        );
+        assert!(above.iter().all(|part| {
+            tokenizer
+                .encode(part.content.as_str(), true)
+                .map(|encoding| encoding.len() <= 6)
+                .unwrap_or(false)
+        }));
+        assert_eq!(
+            above,
+            plan_token_windows(&tokenizer, 6, "word word word word word").unwrap()
+        );
     }
 }

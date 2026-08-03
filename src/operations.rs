@@ -517,27 +517,33 @@ impl OperationService {
         }
 
         let db = self.surreal()?.db()?;
-        for part in plan {
-            let key = format!("{}-{:08}", record_key(operation_id), part.part_index);
-            let row = DbOperationPart {
-                id: None,
-                operation_id: operation_id.to_owned(),
-                part_index: part.part_index as u64,
-                token_start: part.token_start as u64,
-                token_end: part.token_end as u64,
-                token_count: part.token_count as u64,
-                token_hash: part.token_hash.clone(),
-                content: part.content.clone(),
-                state: "planned".to_owned(),
-                embedding: None,
-                updated_at: Datetime::default(),
-            };
-            db.query("CREATE type::record('memory_operation_part', $key) CONTENT $part")
-                .bind(("key", key))
-                .bind(("part", row))
-                .await?
-                .check()?;
-        }
+        let rows = plan
+            .iter()
+            .map(|part| {
+                let key = format!("{}-{:08}", record_key(operation_id), part.part_index);
+                DbOperationPart {
+                    id: Some(RecordId::new("memory_operation_part", key)),
+                    operation_id: operation_id.to_owned(),
+                    part_index: part.part_index as u64,
+                    token_start: part.token_start as u64,
+                    token_end: part.token_end as u64,
+                    token_count: part.token_count as u64,
+                    token_hash: part.token_hash.clone(),
+                    content: part.content.clone(),
+                    state: "planned".to_owned(),
+                    embedding: None,
+                    updated_at: Datetime::default(),
+                }
+            })
+            .collect::<Vec<_>>();
+        db.query(
+            "BEGIN TRANSACTION;\n\
+             INSERT INTO memory_operation_part $parts;\n\
+             COMMIT TRANSACTION;",
+        )
+        .bind(("parts", rows))
+        .await?
+        .check()?;
         Ok(())
     }
 
@@ -672,11 +678,16 @@ impl OperationService {
     ) -> Result<()> {
         let request: AddMemoryRequest = serde_json::from_value(operation.payload.clone())
             .context("invalid add_memory payload")?;
-        let plan = self.embedding_service.plan(&request.content).await?;
-        if plan.is_empty() {
-            anyhow::bail!("embedding planner returned no parts");
+        let mut stored_parts = self.operation_parts(&operation.operation_id).await?;
+        if stored_parts.is_empty() {
+            let plan = self.embedding_service.plan(&request.content).await?;
+            if plan.is_empty() {
+                anyhow::bail!("embedding planner returned no parts");
+            }
+            self.persist_plan(&operation.operation_id, &plan).await?;
+            stored_parts = self.operation_parts(&operation.operation_id).await?;
         }
-        self.persist_plan(&operation.operation_id, &plan).await?;
+        validate_stored_plan(&stored_parts)?;
 
         if state == OperationState::Validated {
             self.transition(
@@ -686,8 +697,8 @@ impl OperationService {
                 None,
                 None,
                 Some(json!({
-                    "parts": plan.len(),
-                    "token_count": plan.iter().map(|part| part.token_end).max().unwrap_or(0),
+                    "parts": stored_parts.len(),
+                    "token_count": stored_parts.iter().map(|part| part.token_end).max().unwrap_or(0),
                     "planner": "active_model_tokenizer"
                 })),
             )
@@ -707,7 +718,6 @@ impl OperationService {
             state = OperationState::Processing;
         }
 
-        let mut stored_parts = self.operation_parts(&operation.operation_id).await?;
         if state == OperationState::Processing {
             for part in &mut stored_parts {
                 if part.state == "indexed" && part.embedding.is_some() {
@@ -953,6 +963,22 @@ fn validate_payload(kind: &str, payload: &Value) -> Result<()> {
     }
 }
 
+fn validate_stored_plan(parts: &[DbOperationPart]) -> Result<()> {
+    if parts.is_empty() {
+        anyhow::bail!("embedding plan is empty");
+    }
+    for (expected, part) in parts.iter().enumerate() {
+        if part.part_index != expected as u64
+            || part.token_end < part.token_start
+            || part.token_count != part.token_end - part.token_start
+            || part.token_hash.trim().is_empty()
+        {
+            anyhow::bail!("persisted embedding plan is not contiguous and self-consistent");
+        }
+    }
+    Ok(())
+}
+
 fn aggregate_embeddings(parts: &[DbOperationPart]) -> Result<Vec<f32>> {
     let dimensions = parts
         .first()
@@ -1132,6 +1158,7 @@ mod tests {
         body::{Body, to_bytes},
         http::Request,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tower::ServiceExt;
 
     struct NoOpEmbedder;
@@ -1148,6 +1175,65 @@ mod tests {
 
         fn dimensions(&self) -> usize {
             8
+        }
+    }
+
+    struct PlannedEmbedder {
+        fail_at_call: Option<usize>,
+        calls: AtomicUsize,
+    }
+
+    impl PlannedEmbedder {
+        fn completing() -> Self {
+            Self {
+                fail_at_call: None,
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn failing_at(call: usize) -> Self {
+            Self {
+                fail_at_call: Some(call),
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EmbeddingService for PlannedEmbedder {
+        async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_at_call == Some(call) {
+                anyhow::bail!("fixture executor exit at call {call}");
+            }
+            Ok(vec![text.len() as f32 + 1.0, call as f32 + 1.0])
+        }
+
+        async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
+            let mut result = Vec::with_capacity(texts.len());
+            for text in texts {
+                result.push(self.embed(&text).await?);
+            }
+            Ok(result)
+        }
+
+        async fn plan(&self, _text: &str) -> Result<Vec<EmbeddingPlanPart>> {
+            Ok(["alpha", "beta", "gamma"]
+                .into_iter()
+                .enumerate()
+                .map(|(part_index, content)| EmbeddingPlanPart {
+                    part_index,
+                    token_start: part_index * 3,
+                    token_end: (part_index + 1) * 3,
+                    token_count: 3,
+                    token_hash: digest_hex(content.as_bytes()),
+                    content: content.to_owned(),
+                })
+                .collect())
+        }
+
+        fn dimensions(&self) -> usize {
+            2
         }
     }
 
@@ -1210,6 +1296,24 @@ mod tests {
             let receipt = get_receipt(router.clone(), id).await;
             if receipt.state == expected {
                 return;
+            }
+            last = Some(receipt);
+            tokio::task::yield_now().await;
+        }
+        panic!("operation {id} did not reach {expected:?}; last receipt: {last:?}");
+    }
+
+    async fn wait_for_service_state(
+        service: &OperationService,
+        id: &str,
+        expected: OperationState,
+        require_error: bool,
+    ) -> OperationReceipt {
+        let mut last = None;
+        for _ in 0..10_000 {
+            let receipt = service.get(id).await.unwrap().unwrap();
+            if receipt.state == expected && (!require_error || receipt.error.is_some()) {
+                return receipt;
             }
             last = Some(receipt);
             tokio::task::yield_now().await;
@@ -1354,5 +1458,67 @@ mod tests {
         wait_for_state(router.clone(), "op-stream", OperationState::Committed).await;
         wait_for_state(router.clone(), "op-step", OperationState::Committed).await;
         wait_for_state(router, "op-complete", OperationState::Committed).await;
+    }
+
+    #[tokio::test]
+    async fn restart_replays_only_unfinished_parts_and_keeps_one_logical_memory() {
+        let first_embedder = Arc::new(PlannedEmbedder::failing_at(1));
+        let first_embedding_service: Arc<dyn EmbeddingService> = first_embedder.clone();
+        let storage = Arc::new(
+            SurrealStorage::new_mem(Arc::clone(&first_embedding_service))
+                .await
+                .expect("in-memory SurrealStorage"),
+        );
+        let first = OperationService::start(
+            Arc::clone(&storage) as Arc<dyn MemoryStorage>,
+            first_embedding_service,
+        );
+        let payload = json!({"content":"one logical memory","user_id":"test"});
+        first
+            .submit(OperationRequest {
+                operation_id: "restart-parts".to_owned(),
+                schema_version: OPERATION_SCHEMA_VERSION,
+                kind: "add_memory".to_owned(),
+                dependencies: Vec::new(),
+                payload_hash: payload_hash(&payload).unwrap(),
+                payload,
+            })
+            .await
+            .unwrap();
+        wait_for_service_state(&first, "restart-parts", OperationState::Processing, true).await;
+        let interrupted = first.operation_parts("restart-parts").await.unwrap();
+        assert_eq!(interrupted.len(), 3);
+        assert_eq!(interrupted[0].state, "indexed");
+        assert_eq!(interrupted[1].state, "planned");
+        assert_eq!(interrupted[2].state, "planned");
+
+        let second_embedder = Arc::new(PlannedEmbedder::completing());
+        let second_embedding_service: Arc<dyn EmbeddingService> = second_embedder.clone();
+        let second = OperationService::start(
+            Arc::clone(&storage) as Arc<dyn MemoryStorage>,
+            second_embedding_service,
+        );
+        wait_for_service_state(&second, "restart-parts", OperationState::Committed, false).await;
+
+        let completed = second.operation_parts("restart-parts").await.unwrap();
+        assert!(completed.iter().all(|part| part.state == "indexed"));
+        assert!(
+            storage
+                .get_memory(&record_key("restart-parts"))
+                .await
+                .unwrap()
+                .is_some(),
+            "the operation must materialize exactly one stable logical memory key"
+        );
+        assert_eq!(
+            first_embedder.calls.load(Ordering::SeqCst),
+            2,
+            "first executor stopped on its second part"
+        );
+        assert_eq!(
+            second_embedder.calls.load(Ordering::SeqCst),
+            2,
+            "restart embedded only two unfinished parts"
+        );
     }
 }
