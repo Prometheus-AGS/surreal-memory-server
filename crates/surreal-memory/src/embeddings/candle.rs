@@ -487,7 +487,7 @@ fn plan_part(
     ids: &[u32],
     content: String,
 ) -> EmbeddingPlanPart {
-    let mut bytes = Vec::with_capacity(ids.len() * std::mem::size_of::<u32>());
+    let mut bytes = Vec::with_capacity(std::mem::size_of_val(ids));
     for id in ids {
         bytes.extend_from_slice(&id.to_le_bytes());
     }
@@ -598,5 +598,56 @@ mod tests {
             above,
             plan_token_windows(&tokenizer, 6, "word word word word word").unwrap()
         );
+    }
+
+    /// Certification test for the authored tokenizer and model config. It is
+    /// ignored in the hermetic unit suite because the model files are installed
+    /// artifacts, then run explicitly on the target host before activation.
+    #[test]
+    #[ignore = "requires SURREAL_REAL_TOKENIZER and SURREAL_REAL_MODEL_CONFIG"]
+    fn real_tokenizer_proves_below_at_and_above_model_capacity() {
+        let tokenizer_path = std::env::var("SURREAL_REAL_TOKENIZER")
+            .expect("SURREAL_REAL_TOKENIZER must name the installed tokenizer.json");
+        let config_path = std::env::var("SURREAL_REAL_MODEL_CONFIG")
+            .expect("SURREAL_REAL_MODEL_CONFIG must name the installed config.json");
+        let tokenizer = Tokenizer::from_file(tokenizer_path).expect("load authored tokenizer");
+        let config: serde_json::Value = serde_json::from_reader(
+            std::fs::File::open(config_path).expect("open authored model config"),
+        )
+        .expect("parse authored model config");
+        let maximum = config["max_position_embeddings"]
+            .as_u64()
+            .expect("model config max_position_embeddings") as usize;
+        let special_tokens = tokenizer.encode("", true).unwrap().len();
+        let usable = maximum - special_tokens;
+
+        fn repeated_word_tokens(tokenizer: &Tokenizer, count: usize) -> String {
+            let text = std::iter::repeat_n("word", count)
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert_eq!(tokenizer.encode(text.as_str(), false).unwrap().len(), count);
+            text
+        }
+
+        let below = repeated_word_tokens(&tokenizer, usable - 1);
+        let at = repeated_word_tokens(&tokenizer, usable);
+        let above = repeated_word_tokens(&tokenizer, usable + 1);
+        let below_plan = plan_token_windows(&tokenizer, maximum, &below).unwrap();
+        let at_plan = plan_token_windows(&tokenizer, maximum, &at).unwrap();
+        let above_plan = plan_token_windows(&tokenizer, maximum, &above).unwrap();
+
+        assert_eq!(below_plan.len(), 1);
+        assert_eq!(below_plan[0].token_count, usable - 1);
+        assert_eq!(at_plan.len(), 1);
+        assert_eq!(at_plan[0].token_count, usable);
+        assert!(above_plan.len() > 1);
+        assert_eq!(above_plan.first().unwrap().token_start, 0);
+        assert_eq!(above_plan.last().unwrap().token_end, usable + 1);
+        assert!(above_plan.iter().all(|part| {
+            tokenizer
+                .encode(part.content.as_str(), true)
+                .map(|encoded| encoded.len() <= maximum)
+                .unwrap_or(false)
+        }));
     }
 }

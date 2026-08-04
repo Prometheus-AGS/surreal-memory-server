@@ -6,5 +6,6 @@
 //! errors when passing `Arc<dyn EmbeddingService>` across the crate boundary.
 
 pub use surreal_memory::embeddings::{
-    EmbeddingProvider, EmbeddingService, create_embedding_service,
+    EmbeddingProvider, EmbeddingService, ExecutorEvent, ExecutorEventKind, ExecutorSnapshot,
+    create_embedding_service,
 };

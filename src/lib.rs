@@ -5,6 +5,7 @@ pub mod coerce;
 pub mod config;
 pub mod contracts;
 pub mod embeddings;
+pub mod executor;
 pub mod mcp;
 pub mod operations;
 pub mod storage;

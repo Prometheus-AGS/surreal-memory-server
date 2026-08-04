@@ -1,0 +1,3 @@
+# Deliberate UUID fixture used to prove Debug output redacts secret values.
+d6d31f52a8384f3679bf8c0974d23d94cb759b64:docs/coding-standards/README.md:generic-api-key:942
+docs/coding-standards/README.md:generic-api-key:942

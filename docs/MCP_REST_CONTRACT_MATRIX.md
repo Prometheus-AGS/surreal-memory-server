@@ -67,5 +67,5 @@ point the tests at it:
 
 ```bash
 API_PORT=23001 MCP_STDIO=false cargo run --features embedded
-TEST_API_BASE=http://127.0.0.1:23001 cargo test --features embedded --test mindmap_server_mode --test taskstream_server_mode
+TEST_API_BASE=http://127.0.0.1:23001 cargo test --features embedded --test mindmap_server_mode --test taskstream_server_mode -- --ignored
 ```

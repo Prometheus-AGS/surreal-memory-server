@@ -5,6 +5,7 @@ use surreal_memory_server::{
     api,
     config::Config,
     embeddings::{self, EmbeddingService, create_embedding_service},
+    executor::{SupervisedEmbeddingService, run_embedding_executor},
     mcp::MemoryMcpServer,
     storage::{MemoryStorage, create_storage},
     workers,
@@ -18,6 +19,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 enum Command {
     Serve,
     RepairData { apply: bool },
+    EmbeddingExecutor,
 }
 
 /// Parse retry configuration from environment variables with sensible defaults.
@@ -78,6 +80,9 @@ async fn main() -> Result<()> {
         Command::Serve => {}
         Command::RepairData { apply } => {
             return run_repair_command(apply).await;
+        }
+        Command::EmbeddingExecutor => {
+            return run_embedding_executor().await;
         }
     }
 
@@ -215,6 +220,7 @@ where
 
             Ok(Command::RepairData { apply })
         }
+        "embedding-executor" => Ok(Command::EmbeddingExecutor),
         other => anyhow::bail!("Unknown command '{}'", other),
     }
 }
@@ -355,14 +361,25 @@ async fn load_config() -> Result<Config> {
 
 async fn init_embedding_service(config: &Config) -> Result<Arc<dyn EmbeddingService>> {
     tracing::info!("🧠 Initializing embedding service...");
-    let service = create_embedding_service(config.embedding_provider.clone())
+    let configured = create_embedding_service(config.embedding_provider.clone())
         .await
         .context("Failed to create embedding service")?;
+    let dimensions = configured.dimensions();
+    drop(configured);
+    let watchdog_ms = std::env::var("SURREAL_EXECUTOR_WATCHDOG_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(30_000);
+    let service = SupervisedEmbeddingService::new(
+        std::env::current_exe().context("resolve server executable for embedding supervisor")?,
+        dimensions,
+        std::time::Duration::from_millis(watchdog_ms),
+    );
     tracing::info!(
         "🧠 Embedding service configured ({} dimensions); model loads on warmup or first use",
         service.dimensions()
     );
-    Ok(Arc::from(service))
+    Ok(Arc::new(service))
 }
 
 async fn init_storage(
@@ -545,6 +562,14 @@ mod tests {
         assert_eq!(
             parse_command(vec!["repair-data".to_string(), "--apply".to_string()]).unwrap(),
             Command::RepairData { apply: true }
+        );
+    }
+
+    #[test]
+    fn test_parse_command_accepts_embedding_executor() {
+        assert_eq!(
+            parse_command(vec!["embedding-executor".to_string()]).unwrap(),
+            Command::EmbeddingExecutor
         );
     }
 

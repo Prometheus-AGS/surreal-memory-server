@@ -96,6 +96,7 @@ static MIGRATIONS: &[Migration] = &[
     Migration::sql(18, "task_stream_scope_unique_index", MIGRATION_V18_SQL),
     Migration::sql(19, "task_step_table", MIGRATION_V19_SQL),
     Migration::sql(20, "durable_operation_ledger", MIGRATION_V20_SQL),
+    Migration::sql(21, "embedding_executor_journal", MIGRATION_V21_SQL),
 ];
 
 // ── v1: Baseline entity + relation schema ─────────────────────────────────────
@@ -467,6 +468,25 @@ DEFINE INDEX IF NOT EXISTS memory_operation_part_identity
   ON memory_operation_part FIELDS operation_id, part_index UNIQUE;
 ";
 
+// ── v21: Supervised embedding executor journal ──────────────────────────────
+
+const MIGRATION_V21_SQL: &str = "
+DEFINE FIELD IF NOT EXISTS executor_progress_seq ON memory_operation TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS executor_exit_count ON memory_operation TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS executor_last_exit ON memory_operation TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS executor_error ON memory_operation TYPE option<string>;
+
+DEFINE TABLE IF NOT EXISTS memory_executor_event SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS operation_id ON memory_executor_event TYPE string;
+DEFINE FIELD IF NOT EXISTS generation ON memory_executor_event TYPE int;
+DEFINE FIELD IF NOT EXISTS progress_seq ON memory_executor_event TYPE int;
+DEFINE FIELD IF NOT EXISTS kind ON memory_executor_event TYPE string;
+DEFINE FIELD IF NOT EXISTS message ON memory_executor_event TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS occurred_at ON memory_executor_event TYPE datetime;
+DEFINE INDEX IF NOT EXISTS memory_executor_event_identity
+  ON memory_executor_event FIELDS operation_id, generation, progress_seq UNIQUE;
+";
+
 #[derive(Debug, Clone)]
 pub struct RepairChange {
     pub table: &'static str,
@@ -810,8 +830,9 @@ mod tests {
     use super::{
         MIGRATION_V11_SQL, MIGRATION_V12_SQL, MIGRATION_V13_SQL, MIGRATION_V15_SQL,
         MIGRATION_V16_SQL, MIGRATION_V17_SQL, MIGRATION_V18_SQL, MIGRATION_V19_SQL,
-        MIGRATION_V20_SQL, MIGRATIONS, RawMemoryEnumRecord, RawMindMapEnumRecord,
-        RawTaskStreamEnumRecord, apply_migration, inspect_legacy_enum_data, normalize_enum_value,
+        MIGRATION_V20_SQL, MIGRATION_V21_SQL, MIGRATIONS, RawMemoryEnumRecord,
+        RawMindMapEnumRecord, RawTaskStreamEnumRecord, apply_migration, inspect_legacy_enum_data,
+        normalize_enum_value,
     };
     use crate::{MapType, TaskStreamStatus};
     use surrealdb::Surreal;
@@ -822,9 +843,9 @@ mod tests {
     #[test]
     fn migration_v15_is_registered() {
         let last = MIGRATIONS.last().expect("at least one migration");
-        assert_eq!(last.version, 20);
-        assert_eq!(last.name, "durable_operation_ledger");
-        assert_eq!(last.sql, MIGRATION_V20_SQL);
+        assert_eq!(last.version, 21);
+        assert_eq!(last.name, "embedding_executor_journal");
+        assert_eq!(last.sql, MIGRATION_V21_SQL);
 
         let v18 = MIGRATIONS
             .iter()
@@ -930,6 +951,22 @@ mod tests {
         ));
         assert!(MIGRATION_V20_SQL.contains("memory_operation_event_sequence"));
         assert!(MIGRATION_V20_SQL.contains("memory_operation_part_identity"));
+    }
+
+    #[test]
+    fn migration_v21_persists_executor_lifecycle() {
+        for field in [
+            "executor_progress_seq",
+            "executor_exit_count",
+            "executor_last_exit",
+            "executor_error",
+        ] {
+            assert!(MIGRATION_V21_SQL.contains(&format!(
+                "DEFINE FIELD IF NOT EXISTS {field} ON memory_operation"
+            )));
+        }
+        assert!(MIGRATION_V21_SQL.contains("DEFINE TABLE IF NOT EXISTS memory_executor_event"));
+        assert!(MIGRATION_V21_SQL.contains("memory_executor_event_identity"));
     }
 
     #[test]
