@@ -20,6 +20,7 @@ enum Command {
     Serve,
     RepairData { apply: bool },
     EmbeddingExecutor,
+    Version,
 }
 
 /// Parse retry configuration from environment variables with sensible defaults.
@@ -74,9 +75,15 @@ fn parse_retry_config_from_env() -> surreal_memory::RetryConfig {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let command = parse_command(std::env::args().skip(1))?;
+    if command == Command::Version {
+        println!("surreal-memory-server {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     init_logging();
 
-    match parse_command(std::env::args().skip(1))? {
+    match command {
         Command::Serve => {}
         Command::RepairData { apply } => {
             return run_repair_command(apply).await;
@@ -84,6 +91,7 @@ async fn main() -> Result<()> {
         Command::EmbeddingExecutor => {
             return run_embedding_executor().await;
         }
+        Command::Version => unreachable!("version exits before runtime initialization"),
     }
 
     tracing::info!(
@@ -210,6 +218,10 @@ where
     }
 
     match args[0].as_str() {
+        "--version" | "-V" if args.len() == 1 => Ok(Command::Version),
+        "--version" | "-V" => {
+            anyhow::bail!("Usage: surreal-memory-server [--version|-V]")
+        }
         "repair-data" => {
             let apply = args.iter().skip(1).any(|arg| arg == "--apply");
             let dry_run = args.iter().skip(1).any(|arg| arg == "--dry-run");
