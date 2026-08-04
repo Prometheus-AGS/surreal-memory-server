@@ -1587,7 +1587,7 @@ mod tests {
     fn openapi_examples_match_serialized_request_and_receipt_contracts() {
         let spec = openapi_spec();
         assert_eq!(spec["openapi"], "3.1.0");
-        assert_eq!(spec["info"]["version"], "1.6.1");
+        assert_eq!(spec["info"]["version"], "1.7.0");
 
         let request_value = spec["components"]["examples"]["AddMemoryRequest"]["value"].clone();
         let request: OperationRequest =

@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Surreal Memory Durable Operations API",
-    "version": "1.6.1",
+    "version": "1.7.0",
     "description": "Receipt-driven ingestion for deterministic, replayable memory and task operations. POST acceptance is the durability boundary; terminal success is proven only by a committed receipt."
   },
   "servers": [
@@ -16,7 +16,7 @@
         "responses": {
           "200": {
             "description": "The HTTP process is live; this does not prove ingestion readiness.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Health" }, "example": { "service": "surreal-memory-server", "status": "ok", "version": "1.6.1" } } }
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Health" }, "example": { "service": "surreal-memory-server", "status": "ok", "version": "1.7.0" } } }
           }
         }
       }
