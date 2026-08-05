@@ -113,12 +113,14 @@ cuda = [
     "candle-core/cuda",
     "candle-nn/cuda",
     "candle-transformers/cuda",
+    "surreal-memory/cuda",
 ]
 metal = [
     "local-embeddings",
     "candle-core/metal",
     "candle-nn/metal",
     "candle-transformers/metal",
+    "surreal-memory/metal",
 ]
 
 [profile.dev]

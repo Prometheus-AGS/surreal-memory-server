@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use surreal_memory::{
     EmbeddingService, MemoryStorage, SurrealStorage, TaskStep, TaskStream,
-    embeddings::{EmbeddingPlanPart, ExecutorEvent, ExecutorSnapshot},
+    embeddings::{EmbeddingPlanPart, ExecutorEvent, ExecutorEventKind, ExecutorSnapshot},
 };
 use surrealdb::types::{Datetime, RecordId};
 use surrealdb_types::SurrealValue;
@@ -638,6 +638,18 @@ impl OperationService {
         loop {
             match events.recv().await {
                 Ok(event) => {
+                    // The child emits `working` every 250 ms so the in-memory
+                    // watchdog can distinguish slow inference from a frozen
+                    // process. Persisting every heartbeat turns a long model
+                    // load into four SurrealDB transactions per second and can
+                    // starve the operation reads needed to finish that same
+                    // request. Request acceptance, completion, errors, exits,
+                    // and watchdog failures remain durable journal records.
+                    if event.kind == ExecutorEventKind::Progress
+                        && event.message.as_deref() == Some("working")
+                    {
+                        continue;
+                    }
                     if let Err(error) = self.persist_executor_event(event).await {
                         tracing::error!(%error, "executor journal write failed");
                     }
