@@ -30,7 +30,7 @@ struct ExecutorRequest {
     command: ExecutorCommand,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 enum ExecutorCommand {
     Plan { text: String },
@@ -68,6 +68,33 @@ struct ChildState {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     generation: u64,
+}
+
+/// Internal classification for request failures. Retriable failures are
+/// transport or protocol desynchronizations where the supervisor has already
+/// restarted the executor child, so issuing the request again is safe —
+/// embedding is a pure function with no side effects. Non-retriable failures
+/// are executor-reported errors or supervisor invariants that a retry cannot
+/// fix.
+struct RequestFailure {
+    retriable: bool,
+    error: anyhow::Error,
+}
+
+impl RequestFailure {
+    fn retriable(error: anyhow::Error) -> Self {
+        Self {
+            retriable: true,
+            error,
+        }
+    }
+
+    fn fatal(error: anyhow::Error) -> Self {
+        Self {
+            retriable: false,
+            error,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -249,16 +276,50 @@ impl SupervisedEmbeddingService {
         operation_id: Option<&str>,
         command: ExecutorCommand,
     ) -> Result<ExecutorResult> {
+        // Interactive callers (no durable operation) have no retry layer
+        // above them, so retry once after a transport or protocol
+        // desynchronization; request_once has already restarted the executor
+        // child at that point, and embedding is side-effect free.
+        // Operation-scoped callers are instead resumed by the operations
+        // layer through the durable ledger, so they must observe the failure.
+        let retry_on_desync = operation_id.is_none();
+        match self.request_once(operation_id, &command).await {
+            Ok(result) => Ok(result),
+            Err(failure) if failure.retriable && retry_on_desync => {
+                self.emit(
+                    operation_id,
+                    self.current_generation.load(Ordering::SeqCst),
+                    ExecutorEventKind::Progress,
+                    Some(format!(
+                        "retrying on a fresh executor after: {}",
+                        failure.error
+                    )),
+                );
+                self.request_once(operation_id, &command)
+                    .await
+                    .map_err(|failure| failure.error)
+            }
+            Err(failure) => Err(failure.error),
+        }
+    }
+
+    async fn request_once(
+        &self,
+        operation_id: Option<&str>,
+        command: &ExecutorCommand,
+    ) -> std::result::Result<ExecutorResult, RequestFailure> {
         let request_id = self.next_request_id.fetch_add(1, Ordering::SeqCst);
         let request = ExecutorRequest {
             request_id,
             operation_id: operation_id.map(str::to_owned),
-            command,
+            command: command.clone(),
         };
-        let encoded = serde_json::to_vec(&request).context("serialize executor request")?;
+        let encoded = serde_json::to_vec(&request)
+            .context("serialize executor request")
+            .map_err(RequestFailure::fatal)?;
         let mut state = self.state.lock().await;
         if state.is_none() {
-            *state = Some(self.spawn_child().await?);
+            *state = Some(self.spawn_child().await.map_err(RequestFailure::fatal)?);
         }
         let child = state.as_mut().expect("executor child initialized");
         let generation = child.generation;
@@ -269,15 +330,16 @@ impl SupervisedEmbeddingService {
         }
         .await
         {
-            self.stop_child(
-                child,
+            self.restart_child(
+                &mut state,
                 operation_id,
                 ExecutorEventKind::Exited,
                 format!("executor request write failed: {error}"),
             )
             .await?;
-            *state = Some(self.spawn_child().await?);
-            anyhow::bail!("embedding executor generation {generation} exited before request write");
+            return Err(RequestFailure::retriable(anyhow::anyhow!(
+                "embedding executor generation {generation} exited before request write"
+            )));
         }
 
         loop {
@@ -285,45 +347,61 @@ impl SupervisedEmbeddingService {
             let read = tokio::time::timeout(self.watchdog, child.stdout.read_line(&mut line)).await;
             match read {
                 Err(_) => {
-                    self.stop_child(
-                        child,
+                    self.restart_child(
+                        &mut state,
                         operation_id,
                         ExecutorEventKind::Nonresponsive,
                         "executor progress watchdog observed no progress".to_owned(),
                     )
                     .await?;
-                    *state = Some(self.spawn_child().await?);
-                    anyhow::bail!(
+                    return Err(RequestFailure::retriable(anyhow::anyhow!(
                         "embedding executor generation {generation} was nonresponsive and restarted"
-                    );
+                    )));
                 }
                 Ok(Err(error)) => {
-                    self.stop_child(
-                        child,
+                    self.restart_child(
+                        &mut state,
                         operation_id,
                         ExecutorEventKind::Exited,
                         format!("executor response read failed: {error}"),
                     )
                     .await?;
-                    *state = Some(self.spawn_child().await?);
-                    anyhow::bail!("embedding executor generation {generation} exited");
+                    return Err(RequestFailure::retriable(anyhow::anyhow!(
+                        "embedding executor generation {generation} exited"
+                    )));
                 }
                 Ok(Ok(0)) => {
-                    self.stop_child(
-                        child,
+                    self.restart_child(
+                        &mut state,
                         operation_id,
                         ExecutorEventKind::Exited,
                         "executor response stream closed".to_owned(),
                     )
                     .await?;
-                    *state = Some(self.spawn_child().await?);
-                    anyhow::bail!("embedding executor generation {generation} exited");
+                    return Err(RequestFailure::retriable(anyhow::anyhow!(
+                        "embedding executor generation {generation} exited"
+                    )));
                 }
                 Ok(Ok(_)) => {}
             }
 
-            let message: ExecutorMessage =
-                serde_json::from_str(line.trim_end()).context("decode executor response")?;
+            let message: ExecutorMessage = match serde_json::from_str(line.trim_end()) {
+                Ok(message) => message,
+                Err(error) => {
+                    // An undecodable line means the child is no longer
+                    // speaking the protocol; do not trust the stream again.
+                    self.restart_child(
+                        &mut state,
+                        operation_id,
+                        ExecutorEventKind::Exited,
+                        format!("decode executor response failed: {error}"),
+                    )
+                    .await?;
+                    return Err(RequestFailure::retriable(anyhow::anyhow!(
+                        "embedding executor generation {generation} sent an undecodable response and restarted"
+                    )));
+                }
+            };
             match message {
                 ExecutorMessage::Progress {
                     request_id: response_id,
@@ -352,11 +430,66 @@ impl SupervisedEmbeddingService {
                         ExecutorEventKind::Error,
                         Some(error.clone()),
                     );
-                    anyhow::bail!("embedding executor failed: {error}");
+                    return Err(RequestFailure::fatal(anyhow::anyhow!(
+                        "embedding executor failed: {error}"
+                    )));
                 }
-                _ => anyhow::bail!("embedding executor returned a mismatched request id"),
+                _ => {
+                    // A response for a different request id means the
+                    // parent/child streams are permanently misaligned.
+                    // Restart the child so the next request starts from a
+                    // clean protocol state instead of failing forever.
+                    self.restart_child(
+                        &mut state,
+                        operation_id,
+                        ExecutorEventKind::Exited,
+                        format!(
+                            "executor protocol desynchronized: expected request id {request_id}"
+                        ),
+                    )
+                    .await?;
+                    return Err(RequestFailure::retriable(anyhow::anyhow!(
+                        "embedding executor generation {generation} returned a mismatched request id and restarted"
+                    )));
+                }
             }
         }
+    }
+
+    /// Stops the current child and installs a fresh generation. The child is
+    /// taken out of the state first so the caller's stream handle and this
+    /// mutation never alias. If stopping fails, the state is left cleared —
+    /// dropping the child kills it via `kill_on_drop` — so the next request
+    /// always spawns a clean executor.
+    async fn restart_child(
+        &self,
+        state: &mut Option<ChildState>,
+        operation_id: Option<&str>,
+        kind: ExecutorEventKind,
+        message: String,
+    ) -> std::result::Result<(), RequestFailure> {
+        let mut child = match state.take() {
+            Some(child) => child,
+            None => {
+                *state = Some(self.spawn_child().await.map_err(RequestFailure::retriable)?);
+                return Ok(());
+            }
+        };
+        if let Err(error) = self
+            .stop_child(&mut child, operation_id, kind, message)
+            .await
+        {
+            drop(child);
+            return Err(RequestFailure::retriable(
+                error.context("failed to stop embedding executor"),
+            ));
+        }
+        *state = Some(
+            self.spawn_child()
+                .await
+                .map_err(RequestFailure::retriable)?,
+        );
+        Ok(())
     }
 
     pub async fn terminate_idle_executor(&self) -> Result<()> {
