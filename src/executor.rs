@@ -45,7 +45,18 @@ enum ExecutorMessage {
     /// embedding service is constructed. Until this arrives the child cannot
     /// emit anything at all, so the parent must not hold it to the per-request
     /// progress watchdog.
-    Ready,
+    Ready {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        protocol_version: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        backend: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_revision: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dimensions: Option<usize>,
+    },
     Progress {
         request_id: u64,
         phase: String,
@@ -110,6 +121,70 @@ struct OperationBaseline {
     error: Option<String>,
 }
 
+const EXECUTOR_PROTOCOL_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutorIdentity {
+    pub backend: String,
+    pub model_id: String,
+    pub model_revision: String,
+    pub dimensions: usize,
+}
+
+impl ExecutorIdentity {
+    fn validate_ready(
+        &self,
+        protocol_version: Option<u32>,
+        backend: Option<&str>,
+        model_id: Option<&str>,
+        model_revision: Option<&str>,
+        dimensions: Option<usize>,
+    ) -> Result<()> {
+        let protocol_version =
+            protocol_version.context("executor ready missing protocol_version")?;
+        if protocol_version != EXECUTOR_PROTOCOL_VERSION {
+            anyhow::bail!(
+                "executor protocol mismatch: expected {}, got {}",
+                EXECUTOR_PROTOCOL_VERSION,
+                protocol_version
+            );
+        }
+        let backend = backend.context("executor ready missing backend")?;
+        if backend != self.backend {
+            anyhow::bail!(
+                "executor backend mismatch: expected '{}', got '{}'",
+                self.backend,
+                backend
+            );
+        }
+        let model_id = model_id.context("executor ready missing model_id")?;
+        if model_id != self.model_id {
+            anyhow::bail!(
+                "executor model mismatch: expected '{}', got '{}'",
+                self.model_id,
+                model_id
+            );
+        }
+        let model_revision = model_revision.context("executor ready missing model_revision")?;
+        if model_revision != self.model_revision {
+            anyhow::bail!(
+                "executor model revision mismatch: expected '{}', got '{}'",
+                self.model_revision,
+                model_revision
+            );
+        }
+        let dimensions = dimensions.context("executor ready missing dimensions")?;
+        if dimensions != self.dimensions {
+            anyhow::bail!(
+                "executor dimension mismatch: expected {}, got {}",
+                self.dimensions,
+                dimensions
+            );
+        }
+        Ok(())
+    }
+}
+
 /// Long-lived embedding subprocess supervised by progress messages. The
 /// watchdog only decides whether the child is responsive; operation success is
 /// still determined exclusively by durable ledger and part states.
@@ -140,11 +215,12 @@ pub struct SupervisedEmbeddingService {
     ready: AtomicBool,
     events_tx: broadcast::Sender<ExecutorEvent>,
     child_env: Vec<(String, String)>,
+    expected_identity: Option<ExecutorIdentity>,
 }
 
 impl SupervisedEmbeddingService {
     pub fn new(executable: PathBuf, dimensions: usize, watchdog: Duration) -> Self {
-        Self::with_child_env(executable, dimensions, watchdog, Vec::new())
+        Self::with_child_env_and_identity(executable, dimensions, watchdog, Vec::new(), None)
     }
 
     pub fn with_child_env(
@@ -152,6 +228,16 @@ impl SupervisedEmbeddingService {
         dimensions: usize,
         watchdog: Duration,
         child_env: Vec<(String, String)>,
+    ) -> Self {
+        Self::with_child_env_and_identity(executable, dimensions, watchdog, child_env, None)
+    }
+
+    pub fn with_child_env_and_identity(
+        executable: PathBuf,
+        dimensions: usize,
+        watchdog: Duration,
+        child_env: Vec<(String, String)>,
+        expected_identity: Option<ExecutorIdentity>,
     ) -> Self {
         let (events_tx, _) = broadcast::channel(1024);
         let startup_budget = Duration::from_millis(
@@ -178,6 +264,7 @@ impl SupervisedEmbeddingService {
             ready: AtomicBool::new(false),
             events_tx,
             child_env,
+            expected_identity,
         }
     }
 
@@ -277,10 +364,27 @@ impl SupervisedEmbeddingService {
                         line.trim()
                     )
                 })?;
-                if !matches!(message, ExecutorMessage::Ready) {
-                    anyhow::bail!(
+                match message {
+                    ExecutorMessage::Ready {
+                        protocol_version,
+                        backend,
+                        model_id,
+                        model_revision,
+                        dimensions,
+                    } => {
+                        if let Some(expected) = &self.expected_identity {
+                            expected.validate_ready(
+                                protocol_version,
+                                backend.as_deref(),
+                                model_id.as_deref(),
+                                model_revision.as_deref(),
+                                dimensions,
+                            )?;
+                        }
+                    }
+                    message => anyhow::bail!(
                         "embedding executor generation {generation} sent {message:?} before readiness"
-                    );
+                    ),
                 }
             }
             Ok(Err(error)) => {
@@ -700,16 +804,18 @@ impl EmbeddingService for SupervisedEmbeddingService {
             .fetch_max(previous.generation.saturating_add(1), Ordering::SeqCst);
         let mut state = self.state.lock().await;
         if let Some(child) = state.as_mut()
-            && child.generation < previous.generation
+            && child.generation <= previous.generation
         {
-            self.stop_child(
-                child,
-                None,
-                ExecutorEventKind::Exited,
-                "executor generation preceded durable ledger generation".to_owned(),
-            )
-            .await?;
-            *state = None;
+            // Generation numbers are supervisor bookkeeping, not part of the
+            // child protocol. A restarted server begins counting at one, so a
+            // healthy, pre-warmed child can legitimately have a lower number
+            // than an operation persisted by an earlier server process.
+            // Killing that child forced an unnecessary cold MLX launch during
+            // queue recovery. Adopt it into the durable sequence instead.
+            let adopted_generation = self.next_generation.fetch_add(1, Ordering::SeqCst);
+            child.generation = adopted_generation;
+            self.current_generation
+                .store(adopted_generation, Ordering::SeqCst);
         }
         drop(state);
 
@@ -753,12 +859,56 @@ pub async fn run_embedding_executor() -> Result<()> {
     #[cfg(not(debug_assertions))]
     let fixture = false;
 
-    let service: Arc<dyn EmbeddingService> = if fixture {
-        Arc::new(FixtureEmbeddingService)
+    let (service, identity): (Arc<dyn EmbeddingService>, ExecutorIdentity) = if fixture {
+        (
+            Arc::new(FixtureEmbeddingService),
+            ExecutorIdentity {
+                backend: "fixture".to_owned(),
+                model_id: "fixture".to_owned(),
+                model_revision: "fixture".to_owned(),
+                dimensions: 2,
+            },
+        )
     } else {
         let config = crate::config::Config::from_env()?;
-        Arc::from(
+        let (backend, model_id, model_revision) = match &config.embedding_provider {
+            surreal_memory::embeddings::EmbeddingProvider::Local { model_id, .. } => {
+                if config.local_embedding_backend != crate::config::LocalEmbeddingBackend::Candle {
+                    anyhow::bail!(
+                        "the Rust embedding-executor only supports LOCAL_EMBEDDING_BACKEND=candle"
+                    );
+                }
+                (
+                    "candle".to_owned(),
+                    model_id.clone(),
+                    config.local_embedding_model_revision.clone(),
+                )
+            }
+            surreal_memory::embeddings::EmbeddingProvider::OpenAI { model, .. } => {
+                ("openai".to_owned(), model.clone(), "api".to_owned())
+            }
+            surreal_memory::embeddings::EmbeddingProvider::Cohere { model, .. } => {
+                ("cohere".to_owned(), model.clone(), "api".to_owned())
+            }
+            #[cfg(feature = "palace")]
+            surreal_memory::embeddings::EmbeddingProvider::Fast => (
+                "fast".to_owned(),
+                "fastembed".to_owned(),
+                "bundled".to_owned(),
+            ),
+        };
+        let service: Arc<dyn EmbeddingService> = Arc::from(
             surreal_memory::embeddings::create_embedding_service(config.embedding_provider).await?,
+        );
+        let dimensions = service.dimensions();
+        (
+            service,
+            ExecutorIdentity {
+                backend,
+                model_id,
+                model_revision,
+                dimensions,
+            },
         )
     };
     let stdin = tokio::io::stdin();
@@ -770,7 +920,17 @@ pub async fn run_embedding_executor() -> Result<()> {
     // process exec, dynamic linking of a large GPU-linked binary, config
     // parsing, service construction — happens while the child is structurally
     // incapable of producing output. The parent times that phase separately.
-    write_message(&mut writer, &ExecutorMessage::Ready).await?;
+    write_message(
+        &mut writer,
+        &ExecutorMessage::Ready {
+            protocol_version: Some(EXECUTOR_PROTOCOL_VERSION),
+            backend: Some(identity.backend),
+            model_id: Some(identity.model_id),
+            model_revision: Some(identity.model_revision),
+            dimensions: Some(identity.dimensions),
+        },
+    )
+    .await?;
 
     while let Some(line) = lines.next_line().await? {
         let request: ExecutorRequest = serde_json::from_str(&line)?;
@@ -912,5 +1072,54 @@ fn exit_fixture_once(text: &str) -> Result<()> {
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    fn identity() -> ExecutorIdentity {
+        ExecutorIdentity {
+            backend: "mlx".to_owned(),
+            model_id: "BAAI/bge-small-en-v1.5".to_owned(),
+            model_revision: "revision".to_owned(),
+            dimensions: 384,
+        }
+    }
+
+    #[test]
+    fn accepts_exact_executor_identity() {
+        identity()
+            .validate_ready(
+                Some(EXECUTOR_PROTOCOL_VERSION),
+                Some("mlx"),
+                Some("BAAI/bge-small-en-v1.5"),
+                Some("revision"),
+                Some(384),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn rejects_model_revision_mismatch() {
+        let error = identity()
+            .validate_ready(
+                Some(EXECUTOR_PROTOCOL_VERSION),
+                Some("mlx"),
+                Some("BAAI/bge-small-en-v1.5"),
+                Some("other"),
+                Some(384),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("model revision mismatch"));
+    }
+
+    #[test]
+    fn rejects_missing_identity_fields() {
+        let error = identity()
+            .validate_ready(None, None, None, None, None)
+            .unwrap_err();
+        assert!(error.to_string().contains("protocol_version"));
     }
 }

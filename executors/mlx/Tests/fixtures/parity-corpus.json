@@ -1,0 +1,26 @@
+{
+  "queries": [
+    "How does the learning worker resume accepted memory operations?",
+    "What protects the embedding subprocess from protocol desynchronization?",
+    "Which SurrealDB version is installed by the service pack?",
+    "How are skills distributed to supported coding tools?",
+    "Why did the Metal embedding backend stall during startup?"
+  ],
+  "documents": [
+    "The learning worker reconciles durable receipts and resumes unfinished operation parts after restart.",
+    "Accepted memory operations remain in the durable ledger until every embedding part commits.",
+    "The executor supervisor correlates JSONL messages by request ID and respawns after malformed or mismatched frames.",
+    "A fresh subprocess generation is used after an executor exits or violates the wire protocol.",
+    "The native database service is certified against SurrealDB 3.2.4 and surrealdb-types 3.2.4.",
+    "SurrealDB stores memory records and vector indexes in the shared memory namespace and mcp database.",
+    "An immutable signed skill generation is activated across fourteen supported tool targets.",
+    "Receipts verify every installed skill placement and preserve generation provenance.",
+    "Candle completed the model download but stalled while compiling Metal kernels for the first BERT forward pass.",
+    "MLX uses Apple Silicon unified memory and a different Metal execution stack for local inference.",
+    "Prompt hooks retrieve bounded project and global knowledge context before the agent turn.",
+    "Stop hooks enqueue one idempotent Karpathy learning job per completed session.",
+    "The service installer ad-hoc signs copied Apple Silicon binaries before launchd starts them.",
+    "The BGE small English model produces normalized vectors with 384 dimensions.",
+    "Changing embedding models would require a controlled full re-embedding migration."
+  ]
+}

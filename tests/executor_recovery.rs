@@ -3,6 +3,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use surreal_memory::embeddings::ExecutorSnapshot;
 use surreal_memory::{
     EmbeddingService, MemoryStorage, SurrealStorage, embeddings::ExecutorEventKind,
 };
@@ -302,4 +303,39 @@ async fn server_restart_advances_the_persisted_executor_generation() {
     assert_eq!(completed.executor_exit_count, 1);
     second_executor.terminate_idle_executor().await.unwrap();
     std::fs::remove_dir_all(marker_dir).unwrap();
+}
+
+#[tokio::test]
+async fn durable_generation_adopts_the_pre_warmed_child_without_restarting_it() {
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_surreal-memory-server"));
+    let executor = SupervisedEmbeddingService::with_child_env(
+        executable,
+        2,
+        Duration::from_secs(10),
+        vec![("SURREAL_EXECUTOR_FIXTURE".to_owned(), "1".to_owned())],
+    );
+
+    executor.embed("warmup").await.unwrap();
+    let warm = executor.executor_snapshot().unwrap();
+    let persisted = ExecutorSnapshot {
+        generation: warm.generation + 10,
+        progress_seq: warm.progress_seq,
+        exit_count: warm.exit_count,
+        last_exit: None,
+        error: None,
+    };
+
+    executor
+        .prepare_operation("resume-with-warm-child", &persisted)
+        .await
+        .unwrap();
+    let adopted = executor.executor_snapshot().unwrap();
+    assert!(adopted.generation > persisted.generation);
+    assert_eq!(adopted.exit_count, warm.exit_count);
+
+    executor.embed("still-warm").await.unwrap();
+    let after = executor.executor_snapshot().unwrap();
+    assert_eq!(after.generation, adopted.generation);
+    assert_eq!(after.exit_count, warm.exit_count);
+    executor.terminate_idle_executor().await.unwrap();
 }
