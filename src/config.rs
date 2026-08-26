@@ -1,6 +1,25 @@
 use crate::embeddings::EmbeddingProvider;
 use serde::Deserialize;
-use std::env;
+use std::{env, path::PathBuf};
+
+pub const DEFAULT_LOCAL_EMBEDDING_MODEL: &str = "BAAI/bge-small-en-v1.5";
+pub const DEFAULT_LOCAL_EMBEDDING_REVISION: &str = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LocalEmbeddingBackend {
+    Candle,
+    Mlx,
+}
+
+impl LocalEmbeddingBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Candle => "candle",
+            Self::Mlx => "mlx",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -12,6 +31,10 @@ pub struct Config {
     pub surreal_password: Option<String>,
     pub embedded_path: Option<String>,
     pub embedding_provider: EmbeddingProvider,
+    pub local_embedding_backend: LocalEmbeddingBackend,
+    pub local_embedding_executor: Option<PathBuf>,
+    pub local_embedding_model_revision: String,
+    pub local_embedding_dimensions: usize,
     /// When true, the embedding model is loaded eagerly at startup so the first
     /// user-facing write does not pay the cold-load latency. Defaults to true;
     /// set `EMBEDDING_WARMUP=false` to restore purely lazy loading.
@@ -57,7 +80,7 @@ impl Config {
             _ => {
                 // Default to local embeddings
                 let model_id = env::var("LOCAL_EMBEDDING_MODEL")
-                    .unwrap_or_else(|_| "BAAI/bge-small-en-v1.5".to_string());
+                    .unwrap_or_else(|_| DEFAULT_LOCAL_EMBEDDING_MODEL.to_string());
                 let model_path = env::var("MODEL_CACHE_DIR").ok();
                 EmbeddingProvider::Local {
                     model_id,
@@ -78,6 +101,26 @@ impl Config {
                 .ok()
                 .or_else(|| Some("./data/memory.db".to_string())),
             embedding_provider,
+            local_embedding_backend: match env::var("LOCAL_EMBEDDING_BACKEND")
+                .unwrap_or_else(|_| "candle".to_string())
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "candle" => LocalEmbeddingBackend::Candle,
+                "mlx" => LocalEmbeddingBackend::Mlx,
+                value => anyhow::bail!(
+                    "LOCAL_EMBEDDING_BACKEND must be 'candle' or 'mlx', got '{value}'"
+                ),
+            },
+            local_embedding_executor: env::var_os("LOCAL_EMBEDDING_EXECUTOR").map(PathBuf::from),
+            local_embedding_model_revision: env::var("LOCAL_EMBEDDING_MODEL_REVISION")
+                .unwrap_or_else(|_| DEFAULT_LOCAL_EMBEDDING_REVISION.to_string()),
+            local_embedding_dimensions: env::var("LOCAL_EMBEDDING_DIMENSIONS")
+                .ok()
+                .map(|value| value.parse::<usize>())
+                .transpose()
+                .map_err(|error| anyhow::anyhow!("invalid LOCAL_EMBEDDING_DIMENSIONS: {error}"))?
+                .unwrap_or(384),
             // Default on: with warmup off, the first user-facing request paid
             // the entire cold model load, which is exactly the window in which
             // the supervisor watchdog used to kill the executor. Warmup moves

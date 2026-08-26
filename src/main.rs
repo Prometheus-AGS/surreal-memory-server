@@ -3,9 +3,9 @@ use std::sync::Arc;
 use surreal_memory::storage::migrations::{inspect_legacy_enum_data, repair_legacy_enum_data};
 use surreal_memory_server::{
     api,
-    config::Config,
+    config::{Config, LocalEmbeddingBackend},
     embeddings::{self, EmbeddingService, create_embedding_service},
-    executor::{SupervisedEmbeddingService, run_embedding_executor},
+    executor::{ExecutorIdentity, SupervisedEmbeddingService, run_embedding_executor},
     mcp::MemoryMcpServer,
     storage::{MemoryStorage, create_storage},
     workers,
@@ -104,8 +104,19 @@ async fn main() -> Result<()> {
     let embedding_service = init_embedding_service(&config).await?;
     let retry_config = parse_retry_config_from_env();
 
+    let mlx_backend = matches!(
+        &config.embedding_provider,
+        embeddings::EmbeddingProvider::Local { .. }
+    ) && config.local_embedding_backend == LocalEmbeddingBackend::Mlx;
     if config.embedding_warmup {
-        warmup_embedding(Arc::clone(&embedding_service)).await;
+        let warmup = warmup_embedding(Arc::clone(&embedding_service)).await;
+        if mlx_backend {
+            warmup.context("MLX embedding warmup failed; refusing to open the API")?;
+        } else if let Err(error) = warmup {
+            tracing::warn!(%error, "Embedding warmup failed; model will load lazily on first use");
+        }
+    } else if mlx_backend {
+        anyhow::bail!("EMBEDDING_WARMUP must be enabled for the MLX backend");
     }
 
     let api_port: u16 = std::env::var("API_PORT")
@@ -443,7 +454,12 @@ async fn load_config() -> Result<Config> {
             tracing::info!("   Embedding: Cohere ({})", model);
         }
         embeddings::EmbeddingProvider::Local { model_id, .. } => {
-            tracing::info!("   Embedding: Local ({})", model_id);
+            tracing::info!(
+                "   Embedding: Local ({}, backend={}, revision={})",
+                model_id,
+                config.local_embedding_backend.as_str(),
+                config.local_embedding_model_revision
+            );
         }
         #[cfg(feature = "palace")]
         embeddings::EmbeddingProvider::Fast => {
@@ -460,14 +476,76 @@ async fn init_embedding_service(config: &Config) -> Result<Arc<dyn EmbeddingServ
         .context("Failed to create embedding service")?;
     let dimensions = configured.dimensions();
     drop(configured);
+    let (executable, identity) = match &config.embedding_provider {
+        embeddings::EmbeddingProvider::Local { model_id, .. } => {
+            if dimensions != config.local_embedding_dimensions {
+                anyhow::bail!(
+                    "configured local embedding dimensions {} do not match model dimensions {}",
+                    config.local_embedding_dimensions,
+                    dimensions
+                );
+            }
+            let executable = match config.local_embedding_backend {
+                LocalEmbeddingBackend::Candle => std::env::current_exe()
+                    .context("resolve server executable for Candle embedding supervisor")?,
+                LocalEmbeddingBackend::Mlx => {
+                    let path = config.local_embedding_executor.as_ref().context(
+                        "LOCAL_EMBEDDING_EXECUTOR is required when LOCAL_EMBEDDING_BACKEND=mlx",
+                    )?;
+                    std::fs::canonicalize(path).with_context(|| {
+                        format!("resolve MLX embedding executor '{}'", path.display())
+                    })?
+                }
+            };
+            (
+                executable,
+                ExecutorIdentity {
+                    backend: config.local_embedding_backend.as_str().to_owned(),
+                    model_id: model_id.clone(),
+                    model_revision: config.local_embedding_model_revision.clone(),
+                    dimensions,
+                },
+            )
+        }
+        embeddings::EmbeddingProvider::OpenAI { model, .. } => (
+            std::env::current_exe().context("resolve server embedding executor")?,
+            ExecutorIdentity {
+                backend: "openai".to_owned(),
+                model_id: model.clone(),
+                model_revision: "api".to_owned(),
+                dimensions,
+            },
+        ),
+        embeddings::EmbeddingProvider::Cohere { model, .. } => (
+            std::env::current_exe().context("resolve server embedding executor")?,
+            ExecutorIdentity {
+                backend: "cohere".to_owned(),
+                model_id: model.clone(),
+                model_revision: "api".to_owned(),
+                dimensions,
+            },
+        ),
+        #[cfg(feature = "palace")]
+        embeddings::EmbeddingProvider::Fast => (
+            std::env::current_exe().context("resolve server embedding executor")?,
+            ExecutorIdentity {
+                backend: "fast".to_owned(),
+                model_id: "fastembed".to_owned(),
+                model_revision: "bundled".to_owned(),
+                dimensions,
+            },
+        ),
+    };
     let watchdog_ms = std::env::var("SURREAL_EXECUTOR_WATCHDOG_MS")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(30_000);
-    let service = SupervisedEmbeddingService::new(
-        std::env::current_exe().context("resolve server executable for embedding supervisor")?,
+    let service = SupervisedEmbeddingService::with_child_env_and_identity(
+        executable,
         dimensions,
         std::time::Duration::from_millis(watchdog_ms),
+        Vec::new(),
+        Some(identity),
     );
     tracing::info!(
         "🧠 Embedding service configured ({} dimensions); model loads on warmup or first use",
@@ -500,16 +578,18 @@ async fn run_mcp_server(storage: Arc<dyn MemoryStorage>) -> Result<()> {
 /// model will be retried lazily on first use. Readiness is reported via
 /// `EmbeddingService::is_ready()`, so `/health` stays accurate regardless of
 /// whether warmup ran or succeeded.
-async fn warmup_embedding(service: Arc<dyn EmbeddingService>) {
+async fn warmup_embedding(service: Arc<dyn EmbeddingService>) -> Result<()> {
     tracing::info!("🔥 Warming up embedding model...");
-    match service.embed("warmup").await {
-        Ok(_) => {
-            tracing::info!("✅ Embedding model warmed up and ready");
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "Embedding warmup failed; model will load lazily on first use");
-        }
+    let embedding = service.embed("warmup").await?;
+    if embedding.len() != service.dimensions() {
+        anyhow::bail!(
+            "embedding warmup dimension mismatch: expected {}, got {}",
+            service.dimensions(),
+            embedding.len()
+        );
     }
+    tracing::info!("✅ Embedding model warmed up and ready");
+    Ok(())
 }
 
 async fn run_api_server(

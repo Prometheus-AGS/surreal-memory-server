@@ -31,6 +31,7 @@ struct CandleEmbeddingsInner {
 pub struct CandleEmbeddings {
     inner: OnceCell<Arc<Mutex<CandleEmbeddingsInner>>>,
     model_id: String,
+    model_revision: String,
     cache_dir: String,
     expected_dimensions: usize,
 }
@@ -52,6 +53,8 @@ impl CandleEmbeddings {
         Ok(Self {
             inner: OnceCell::new(),
             model_id: model_id.to_string(),
+            model_revision: std::env::var("LOCAL_EMBEDDING_MODEL_REVISION")
+                .unwrap_or_else(|_| "main".to_string()),
             cache_dir: cache_dir.to_string(),
             expected_dimensions,
         })
@@ -98,7 +101,7 @@ impl CandleEmbeddings {
                 tracing::info!("Using device: {:?}", device);
 
                 let (config_path, tokenizer_path, weights_path) =
-                    Self::download_model(&self.model_id, &self.cache_dir)
+                    Self::download_model(&self.model_id, &self.model_revision, &self.cache_dir)
                         .await
                         .context("Failed to download model files")?;
 
@@ -195,6 +198,12 @@ impl CandleEmbeddings {
     }
 
     fn get_device() -> Result<Device> {
+        let device_preference = std::env::var("LOCAL_EMBEDDING_DEVICE").ok();
+        if force_cpu(device_preference.as_deref())? {
+            tracing::warn!("LOCAL_EMBEDDING_DEVICE=cpu: using the explicit degraded CPU backend");
+            return Ok(Device::Cpu);
+        }
+
         #[cfg(feature = "cuda")]
         {
             if candle_core::utils::cuda_is_available() {
@@ -237,6 +246,7 @@ impl CandleEmbeddings {
 
     async fn download_model(
         model_id: &str,
+        model_revision: &str,
         cache_dir: &str,
     ) -> Result<(PathBuf, PathBuf, PathBuf)> {
         // hf-hub keeps repositories under `<hf-home>/hub`: both
@@ -251,8 +261,9 @@ impl CandleEmbeddings {
         let hub_dir = Self::hub_cache_dir(cache_dir);
 
         tracing::info!(
-            "Resolving model from Hugging Face: {} (cache: {})",
+            "Resolving model from Hugging Face: {}@{} (cache: {})",
             model_id,
+            model_revision,
             hub_dir.display()
         );
 
@@ -263,7 +274,11 @@ impl CandleEmbeddings {
             .with_cache_dir(hub_dir)
             .build()
             .context("build Hugging Face API client")?;
-        let repo = api.repo(Repo::new(model_id.to_string(), RepoType::Model));
+        let repo = api.repo(Repo::with_revision(
+            model_id.to_string(),
+            RepoType::Model,
+            model_revision.to_string(),
+        ));
 
         // Download config, tokenizer, and weights concurrently. The weights
         // future tries safetensors first and falls back to the PyTorch file.
@@ -441,6 +456,14 @@ impl CandleEmbeddings {
         tensor
             .broadcast_div(&norm_clamped)
             .context("Failed to divide by norm")
+    }
+}
+
+fn force_cpu(value: Option<&str>) -> Result<bool> {
+    match value.unwrap_or("auto").trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(false),
+        "cpu" => Ok(true),
+        other => anyhow::bail!("LOCAL_EMBEDDING_DEVICE must be 'auto' or 'cpu', got '{other}'"),
     }
 }
 
@@ -641,6 +664,14 @@ mod tests {
         assert_eq!(estimate("BAAI/bge-base-en-v1.5"), 768);
         assert_eq!(estimate("BAAI/bge-large-en-v1.5"), 1024);
         assert_eq!(estimate("sentence-transformers/all-MiniLM-L6-v2"), 384);
+    }
+
+    #[test]
+    fn device_preference_is_explicit_and_fail_closed() {
+        assert!(!force_cpu(None).unwrap());
+        assert!(!force_cpu(Some("auto")).unwrap());
+        assert!(force_cpu(Some("CPU")).unwrap());
+        assert!(force_cpu(Some("metal")).is_err());
     }
 
     #[test]
