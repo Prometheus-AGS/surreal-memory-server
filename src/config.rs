@@ -13,8 +13,8 @@ pub struct Config {
     pub embedded_path: Option<String>,
     pub embedding_provider: EmbeddingProvider,
     /// When true, the embedding model is loaded eagerly at startup so the first
-    /// user-facing write does not pay the cold-load latency. Set via
-    /// `EMBEDDING_WARMUP=true`.
+    /// user-facing write does not pay the cold-load latency. Defaults to true;
+    /// set `EMBEDDING_WARMUP=false` to restore purely lazy loading.
     pub embedding_warmup: bool,
 }
 
@@ -78,9 +78,14 @@ impl Config {
                 .ok()
                 .or_else(|| Some("./data/memory.db".to_string())),
             embedding_provider,
+            // Default on: with warmup off, the first user-facing request paid
+            // the entire cold model load, which is exactly the window in which
+            // the supervisor watchdog used to kill the executor. Warmup moves
+            // that cost to startup, where a failure only logs and falls back to
+            // lazy loading. Opt out with EMBEDDING_WARMUP=false.
             embedding_warmup: env::var("EMBEDDING_WARMUP")
-                .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-                .unwrap_or(false),
+                .map(|v| !(v.eq_ignore_ascii_case("false") || v == "0"))
+                .unwrap_or(true),
         };
 
         Ok(config)

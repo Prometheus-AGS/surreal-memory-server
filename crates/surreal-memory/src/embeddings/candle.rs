@@ -4,10 +4,11 @@ use async_trait::async_trait;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config as BertConfig};
-use hf_hub::{Repo, RepoType, api::tokio::Api};
+use hf_hub::{Repo, RepoType, api::tokio::ApiBuilder};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokenizers::Tokenizer;
 use tokio::sync::{Mutex, OnceCell};
 
@@ -80,8 +81,20 @@ impl CandleEmbeddings {
             .get_or_try_init(|| async {
                 tracing::info!("Loading Candle embeddings model: {}", self.model_id);
 
-                // Determine device (CUDA > Metal > CPU)
-                let device = Self::get_device().context("Failed to get compute device")?;
+                // Determine device (CUDA > Metal > CPU).
+                //
+                // `Device::new_metal`/`new_cuda` initialize the GPU stack through
+                // synchronous FFI that can occupy the thread for tens of seconds
+                // on a cold start. Called directly in this async block it blocked
+                // a runtime worker, starved the executor's 250ms heartbeat, and
+                // let the supervisor's watchdog declare the child nonresponsive
+                // and SIGKILL it mid-initialization — 24 such restarts across 23
+                // generations in production logs, each one immediately after the
+                // "Metal available, using GPU" line. Offload it.
+                let device = tokio::task::spawn_blocking(Self::get_device)
+                    .await
+                    .context("Embedding device selection task panicked")?
+                    .context("Failed to get compute device")?;
                 tracing::info!("Using device: {:?}", device);
 
                 let (config_path, tokenizer_path, weights_path) =
@@ -206,13 +219,24 @@ impl CandleEmbeddings {
         model_id: &str,
         cache_dir: &str,
     ) -> Result<(PathBuf, PathBuf, PathBuf)> {
-        tracing::info!("Downloading model from Hugging Face: {}", model_id);
+        tracing::info!(
+            "Downloading model from Hugging Face: {} (cache: {})",
+            model_id,
+            cache_dir
+        );
 
-        let api = Api::new()?;
+        std::fs::create_dir_all(cache_dir)
+            .with_context(|| format!("create model cache directory {cache_dir}"))?;
+
+        // `Api::new()` ignores `cache_dir` entirely and falls back to
+        // $HF_HOME/~/.cache/huggingface. That made the configured cache
+        // directory dead config: on any host whose default cache is not
+        // persisted, every executor restart re-downloaded the weights.
+        let api = ApiBuilder::new()
+            .with_cache_dir(PathBuf::from(cache_dir))
+            .build()
+            .context("build Hugging Face API client")?;
         let repo = api.repo(Repo::new(model_id.to_string(), RepoType::Model));
-
-        // Set cache directory
-        std::fs::create_dir_all(cache_dir)?;
 
         // Download config, tokenizer, and weights concurrently. The weights
         // future tries safetensors first and falls back to the PyTorch file.
@@ -228,15 +252,45 @@ impl CandleEmbeddings {
             }
         };
 
-        let (config_path, tokenizer_path, weights_path) = tokio::try_join!(
-            async { config_fut.await.map_err(anyhow::Error::from) },
-            async { tokenizer_fut.await.map_err(anyhow::Error::from) },
-            weights_fut
-        )?;
+        // hf-hub 0.5 builds its reqwest client with no connect or read timeout,
+        // so a stalled transfer waits forever. Bound the whole download here:
+        // without this the caller's watchdog is the only limit, and it kills the
+        // process rather than returning a diagnosable error.
+        let downloads = async {
+            tokio::try_join!(
+                async { config_fut.await.map_err(anyhow::Error::from) },
+                async { tokenizer_fut.await.map_err(anyhow::Error::from) },
+                weights_fut
+            )
+        };
+
+        let (config_path, tokenizer_path, weights_path) =
+            match tokio::time::timeout(Self::download_timeout(), downloads).await {
+                Ok(result) => result?,
+                Err(_) => anyhow::bail!(
+                    "timed out after {:?} downloading model '{model_id}'; \
+                     set MODEL_DOWNLOAD_TIMEOUT_SECS to allow longer, or pre-populate {cache_dir}",
+                    Self::download_timeout()
+                ),
+            };
 
         tracing::info!("Model files downloaded successfully");
 
         Ok((config_path, tokenizer_path, weights_path))
+    }
+
+    /// Ceiling on a cold model download. Generous by default — a first pull of
+    /// several hundred MB on a slow link is legitimate — but finite, so a
+    /// stalled transfer fails with a clear error instead of hanging forever.
+    fn download_timeout() -> Duration {
+        const DEFAULT_DOWNLOAD_TIMEOUT_SECS: u64 = 600;
+        Duration::from_secs(
+            std::env::var("MODEL_DOWNLOAD_TIMEOUT_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .filter(|secs| *secs > 0)
+                .unwrap_or(DEFAULT_DOWNLOAD_TIMEOUT_SECS),
+        )
     }
 
     fn mean_pooling(embeddings: &Tensor, attention_mask: &Tensor) -> Result<Tensor> {
