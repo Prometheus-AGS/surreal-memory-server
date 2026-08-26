@@ -27,6 +27,9 @@ Format: `YYYY-MM-DD — Rule — *(context: what went wrong)*`
 - 2026-05-24 — If a doc comment in the file *already* says "no extra wrapping needed" and the code contradicts it, the comment is right and the code is the defect. Read existing doc comments before adding state. *(Context: `surreal.rs:38-42` documented the correct shape; the implementation ignored it.)*
 - 2026-05-24 — Tuning a retry/timeout knob is not a fix; it is a band-aid. If you find yourself reaching for a `MAX_*_RETRIES` env var to make a symptom go away, stop and look at the layer below.
 - 2026-05-24 — Do not invent skill names. If a skill is referenced in a request but not present in `~/.agents/skills/` or `~/.claude/skills/`, surface the gap; do not pretend it exists.
+- 2026-08-26 — A test-failure count is not a fact until it is reproduced. The same suite reported 5 → 1 → 0 → 0 failures on byte-identical code; "fix the 5 failing tests" was an unfalsifiable premise. Re-run before diagnosing, and never report a pass/fail summary from output that was clipped by `tail`.
+- 2026-08-26 — `cmd | grep ...` reports **grep's** exit status, not `cmd`'s. `cargo test` failures were masked as exit 0 twice. Capture the real status (`PIPESTATUS`, or read the `test result:` line) before claiming green.
+- 2026-08-26 — Never run the integration suite against the shared `:28000` SurrealDB. UAR and the MCP server hold live connections to it, so tests compete with production traffic for the same RocksDB instance — the actual source of the "flaky server-mode tests." Start a scratch server on its own port/datadir and set `TEST_SURREAL_ENDPOINT`. Isolated: 12/12 green in 4-11s; shared: intermittent failures at 47-277s.
 
 ## Schema / migrations *(carried forward from CLAUDE.md operational rules)*
 

@@ -250,6 +250,43 @@ async fn test_memory_lifecycle() {
 }
 
 #[tokio::test]
+async fn delete_memory_commits_audit_row_and_removal_together() {
+    let s = make_storage().await;
+
+    let stored = s
+        .add_memory(memory("audited content", "u-del"))
+        .await
+        .expect("add_memory");
+    let id_str = stored.id.as_ref().map(record_id_string).expect("id string");
+
+    s.delete_memory(&id_str).await.expect("delete_memory");
+
+    // The row is gone...
+    assert!(
+        s.get_memory(&id_str)
+            .await
+            .expect("get after delete")
+            .is_none(),
+        "memory must be absent immediately after delete_memory returns"
+    );
+
+    // ...and the 'deleted' audit row committed in the same transaction, so the
+    // history can never describe a deletion that did not happen (or vice versa).
+    let history = s
+        .get_memory_history(&id_str)
+        .await
+        .expect("get_memory_history");
+    assert!(
+        history.iter().any(|h| h.change_type == "deleted"),
+        "delete_memory must commit a 'deleted' history row alongside the removal, got: {:?}",
+        history
+            .iter()
+            .map(|h| h.change_type.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
 async fn test_get_all_delete_all() {
     let s = make_storage().await;
     s.add_memory(memory("A", "u2")).await.unwrap();
