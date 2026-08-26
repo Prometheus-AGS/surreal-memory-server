@@ -2,6 +2,8 @@
 
 Rust memory service with a knowledge graph, scoped memories, hybrid search, TaskStreams, Mindmaps, MCP transports, and a durable receipt-driven operation ledger.
 
+**📖 [Documentation](https://prometheus-ags.github.io/surreal-memory-server/)** — architecture, MCP tool reference, configuration, operations, and the reasoning behind the design.
+
 ## Durable operation API
 
 New write integrations use:

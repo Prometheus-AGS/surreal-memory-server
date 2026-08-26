@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" fill="none" role="img" aria-label="Surreal Memory Server">
+  <rect width="1200" height="630" fill="#0B0F14"></rect>
+  <rect x="0" y="0" width="1200" height="6" fill="#FF6A3D"></rect>
+  <g transform="translate(96, 210) scale(1.6)">
+    <path d="M24 34 L48 22 L72 34 L48 46 Z" fill="#FF6A3D"></path>
+    <path d="M24 48 L48 60 L72 48" stroke="#E04E28" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"></path>
+    <path d="M24 64 L48 76 L72 64" stroke="#00C2DC" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"></path>
+  </g>
+  <text x="290" y="300" fill="#E8EDF3" font-family="Space Grotesk, Geist Variable, system-ui, sans-serif" font-size="66" font-weight="700">Surreal Memory Server</text>
+  <text x="290" y="360" fill="#A7B0BC" font-family="Geist Variable, system-ui, sans-serif" font-size="30">Durable agent memory. Typed storage. One MCP boundary.</text>
+  <text x="290" y="424" fill="#87909D" font-family="JetBrains Mono, ui-monospace, monospace" font-size="22">Prometheus AGS</text>
+</svg>
