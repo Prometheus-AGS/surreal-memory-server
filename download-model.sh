@@ -65,19 +65,22 @@ if command -v huggingface-cli &> /dev/null; then
     echo ""
     
     # Download model files
-    huggingface-cli download "$LOCAL_EMBEDDING_MODEL" \
+    # `--local-dir` writes a FLAT directory. The server reads through hf-hub,
+    # which only understands the blob/snapshot cache layout under
+    # "$MODEL_CACHE_DIR/hub", so a flat copy is invisible to it and the model is
+    # re-downloaded at runtime. Use the cache layout instead.
+    HF_HOME="$MODEL_CACHE_DIR" huggingface-cli download "$LOCAL_EMBEDDING_MODEL" \
         config.json \
         tokenizer.json \
         tokenizer_config.json \
-        vocab.txt \
-        --local-dir "$MODEL_CACHE_DIR/$LOCAL_EMBEDDING_MODEL"
+        vocab.txt
     
     # Try to download model weights (safetensors preferred)
     echo ""
     echo "Downloading model weights..."
-    if huggingface-cli download "$LOCAL_EMBEDDING_MODEL" model.safetensors --local-dir "$MODEL_CACHE_DIR/$LOCAL_EMBEDDING_MODEL" 2>/dev/null; then
+    if HF_HOME="$MODEL_CACHE_DIR" huggingface-cli download "$LOCAL_EMBEDDING_MODEL" model.safetensors 2>/dev/null; then
         echo -e "${GREEN}✓ Downloaded model.safetensors${NC}"
-    elif huggingface-cli download "$LOCAL_EMBEDDING_MODEL" pytorch_model.bin --local-dir "$MODEL_CACHE_DIR/$LOCAL_EMBEDDING_MODEL" 2>/dev/null; then
+    elif HF_HOME="$MODEL_CACHE_DIR" huggingface-cli download "$LOCAL_EMBEDDING_MODEL" pytorch_model.bin 2>/dev/null; then
         echo -e "${GREEN}✓ Downloaded pytorch_model.bin${NC}"
     else
         echo -e "${RED}Warning: Could not download model weights. The server will attempt to download them on first use.${NC}"

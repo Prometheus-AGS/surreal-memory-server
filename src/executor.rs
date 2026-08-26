@@ -41,6 +41,11 @@ enum ExecutorCommand {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "message", rename_all = "snake_case")]
 enum ExecutorMessage {
+    /// Sent once, before the first request is read, as soon as the child's
+    /// embedding service is constructed. Until this arrives the child cannot
+    /// emit anything at all, so the parent must not hold it to the per-request
+    /// progress watchdog.
+    Ready,
     Progress {
         request_id: u64,
         phase: String,
@@ -108,10 +113,21 @@ struct OperationBaseline {
 /// Long-lived embedding subprocess supervised by progress messages. The
 /// watchdog only decides whether the child is responsive; operation success is
 /// still determined exclusively by durable ledger and part states.
+/// Default ceiling for a child to signal readiness. Deliberately far larger
+/// than the per-request watchdog: cold start covers process exec, dynamic
+/// linking of a GPU-linked binary, and GPU driver initialization, which has
+/// been measured between 1s and well over 150s on a loaded machine. Override
+/// with `SURREAL_EXECUTOR_STARTUP_MS`.
+const DEFAULT_EXECUTOR_STARTUP_MS: u64 = 300_000;
+
 pub struct SupervisedEmbeddingService {
     executable: PathBuf,
     dimensions: usize,
     watchdog: Duration,
+    /// Budget for the child to reach readiness, kept separate from the
+    /// per-request `watchdog`. Startup is a legitimately slow, output-free
+    /// phase; holding it to the progress watchdog kills healthy children.
+    startup_budget: Duration,
     state: Mutex<Option<ChildState>>,
     next_request_id: AtomicU64,
     next_generation: AtomicU64,
@@ -138,10 +154,18 @@ impl SupervisedEmbeddingService {
         child_env: Vec<(String, String)>,
     ) -> Self {
         let (events_tx, _) = broadcast::channel(1024);
+        let startup_budget = Duration::from_millis(
+            std::env::var("SURREAL_EXECUTOR_STARTUP_MS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .filter(|ms| *ms > 0)
+                .unwrap_or(DEFAULT_EXECUTOR_STARTUP_MS),
+        );
         Self {
             executable,
             dimensions,
             watchdog,
+            startup_budget,
             state: Mutex::new(None),
             next_request_id: AtomicU64::new(1),
             next_generation: AtomicU64::new(1),
@@ -226,11 +250,58 @@ impl SupervisedEmbeddingService {
         })?;
         let stdin = child.stdin.take().context("executor stdin unavailable")?;
         let stdout = child.stdout.take().context("executor stdout unavailable")?;
+        let mut stdout = BufReader::new(stdout);
+
+        // Wait for the child's `Ready` line under its OWN budget before any
+        // request is written.
+        //
+        // The per-request watchdog only works once the child is heartbeating,
+        // and the child cannot heartbeat until it has read a request — which it
+        // cannot do until construction finishes. Arming the 30s progress
+        // watchdog against process startup meant a slow cold start (GPU driver
+        // init, a large binary paging in, a loaded machine) was misread as a
+        // hung child and SIGKILLed. Two such kills per call produced the
+        // ~63s warmup failures with no diagnostic, because the child had not
+        // yet been able to log anything.
+        let mut line = String::new();
+        match tokio::time::timeout(self.startup_budget, stdout.read_line(&mut line)).await {
+            Ok(Ok(0)) => {
+                anyhow::bail!(
+                    "embedding executor generation {generation} exited during startup before signalling readiness"
+                )
+            }
+            Ok(Ok(_)) => {
+                let message: ExecutorMessage = serde_json::from_str(line.trim()).with_context(|| {
+                    format!(
+                        "embedding executor generation {generation} sent an unparsable startup message: {}",
+                        line.trim()
+                    )
+                })?;
+                if !matches!(message, ExecutorMessage::Ready) {
+                    anyhow::bail!(
+                        "embedding executor generation {generation} sent {message:?} before readiness"
+                    );
+                }
+            }
+            Ok(Err(error)) => {
+                return Err(anyhow::Error::from(error).context(format!(
+                    "reading readiness from embedding executor generation {generation}"
+                )));
+            }
+            Err(_) => {
+                anyhow::bail!(
+                    "embedding executor generation {generation} did not signal readiness within {:?}; \
+                     raise SURREAL_EXECUTOR_STARTUP_MS if cold start is legitimately slower",
+                    self.startup_budget
+                )
+            }
+        }
+
         self.emit(None, generation, ExecutorEventKind::Started, None);
         Ok(ChildState {
             child,
             stdin,
-            stdout: BufReader::new(stdout),
+            stdout,
             generation,
         })
     }
@@ -471,7 +542,11 @@ impl SupervisedEmbeddingService {
         let mut child = match state.take() {
             Some(child) => child,
             None => {
-                *state = Some(self.spawn_child().await.map_err(RequestFailure::retriable)?);
+                *state = Some(
+                    self.spawn_child()
+                        .await
+                        .map_err(RequestFailure::retriable)?,
+                );
                 return Ok(());
             }
         };
@@ -690,6 +765,13 @@ pub async fn run_embedding_executor() -> Result<()> {
     let mut lines = BufReader::new(stdin).lines();
     let stdout = tokio::io::stdout();
     let mut writer = BufWriter::new(stdout);
+
+    // Announce readiness before touching stdin. Everything above this line —
+    // process exec, dynamic linking of a large GPU-linked binary, config
+    // parsing, service construction — happens while the child is structurally
+    // incapable of producing output. The parent times that phase separately.
+    write_message(&mut writer, &ExecutorMessage::Ready).await?;
+
     while let Some(line) = lines.next_line().await? {
         let request: ExecutorRequest = serde_json::from_str(&line)?;
         write_message(

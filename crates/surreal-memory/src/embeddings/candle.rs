@@ -215,25 +215,52 @@ impl CandleEmbeddings {
         Ok(Device::Cpu)
     }
 
+    /// Resolve the directory hf-hub should treat as its cache root.
+    ///
+    /// `MODEL_CACHE_DIR` names the HuggingFace *home*; hf-hub stores repos in a
+    /// `hub` subdirectory beneath it. Appending here keeps `MODEL_CACHE_DIR`
+    /// meaning the same thing it means to every other HF tool, and keeps the
+    /// Docker bind mount (`.../huggingface/hub`) valid.
+    ///
+    /// Idempotent: a path that already ends in `hub` is returned unchanged, so
+    /// operators who point the variable straight at the hub directory (as the
+    /// interim production fix did) are not sent to `.../hub/hub`.
+    fn hub_cache_dir(cache_dir: &str) -> PathBuf {
+        const HF_HUB_SUBDIR: &str = "hub";
+        let path = PathBuf::from(cache_dir);
+        if path.file_name().and_then(|name| name.to_str()) == Some(HF_HUB_SUBDIR) {
+            path
+        } else {
+            path.join(HF_HUB_SUBDIR)
+        }
+    }
+
     async fn download_model(
         model_id: &str,
         cache_dir: &str,
     ) -> Result<(PathBuf, PathBuf, PathBuf)> {
+        // hf-hub keeps repositories under `<hf-home>/hub`: both
+        // `Cache::default()` (hf-hub-0.5.0 src/lib.rs:203-207) and
+        // `Cache::from_env()` (src/lib.rs:42-49) append this component. But
+        // `with_cache_dir` stores the path verbatim (`Cache::new`,
+        // src/lib.rs:36-38), so the caller must append it. Passing
+        // `MODEL_CACHE_DIR` unmodified pointed hf-hub one level *above* its own
+        // data, orphaning an already-populated cache and re-downloading every
+        // weight. It also broke credential lookup, since `token_path`
+        // (src/lib.rs:59-64) derives the token file by popping this component.
+        let hub_dir = Self::hub_cache_dir(cache_dir);
+
         tracing::info!(
-            "Downloading model from Hugging Face: {} (cache: {})",
+            "Resolving model from Hugging Face: {} (cache: {})",
             model_id,
-            cache_dir
+            hub_dir.display()
         );
 
-        std::fs::create_dir_all(cache_dir)
-            .with_context(|| format!("create model cache directory {cache_dir}"))?;
+        std::fs::create_dir_all(&hub_dir)
+            .with_context(|| format!("create model cache directory {}", hub_dir.display()))?;
 
-        // `Api::new()` ignores `cache_dir` entirely and falls back to
-        // $HF_HOME/~/.cache/huggingface. That made the configured cache
-        // directory dead config: on any host whose default cache is not
-        // persisted, every executor restart re-downloaded the weights.
         let api = ApiBuilder::new()
-            .with_cache_dir(PathBuf::from(cache_dir))
+            .with_cache_dir(hub_dir)
             .build()
             .context("build Hugging Face API client")?;
         let repo = api.repo(Repo::new(model_id.to_string(), RepoType::Model));
@@ -703,5 +730,35 @@ mod tests {
                 .map(|encoded| encoded.len() <= maximum)
                 .unwrap_or(false)
         }));
+    }
+
+    #[test]
+    fn hub_cache_dir_appends_the_hf_hub_subdirectory() {
+        // MODEL_CACHE_DIR names the HF home; hf-hub stores repos under <home>/hub.
+        // Passing the home verbatim orphaned a populated cache in production and
+        // triggered a full re-download of the weights.
+        assert_eq!(
+            CandleEmbeddings::hub_cache_dir("/Users/someone/.cache/huggingface"),
+            std::path::PathBuf::from("/Users/someone/.cache/huggingface/hub")
+        );
+    }
+
+    #[test]
+    fn hub_cache_dir_is_idempotent_when_already_pointed_at_hub() {
+        // Operators (and the interim production hotfix) may point the variable
+        // straight at the hub directory. That must not resolve to `.../hub/hub`.
+        assert_eq!(
+            CandleEmbeddings::hub_cache_dir("/Users/someone/.cache/huggingface/hub"),
+            std::path::PathBuf::from("/Users/someone/.cache/huggingface/hub")
+        );
+    }
+
+    #[test]
+    fn hub_cache_dir_handles_a_relative_configured_path() {
+        // `.env.example` ships MODEL_CACHE_DIR=./models.
+        assert_eq!(
+            CandleEmbeddings::hub_cache_dir("./models"),
+            std::path::PathBuf::from("./models/hub")
+        );
     }
 }
