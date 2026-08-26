@@ -1,79 +1,90 @@
 {
+  "schemaVersion": "2",
+  "generatedBy": "kbd-runtime",
+  "sourceRevision": 21,
+  "derivedRevision": 21,
+  "frontier": {
+    "fa91ef8b-263d-4bc4-8d16-13f71ac4a62b": 21
+  },
+  "conflictCount": 0,
   "phase": "uar-consumer-resync",
-  "assessment_complete": true,
-  "plan_complete": true,
-  "execution_complete": false,
-  "reflection_complete": false,
-  "assessment_path": ".kbd-orchestrator/phases/uar-consumer-resync/assessment.md",
-  "plan_path": ".kbd-orchestrator/phases/uar-consumer-resync/plan.md",
-  "change_backend": "openspec",
+  "phaseId": "uar-consumer-resync",
+  "parentPhase": null,
+  "last_updated": "2026-08-26T06:17:21.138079Z",
+  "last_updated_by": "kbd-runtime",
   "changes_total": 4,
   "changes_completed": 2,
-  "changes": {
-    "commit-and-push-library": "ARCHIVED",
-    "resync-uar-consumer": "ARCHIVED",
-    "resync-librefang-consumer": "PLANNED",
-    "reconcile-library-pin-policy": "PLANNED"
-  },
-  "resync_target_sha": "9051c3d37bfa0bb081b7203b5cb84ae69674cfda",
-  "change_results": {
-    "commit-and-push-library": {
-      "status": "ARCHIVED",
-      "closes": ["F-1"],
-      "commits": [
-        "f065902 — TaskStream reliability + write-path reliability (two phases + contract_alignment_test fix + openspec specs/changes)",
-        "9051c3d — KBD orchestrator artifacts"
-      ],
-      "pushed": "edca63d..9051c3d on main",
-      "library_health": "cargo check --tests green; clippy --all-targets -D warnings clean; fmt clean; 110 tests pass",
-      "code_fix": "AddMindmapNodeParams.metadata aligned to Option<serde_json::Value> (matches canonical MindMapNode.metadata + REST contract); fixes pre-existing contract_alignment_test compile error; 8 trivial clippy -D warnings fixes in test files",
-      "qa_gate": "rust-reviewer — APPROVED first pass (1 LOW, non-blocking)"
+  "implementation_total": 4,
+  "implementation_completed": 2,
+  "completion": {
+    "primaryCounter": "implementation",
+    "implementation": {
+      "completed": 2,
+      "total": 4,
+      "status": "IN_PROGRESS"
     },
-    "resync-uar-consumer": {
-      "status": "ARCHIVED",
-      "closes": ["F-2", "F-4 (UAR)", "F-5 (UAR)"],
-      "repo_commit": "universal-agent-runtime b52b804",
-      "cargo_update": "surreal-memory 01e917ac -> 9051c3d3",
-      "code_fix": "8 stale TaskStream call sites resynced to the scoped (user_id/agent_id) API. DEVIATION: build surfaced 4 MORE sites than the assessment's 4 — MemoryService facade in service.rs also had stale arity (the plan anticipated this risk). Added scope fields to 3 mcp_server.rs param structs.",
-      "build": "UAR cargo build clean; 207 tests pass",
-      "qa_gate": "rust-reviewer — APPROVED first pass; 1 MEDIUM finding concerns pre-existing UAR code (MemoryService::new SurrealMode::Server+surrealkv) NOT touched by this change",
-      "migration_check": "F-5 verified at library level (migration tests apply v14-v19 against seeded task_stream rows incl. v18 backfill); NOT re-verified by booting UAR — UAR app-boot blocked by a pre-existing config defect"
+    "evidence": {
+      "status": "PENDING",
+      "summary": null,
+      "blockers": []
+    },
+    "certification": {
+      "status": "PENDING",
+      "summary": null,
+      "blockers": []
+    },
+    "publication": {
+      "status": "PENDING",
+      "summary": null,
+      "blockers": []
     }
   },
-  "deferred_followups": [
-    "UAR: 4 pre-existing config_integration test failures (config-file loading; fail on clean UAR main; unrelated to the resync) — needs a UAR-side fix.",
-    "UAR: MemoryService::new routes the embedded path through SurrealMode::Server + surrealkv:// (rust-reviewer MEDIUM) — pre-existing; deserves a runtime smoke test of the embedded memory path.",
-    "F-5 migration safety against a populated UAR production DB was not independently re-verified (blocked by the config defect above) — verify once UAR app-boot is fixed."
+  "changes": [
+    {
+      "id": "commit-and-push-library",
+      "title": "commit-and-push-library",
+      "status": "DONE",
+      "implementation_status": "COMPLETE",
+      "tasks_total": 0,
+      "tasks_done": 0,
+      "last_task_completed": null,
+      "next_task_pending": null,
+      "blockers": []
+    },
+    {
+      "id": "resync-uar-consumer",
+      "title": "resync-uar-consumer",
+      "status": "DONE",
+      "implementation_status": "COMPLETE",
+      "tasks_total": 0,
+      "tasks_done": 0,
+      "last_task_completed": null,
+      "next_task_pending": null,
+      "blockers": []
+    },
+    {
+      "id": "resync-librefang-consumer",
+      "title": "resync-librefang-consumer",
+      "status": "PENDING",
+      "implementation_status": "PENDING",
+      "tasks_total": 0,
+      "tasks_done": 0,
+      "last_task_completed": null,
+      "next_task_pending": null,
+      "blockers": []
+    },
+    {
+      "id": "reconcile-library-pin-policy",
+      "title": "reconcile-library-pin-policy",
+      "status": "PENDING",
+      "implementation_status": "PENDING",
+      "tasks_total": 0,
+      "tasks_done": 0,
+      "last_task_completed": null,
+      "next_task_pending": null,
+      "blockers": []
+    }
   ],
-  "change_order": [
-    "commit-and-push-library",
-    "resync-uar-consumer",
-    "resync-librefang-consumer",
-    "reconcile-library-pin-policy"
-  ],
-  "change_dependencies": {
-    "resync-uar-consumer": ["commit-and-push-library"],
-    "resync-librefang-consumer": ["commit-and-push-library"],
-    "reconcile-library-pin-policy": ["resync-uar-consumer", "resync-librefang-consumer"]
-  },
-  "headline_verdict": "Medium gap, BLOCKED on an external prerequisite. 1 BLOCKER, 1 HIGH, 3 MEDIUM, 1 LOW.",
-  "finding_counts": { "blocker": 1, "high": 1, "medium": 3, "low": 1 },
-  "consumers": [
-    "universal-agent-runtime (/Users/gqadonis/Projects/prometheus/universal-agent-runtime)",
-    "librefang (/Users/gqadonis/Projects/references/librefang)"
-  ],
-  "blocking_prerequisite": "F-1: both completed library phases (task-stream-reliability + write-path-reliability, ~31 uncommitted files incl. task_step.rs) must be committed and pushed to surreal-memory-server main before any cargo update can resolve the resync target.",
-  "key_findings": [
-    "F-1 BLOCKER: all library work uncommitted; consumers pin branch=main; cargo update cannot see a working tree.",
-    "F-2 HIGH: UAR src/uar/memory/mcp_server.rs has 4 stale TaskStream call sites (get_task_stream, add_to_task_stream, get_context_for_task, archive_task_stream) missing user_id/agent_id scope args.",
-    "F-3 MEDIUM: librefang wraps SurrealStorage, never calls TaskStream surface — low-risk cargo update + build check.",
-    "F-4 MEDIUM: both Cargo.lock files stale (UAR 01e917ac, librefang edca63d) — refresh + commit.",
-    "F-5 MEDIUM: library migrations v17-v19 run against consumers' existing embedded DBs on first start after resync — v18 backfills task_stream rows; verify safe.",
-    "F-6 LOW: branch=main pin is a supply-chain hazard; CLAUDE.md rule #7 says rev pin — reconcile."
-  ],
-  "verified_not_broken": "Neither consumer implements MemoryStorage (both wrap SurrealStorage) so the 5 new no-default trait methods do not break compiles. Both use RetryConfig::default()/SurrealConfig{..Default::default()} so the new operation_deadline_ms field does not break them. SurrealStorage::new signature unchanged. SurrealDB =3.0.5 aligned across all 3 repos.",
-  "created": "2026-05-19",
-  "last_updated": "2026-05-19",
-  "last_tool": "claude-code/kbd-execute",
-  "next_step": "kbd-execute resync-librefang-consumer"
+  "children": {},
+  "migrationStatus": null
 }

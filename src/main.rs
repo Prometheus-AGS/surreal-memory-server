@@ -82,6 +82,7 @@ async fn main() -> Result<()> {
     }
 
     init_logging();
+    install_panic_hook();
 
     match command {
         Command::Serve => {}
@@ -120,16 +121,17 @@ async fn main() -> Result<()> {
     // Graceful shutdown channel — send `true` to stop all workers.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    // Spawn Ctrl+C handler that broadcasts the shutdown signal.
+    // Spawn the signal handler that broadcasts the shutdown signal.
+    //
+    // SIGTERM matters as much as SIGINT here: launchd, systemd, Docker and
+    // Kubernetes all stop a service with SIGTERM. Handling only Ctrl+C meant
+    // every managed stop killed the process with no log line at all, which is
+    // why a terminated server left no diagnostic behind.
     let shutdown_tx2 = shutdown_tx.clone();
     tokio::spawn(async move {
-        match tokio::signal::ctrl_c().await {
-            Ok(()) => {
-                tracing::info!("🛑 Received shutdown signal");
-                let _ = shutdown_tx2.send(true);
-            }
-            Err(e) => tracing::error!("Failed to listen for shutdown signal: {}", e),
-        }
+        let reason = wait_for_shutdown_signal().await;
+        tracing::info!(signal = reason, "🛑 Received shutdown signal");
+        let _ = shutdown_tx2.send(true);
     });
 
     // ── Background TTL worker ─────────────────────────────────────────────────
@@ -158,36 +160,116 @@ async fn main() -> Result<()> {
         }
     });
 
-    tokio::select! {
+    // Whichever task ends first ends the process. Record whether it ended
+    // cleanly so the final line reports what actually happened.
+    let clean_exit = tokio::select! {
         result = api_handle => {
             match result {
-                Ok(Ok(())) => tracing::info!("REST API server stopped"),
-                Ok(Err(e)) => tracing::error!("REST API server error: {}", e),
-                Err(e) => tracing::error!("REST API task panic: {}", e),
+                Ok(Ok(())) => { tracing::info!("REST API server stopped"); true }
+                Ok(Err(e)) => { tracing::error!("REST API server error: {}", e); false }
+                Err(e) => { tracing::error!("REST API task panic: {}", e); false }
             }
         }
         result = mcp_handle => {
             if enable_stdio_mcp {
                 match result {
-                    Ok(Ok(())) => tracing::info!("MCP server stopped"),
-                    Ok(Err(e)) => tracing::error!("MCP server error: {}", e),
-                    Err(e) => tracing::error!("MCP task panic: {}", e),
+                    Ok(Ok(())) => { tracing::info!("MCP server stopped"); true }
+                    Ok(Err(e)) => { tracing::error!("MCP server error: {}", e); false }
+                    Err(e) => { tracing::error!("MCP task panic: {}", e); false }
                 }
+            } else {
+                true
             }
         }
         result = ttl_handle => {
             match result {
-                Ok(Ok(())) => tracing::info!("TTL worker stopped"),
-                Ok(Err(e)) => tracing::error!("TTL worker error: {}", e),
-                Err(e) => tracing::error!("TTL worker panic: {}", e),
+                Ok(Ok(())) => { tracing::info!("TTL worker stopped"); true }
+                Ok(Err(e)) => { tracing::error!("TTL worker error: {}", e); false }
+                Err(e) => { tracing::error!("TTL worker panic: {}", e); false }
+            }
+        }
+    };
+
+    // Broadcast shutdown to any remaining tasks.
+    let _ = shutdown_tx.send(true);
+    if clean_exit {
+        tracing::info!("👋 Server shut down gracefully");
+        Ok(())
+    } else {
+        // Previously this logged "shut down gracefully" even after a task
+        // error or panic, and returned Ok — so a crash was indistinguishable
+        // from a clean stop in both the log and the exit code.
+        tracing::error!("💥 Server exiting after a task failure");
+        anyhow::bail!("server exited because a supervised task failed")
+    }
+}
+
+/// Route panics through `tracing` before the default handler runs.
+///
+/// A panic inside a detached `tokio::spawn` — an SSE session task, the executor
+/// supervisor — is otherwise swallowed: the task dies, the message goes to
+/// stderr unstructured or not at all, and the surviving process leaves no
+/// record of what failed. This makes every panic a structured ERROR carrying
+/// the payload, location, and thread name.
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic payload>".to_owned());
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown location>".to_owned());
+        let thread = std::thread::current();
+        tracing::error!(
+            panic.payload = %payload,
+            panic.location = %location,
+            panic.thread = thread.name().unwrap_or("<unnamed>"),
+            "thread panicked"
+        );
+        previous(info);
+    }));
+}
+
+/// Resolve when the process is asked to stop, reporting which signal arrived.
+///
+/// SIGTERM is the signal every supervisor actually sends (launchd, systemd,
+/// Docker, Kubernetes); SIGINT only arrives from an interactive Ctrl+C.
+async fn wait_for_shutdown_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(stream) => stream,
+            Err(error) => {
+                tracing::error!(%error, "failed to install SIGTERM handler");
+                let _ = tokio::signal::ctrl_c().await;
+                return "SIGINT";
+            }
+        };
+        tokio::select! {
+            _ = sigterm.recv() => "SIGTERM",
+            result = tokio::signal::ctrl_c() => {
+                if let Err(error) = result {
+                    tracing::error!(%error, "failed to listen for SIGINT");
+                }
+                "SIGINT"
             }
         }
     }
 
-    // Broadcast shutdown to any remaining tasks.
-    let _ = shutdown_tx.send(true);
-    tracing::info!("👋 Server shut down gracefully");
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(%error, "failed to listen for shutdown signal");
+        }
+        "SIGINT"
+    }
 }
 
 fn init_logging() {

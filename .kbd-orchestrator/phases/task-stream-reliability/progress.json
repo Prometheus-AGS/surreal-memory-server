@@ -1,51 +1,79 @@
 {
+  "schemaVersion": "2",
+  "generatedBy": "kbd-runtime",
+  "sourceRevision": 21,
+  "derivedRevision": 21,
+  "frontier": {
+    "fa91ef8b-263d-4bc4-8d16-13f71ac4a62b": 21
+  },
+  "conflictCount": 0,
   "phase": "task-stream-reliability",
-  "assessment_complete": true,
-  "plan_complete": true,
-  "execution_complete": true,
-  "reflection_complete": true,
-  "reflection_path": ".kbd-orchestrator/phases/task-stream-reliability/reflection.md",
-  "assessment_path": ".kbd-orchestrator/phases/task-stream-reliability/assessment.md",
-  "plan_path": ".kbd-orchestrator/phases/task-stream-reliability/plan.md",
-  "execution_path": ".kbd-orchestrator/phases/task-stream-reliability/execution.md",
-  "change_backend": "openspec",
+  "phaseId": "task-stream-reliability",
+  "parentPhase": null,
+  "last_updated": "2026-08-26T06:17:21.138079Z",
+  "last_updated_by": "kbd-runtime",
   "changes_total": 3,
   "changes_completed": 3,
-  "changes": {
-    "fix-taskstream-scope-bugs": "ARCHIVED",
-    "harden-taskstream-correctness": "ARCHIVED",
-    "add-taskstream-steps": "ARCHIVED"
-  },
-  "change_results": {
-    "fix-taskstream-scope-bugs": {
-      "status": "ARCHIVED",
-      "archive": "openspec/changes/archive/2026-05-17-fix-taskstream-scope-bugs",
-      "tests": "integration_test — 24 passed",
-      "qa_gate": "rust-reviewer — APPROVED; MEDIUM fixed, LOW deferred"
+  "implementation_total": 3,
+  "implementation_completed": 3,
+  "completion": {
+    "primaryCounter": "implementation",
+    "implementation": {
+      "completed": 3,
+      "total": 3,
+      "status": "COMPLETE"
     },
-    "harden-taskstream-correctness": {
-      "status": "ARCHIVED",
-      "archive": "openspec/changes/archive/2026-05-17-harden-taskstream-correctness",
-      "tests": "integration_test — 27 passed; migrations lib — 9 passed",
-      "qa_gate": "rust-reviewer — first pass BLOCK (1 CRITICAL, 1 HIGH, 1 MEDIUM); refined; re-review PASS"
+    "evidence": {
+      "status": "PENDING",
+      "summary": null,
+      "blockers": []
     },
-    "add-taskstream-steps": {
-      "status": "ARCHIVED",
-      "archive": "openspec/changes/archive/2026-05-17-add-taskstream-steps",
-      "build": "cargo check --workspace --features embedded,metal — clean; cargo fmt --check — clean",
-      "tests": "integration_test — 35 passed; surreal-memory lib — 33 passed",
-      "qa_gate": "rust-reviewer — first pass BLOCK (2 HIGH, 2 MEDIUM); refined; re-review PASS",
-      "canonical_spec": "openspec/specs/task-stream/spec.md (10 requirements, valid)"
+    "certification": {
+      "status": "PENDING",
+      "summary": null,
+      "blockers": []
+    },
+    "publication": {
+      "status": "PENDING",
+      "summary": null,
+      "blockers": []
     }
   },
-  "deferred_followups": [
-    "REST layer src/api/taskstreams.rs passes None scope — needs auth-header/JWT scope extraction; pre-existing, not a regression.",
-    "Pre-existing compile error tests/contract_alignment_test.rs:300 (Option<HashMap> vs Option<Value>) — exists on clean main, unrelated to TaskStream; breaks `cargo check --tests`. Recommend a separate change.",
-    "UAR consumer: MemoryStorage trait signatures changed (breaking) + 5 new TaskStep methods added. UAR MemoryService wrapper and Cargo.toml git rev must be re-pinned per CLAUDE.md rule #7.",
-    "TaskStep MCP/REST: TaskStep tools added to MCP; no REST endpoints for TaskStep were added (out of scope for this phase)."
+  "changes": [
+    {
+      "id": "fix-taskstream-scope-bugs",
+      "title": "fix-taskstream-scope-bugs",
+      "status": "DONE",
+      "implementation_status": "COMPLETE",
+      "tasks_total": 0,
+      "tasks_done": 0,
+      "last_task_completed": null,
+      "next_task_pending": null,
+      "blockers": []
+    },
+    {
+      "id": "harden-taskstream-correctness",
+      "title": "harden-taskstream-correctness",
+      "status": "DONE",
+      "implementation_status": "COMPLETE",
+      "tasks_total": 0,
+      "tasks_done": 0,
+      "last_task_completed": null,
+      "next_task_pending": null,
+      "blockers": []
+    },
+    {
+      "id": "add-taskstream-steps",
+      "title": "add-taskstream-steps",
+      "status": "DONE",
+      "implementation_status": "COMPLETE",
+      "tasks_total": 0,
+      "tasks_done": 0,
+      "last_task_completed": null,
+      "next_task_pending": null,
+      "blockers": []
+    }
   ],
-  "headline_verdict": "Large gap closed across 3 changes. 2 CRITICAL + 3 HIGH + 2 MEDIUM assessment findings all addressed.",
-  "last_updated": "2026-05-17",
-  "last_tool": "claude-code/kbd-execute",
-  "next_step": "kbd-reflect"
+  "children": {},
+  "migrationStatus": null
 }

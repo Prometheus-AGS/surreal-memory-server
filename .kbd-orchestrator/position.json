@@ -1,0 +1,231 @@
+{
+  "schemaVersion": "1",
+  "generatedBy": "kbd-runtime",
+  "sourceRevision": 21,
+  "derivedRevision": 21,
+  "frontier": {
+    "fa91ef8b-263d-4bc4-8d16-13f71ac4a62b": 21
+  },
+  "conflictCount": 0,
+  "updatedAt": "2026-08-26T06:17:21.138079Z",
+  "cursor": [
+    "surrealdb-connection-architecture"
+  ],
+  "root": {
+    "type": "phase",
+    "id": "7831e934-53c6-4541-828b-504a430f7d9f",
+    "status": "ready",
+    "progress": {
+      "done": 13,
+      "total": 17
+    },
+    "children": [
+      {
+        "type": "phase",
+        "id": "surrealdb-connection-architecture",
+        "canonicalId": "surrealdb-connection-architecture",
+        "status": "PENDING",
+        "progress": {
+          "done": 5,
+          "total": 7
+        },
+        "children": [
+          {
+            "type": "change",
+            "id": "change-1",
+            "status": "PENDING",
+            "progress": {
+              "done": 0,
+              "total": 0
+            }
+          },
+          {
+            "type": "change",
+            "id": "change-2",
+            "status": "COMPLETE",
+            "progress": {
+              "done": 0,
+              "total": 0
+            }
+          },
+          {
+            "type": "change",
+            "id": "change-3",
+            "status": "COMPLETE",
+            "progress": {
+              "done": 0,
+              "total": 0
+            }
+          },
+          {
+            "type": "change",
+            "id": "change-4",
+            "status": "COMPLETE",
+            "progress": {
+              "done": 0,
+              "total": 0
+            }
+          },
+          {
+            "type": "change",
+            "id": "change-5",
+            "status": "PENDING",
+            "progress": {
+              "done": 0,
+              "total": 0
+            }
+          },
+          {
+            "type": "change",
+            "id": "change-6",
+            "status": "COMPLETE",
+            "progress": {
+              "done": 0,
+              "total": 0
+            }
+          },
+          {
+            "type": "change",
+            "id": "change-7",
+            "status": "COMPLETE",
+            "progress": {
+              "done": 0,
+              "total": 0
+            }
+          }
+        ],
+        "annotations": []
+      },
+      {
+        "type": "phase",
+        "id": "task-stream-reliability",
+        "canonicalId": "task-stream-reliability",
+        "status": "COMPLETE",
+        "progress": {
+          "done": 3,
+          "total": 3
+        },
+        "children": [
+          {
+            "type": "change",
+            "id": "fix-taskstream-scope-bugs",
+            "status": "COMPLETE",
+            "progress": {
+              "done": 0,
+              "total": 0
+            }
+          },
+          {
+            "type": "change",
+            "id": "harden-taskstream-correctness",
+            "status": "COMPLETE",
+            "progress": {
+              "done": 0,
+              "total": 0
+            }
+          },
+          {
+            "type": "change",
+            "id": "add-taskstream-steps",
+            "status": "COMPLETE",
+            "progress": {
+              "done": 0,
+              "total": 0
+            }
+          }
+        ],
+        "annotations": []
+      },
+      {
+        "type": "phase",
+        "id": "uar-consumer-resync",
+        "canonicalId": "uar-consumer-resync",
+        "status": "PENDING",
+        "progress": {
+          "done": 2,
+          "total": 4
+        },
+        "children": [
+          {
+            "type": "change",
+            "id": "commit-and-push-library",
+            "status": "COMPLETE",
+            "progress": {
+              "done": 0,
+              "total": 0
+            }
+          },
+          {
+            "type": "change",
+            "id": "resync-uar-consumer",
+            "status": "COMPLETE",
+            "progress": {
+              "done": 0,
+              "total": 0
+            }
+          },
+          {
+            "type": "change",
+            "id": "resync-librefang-consumer",
+            "status": "PENDING",
+            "progress": {
+              "done": 0,
+              "total": 0
+            }
+          },
+          {
+            "type": "change",
+            "id": "reconcile-library-pin-policy",
+            "status": "PENDING",
+            "progress": {
+              "done": 0,
+              "total": 0
+            }
+          }
+        ],
+        "annotations": []
+      },
+      {
+        "type": "phase",
+        "id": "write-path-reliability",
+        "canonicalId": "write-path-reliability",
+        "status": "COMPLETE",
+        "progress": {
+          "done": 3,
+          "total": 3
+        },
+        "children": [
+          {
+            "type": "change",
+            "id": "bound-embedding-model-loading",
+            "status": "COMPLETE",
+            "progress": {
+              "done": 0,
+              "total": 0
+            }
+          },
+          {
+            "type": "change",
+            "id": "eliminate-write-path-stalls",
+            "status": "COMPLETE",
+            "progress": {
+              "done": 0,
+              "total": 0
+            }
+          },
+          {
+            "type": "change",
+            "id": "add-mcp-progress-reporting",
+            "status": "COMPLETE",
+            "progress": {
+              "done": 0,
+              "total": 0
+            }
+          }
+        ],
+        "annotations": []
+      }
+    ],
+    "annotations": []
+  }
+}

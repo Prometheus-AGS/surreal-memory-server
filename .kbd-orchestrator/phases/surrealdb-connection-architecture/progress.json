@@ -1,88 +1,123 @@
 {
+  "schemaVersion": "2",
+  "generatedBy": "kbd-runtime",
+  "sourceRevision": 21,
+  "derivedRevision": 21,
+  "frontier": {
+    "fa91ef8b-263d-4bc4-8d16-13f71ac4a62b": 21
+  },
+  "conflictCount": 0,
   "phase": "surrealdb-connection-architecture",
-  "assessment_complete": true,
-  "assessment_date": "2026-05-24",
-  "plan_complete": true,
-  "plan_date": "2026-05-24",
-  "execute_dispatched": true,
-  "execute_dispatched_date": "2026-05-24",
-  "change_backend": "openspec",
-  "active_change": "load-repro-harness",
+  "phaseId": "surrealdb-connection-architecture",
+  "parentPhase": null,
+  "last_updated": "2026-08-26T06:17:21.138079Z",
+  "last_updated_by": "kbd-runtime",
   "changes_total": 7,
-  "changes_completed": 1,
+  "changes_completed": 5,
+  "implementation_total": 7,
+  "implementation_completed": 5,
+  "completion": {
+    "primaryCounter": "implementation",
+    "implementation": {
+      "completed": 5,
+      "total": 7,
+      "status": "IN_PROGRESS"
+    },
+    "evidence": {
+      "status": "PENDING",
+      "summary": null,
+      "blockers": []
+    },
+    "certification": {
+      "status": "PENDING",
+      "summary": null,
+      "blockers": []
+    },
+    "publication": {
+      "status": "PENDING",
+      "summary": null,
+      "blockers": []
+    }
+  },
   "changes": [
-    {"id": "change-1", "name": "load-repro-harness", "status": "code-landed-awaiting-baseline-run", "completed_code": "2026-05-24",
-     "deliverables": [
-       "crates/surreal-memory/tests/load_repro.rs",
-       "crates/surreal-memory/tests/load_repro_baseline.md"
-     ],
-     "verification": "cargo check passes; harness gated #[ignore] for user to run later",
-     "next_action_owner": "user",
-     "next_action": "run `docker-compose up -d surrealdb && cargo test --test load_repro --features embedded,metal --release -- --ignored` when ready; paste baseline back to quantify the refactor"
+    {
+      "id": "change-1",
+      "title": "change-1",
+      "status": "PENDING",
+      "implementation_status": "PENDING",
+      "tasks_total": 0,
+      "tasks_done": 0,
+      "last_task_completed": null,
+      "next_task_pending": null,
+      "blockers": []
     },
-    {"id": "change-2", "name": "arcswap-connection-cell", "status": "complete", "completed": "2026-05-24",
-     "deliverables": [
-       "Arc<ArcSwap<ConnectionCell>> replaces Arc<std::sync::RwLock<ConnectionState>>",
-       "live_db() helper centralizes the (lock-free) hot-path accessor",
-       "47 inline lock blocks reduced to single helper call",
-       "ReconnectGuard rewritten on top of atomic store",
-       "palace/context.rs updated to use the new cell type"
-     ],
-     "verification": "cargo check workspace+tests clean; cargo clippy -- -D clippy::await_holding_lock passes; 41/41 lib unit tests pass"
+    {
+      "id": "change-2",
+      "title": "change-2",
+      "status": "DONE",
+      "implementation_status": "COMPLETE",
+      "tasks_total": 0,
+      "tasks_done": 0,
+      "last_task_completed": null,
+      "next_task_pending": null,
+      "blockers": []
     },
-    {"id": "change-3", "name": "config-query-timeout", "status": "complete", "completed": "2026-05-24",
-     "deliverables": [
-       "RetryConfig.query_timeout_ms (default 10_000)",
-       "SURREAL_QUERY_TIMEOUT_MS env var wired through main.rs",
-       "surrealdb::opt::Config::query_timeout passed at every connect() site"
-     ]
+    {
+      "id": "change-3",
+      "title": "change-3",
+      "status": "DONE",
+      "implementation_status": "COMPLETE",
+      "tasks_total": 0,
+      "tasks_done": 0,
+      "last_task_completed": null,
+      "next_task_pending": null,
+      "blockers": []
     },
-    {"id": "change-4", "name": "typed-error-retry", "status": "complete", "completed": "2026-05-24",
-     "deliverables": [
-       "RetryAction { Retry, Reconnect, FailFast } enum (internal)",
-       "classify_surreal_error free function (unit-testable)",
-       "SurrealStorage::classify_error replaces is_retriable_error",
-       "retry_operation_inner only reconnects on RetryAction::Reconnect",
-       "3 new unit tests cover transport vs server-busy vs schema errors"
-     ],
-     "trait_surface_impact": "MemoryStorage trait unchanged (anyhow::Result throughout); decision per user — keep internal"
+    {
+      "id": "change-4",
+      "title": "change-4",
+      "status": "DONE",
+      "implementation_status": "COMPLETE",
+      "tasks_total": 0,
+      "tasks_done": 0,
+      "last_task_completed": null,
+      "next_task_pending": null,
+      "blockers": []
     },
-    {"id": "change-5", "name": "workload-isolated-sessions", "status": "pending-decision",
-     "gate": "user deferred — revisit after load-harness numbers arrive"},
-    {"id": "change-6", "name": "embedded-mode-semaphore", "status": "complete", "completed": "2026-05-24",
-     "deliverables": [
-       "embedded_semaphore: Option<Arc<tokio::sync::Semaphore>> on SurrealStorage",
-       "SURREAL_EMBEDDED_MAX_INFLIGHT env var (default 16 = RocksDB stripe count)",
-       "retry_operation acquires permit for the full retry × reconnect cycle",
-       "server mode unaffected (None semaphore)"
-     ],
-     "rescope_note": "Production-target framing preserved across CLAUDE.md / AGENTS.md / docs/lessons.md; benchmark portion still pending — paired with the load harness run"
+    {
+      "id": "change-5",
+      "title": "change-5",
+      "status": "PENDING",
+      "implementation_status": "PENDING",
+      "tasks_total": 0,
+      "tasks_done": 0,
+      "last_task_completed": null,
+      "next_task_pending": null,
+      "blockers": []
     },
-    {"id": "change-7", "name": "docs-skill-references-and-discipline", "status": "complete", "completed": "2026-05-24"}
+    {
+      "id": "change-6",
+      "title": "change-6",
+      "status": "DONE",
+      "implementation_status": "COMPLETE",
+      "tasks_total": 0,
+      "tasks_done": 0,
+      "last_task_completed": null,
+      "next_task_pending": null,
+      "blockers": []
+    },
+    {
+      "id": "change-7",
+      "title": "change-7",
+      "status": "DONE",
+      "implementation_status": "COMPLETE",
+      "tasks_total": 0,
+      "tasks_done": 0,
+      "last_task_completed": null,
+      "next_task_pending": null,
+      "blockers": []
+    }
   ],
-  "verification_summary": {
-    "cargo_check_workspace_tests": "PASS",
-    "cargo_clippy_await_holding_lock": "PASS",
-    "lib_unit_tests": "41/41 PASS",
-    "integration_tests_server_mode": "NOT RUN — require docker-compose; user-driven",
-    "load_harness_baseline": "NOT RUN — user-driven"
-  },
-  "user_decisions": {
-    "harness_server_target": "local-docker-compose",
-    "deployment_shape": "decide-later",
-    "embedded_mode_status": "production-target",
-    "trait_surface_change": "decide-after-design-sketch"
-  },
-  "skills_referenced": [
-    "karpathy-guidelines",
-    "surrealql", "surrealdb-vector", "surrealdb-expert", "surrealdb-python",
-    "rust-skills:m01-ownership", "rust-skills:m06-error-handling",
-    "rust-skills:m07-concurrency", "rust-skills:m10-performance",
-    "rust-skills:m15-anti-pattern", "rust-skills:domain-cloud-native",
-    "rust-skills:coding-guidelines",
-    "rust-async-patterns", "rust-error-handling", "rust-ownership-system",
-    "prometheus-rust-auditor"
-  ],
-  "blocked_on_user_input": [],
-  "next_step": "Dispatch Change 1 (load-repro-harness) to executing agent"
+  "children": {},
+  "migrationStatus": null
 }
