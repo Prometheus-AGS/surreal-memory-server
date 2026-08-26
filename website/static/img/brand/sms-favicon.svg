@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96" fill="none" role="img" aria-label="Surreal Memory Server">
+  <rect width="96" height="96" rx="26" fill="#0B0F14"></rect>
+  <path d="M24 34 L48 22 L72 34 L48 46 Z" fill="#FF6A3D"></path>
+  <path d="M24 48 L48 60 L72 48" stroke="#E04E28" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"></path>
+  <path d="M24 64 L48 76 L72 64" stroke="#00C2DC" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"></path>
+</svg>

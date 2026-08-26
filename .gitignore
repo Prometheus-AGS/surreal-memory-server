@@ -43,3 +43,8 @@ Cargo.lock.bak
 .agent/
 .roo/
 .zed/
+
+# Docusaurus documentation site
+website/node_modules/
+website/build/
+website/.docusaurus/

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="150" viewBox="0 0 560 150" fill="none" role="img" aria-label="Surreal Memory Server">
+  <g transform="translate(8, 27)">
+    <path d="M24 34 L48 22 L72 34 L48 46 Z" fill="#FF6A3D"></path>
+    <path d="M24 48 L48 60 L72 48" stroke="#E04E28" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"></path>
+    <path d="M24 64 L48 76 L72 64" stroke="#00C2DC" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"></path>
+  </g>
+  <text x="106" y="72" fill="#E8EDF3" font-family="Space Grotesk, Geist Variable, system-ui, sans-serif" font-size="38" font-weight="700">Surreal Memory Server</text>
+  <text x="108" y="104" fill="#A7B0BC" font-family="JetBrains Mono, ui-monospace, monospace" font-size="15" letter-spacing="1.5">DURABLE AGENT MEMORY</text>
+</svg>
