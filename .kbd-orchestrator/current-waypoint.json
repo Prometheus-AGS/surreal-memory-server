@@ -1,19 +1,31 @@
 {
-  "active_phase": "surrealdb-connection-architecture",
-  "active_phase_status": "executing",
-  "completed_phases": ["task-stream-reliability", "write-path-reliability"],
-  "paused_phases": [
-    {"name": "uar-consumer-resync", "previous_status": "executing", "reason": "deferred to address higher-priority architectural defect in connection topology"}
+  "schemaVersion": "5",
+  "generatedBy": "kbd-runtime",
+  "sourceRevision": 21,
+  "derivedRevision": 21,
+  "frontier": {
+    "fa91ef8b-263d-4bc4-8d16-13f71ac4a62b": 21
+  },
+  "conflictCount": 0,
+  "projectId": "7831e934-53c6-4541-828b-504a430f7d9f",
+  "runId": "project-20260826T061706Z",
+  "path": [
+    "surrealdb-connection-architecture"
   ],
-  "last_phase": "uar-consumer-resync",
-  "last_phase_status": "paused",
-  "change_backend": "openspec",
-  "active_change": "load-repro-harness",
-  "active_change_path": "openspec/changes/fix-surrealdb-connection-architecture",
-  "changes_total": 7,
-  "changes_completed": 1,
-  "recommended_next_phase": "surrealdb-connection-architecture",
-  "next_step": "Implement Change 1 — load-repro harness against local docker-compose SurrealDB + embedded mode; commit baseline numbers before starting Change 2",
-  "created": "2026-05-17",
-  "updated": "2026-05-24"
+  "phaseIds": [
+    "surrealdb-connection-architecture"
+  ],
+  "activePhaseId": "surrealdb-connection-architecture",
+  "phase": "surrealdb-connection-architecture",
+  "childPointer": null,
+  "change": null,
+  "currentTask": null,
+  "status": "ready",
+  "completionMetric": "implementation",
+  "implementationCompleted": 13,
+  "implementationTotal": 17,
+  "planRevision": 1,
+  "revision": 21,
+  "exactNextCommand": null,
+  "updatedAt": "2026-08-26T06:17:21.138079Z"
 }
