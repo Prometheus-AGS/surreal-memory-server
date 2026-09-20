@@ -6,4 +6,4 @@
 ## 2. Verification
 
 - [x] 2.1 Pass focused Rust tests and strict OpenSpec validation
-- [ ] 2.2 Deploy and measure startup plus worker backlog progress
+- [x] 2.2 Deploy and measure startup plus worker backlog progress
