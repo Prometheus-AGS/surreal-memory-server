@@ -5,4 +5,4 @@
 ## 2. Verification
 
 - [x] 2.1 Run the operations test targets and strict OpenSpec validation
-- [ ] 2.2 Install the rebuilt server and measure receipt lookup plus learning-worker backlog progress
+- [x] 2.2 Install the rebuilt server and measure receipt lookup plus learning-worker backlog progress
