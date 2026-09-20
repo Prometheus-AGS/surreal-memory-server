@@ -420,24 +420,17 @@ impl OperationService {
 
     pub async fn get(&self, operation_id: &str) -> Result<Option<OperationReceipt>> {
         let db = self.surreal()?.db()?;
-        let rows: Vec<DbOperation> = db
-            .query("SELECT * FROM memory_operation WHERE operation_id = $id LIMIT 1")
-            .bind(("id", operation_id.to_owned()))
-            .await?
-            .check()?
-            .take(0)?;
-        rows.into_iter().next().map(TryInto::try_into).transpose()
+        let operation: Option<DbOperation> = db
+            .select(("memory_operation", record_key(operation_id)))
+            .await?;
+        operation.map(TryInto::try_into).transpose()
     }
 
     async fn get_db(&self, operation_id: &str) -> Result<Option<DbOperation>> {
         let db = self.surreal()?.db()?;
-        let rows: Vec<DbOperation> = db
-            .query("SELECT * FROM memory_operation WHERE operation_id = $id LIMIT 1")
-            .bind(("id", operation_id.to_owned()))
-            .await?
-            .check()?
-            .take(0)?;
-        Ok(rows.into_iter().next())
+        Ok(db
+            .select(("memory_operation", record_key(operation_id)))
+            .await?)
     }
 
     async fn list_nonterminal_ids(&self) -> Result<Vec<String>> {
