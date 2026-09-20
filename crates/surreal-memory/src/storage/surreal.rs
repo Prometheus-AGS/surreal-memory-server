@@ -531,7 +531,7 @@ struct SchemaMetadataRecord {
 #[derive(Clone, Debug, Deserialize, SurrealValue)]
 struct EmbeddingDimensionRecord {
     id: Option<RecordId>,
-    embedding: Option<Vec<f32>>,
+    dimension: Option<i64>,
 }
 
 impl From<Memory> for DbMemory {
@@ -808,11 +808,7 @@ impl SurrealStorage {
         table: &str,
         expected_dimension: usize,
     ) -> Result<()> {
-        let query = match table {
-            "entity" => "SELECT id, embedding FROM entity WHERE embedding IS NOT NONE",
-            "memory" => "SELECT id, embedding FROM memory WHERE embedding IS NOT NONE",
-            _ => anyhow::bail!("Unsupported embedding table: {}", table),
-        };
+        let query = Self::embedding_dimension_query(table)?;
 
         let rows: Vec<EmbeddingDimensionRecord> = db
             .query(query)
@@ -822,11 +818,10 @@ impl SurrealStorage {
             .unwrap_or_default();
 
         for row in rows {
-            let Some(embedding) = row.embedding else {
+            let Some(actual_dimension) = row.dimension else {
                 continue;
             };
-            let actual_dimension = embedding.len();
-            if actual_dimension != expected_dimension {
+            if actual_dimension != expected_dimension as i64 {
                 let record_id = row
                     .id
                     .as_ref()
@@ -843,6 +838,18 @@ impl SurrealStorage {
         }
 
         Ok(())
+    }
+
+    fn embedding_dimension_query(table: &str) -> Result<&'static str> {
+        match table {
+            "entity" => Ok(
+                "SELECT id, array::len(embedding) AS dimension FROM entity WHERE embedding IS NOT NONE",
+            ),
+            "memory" => Ok(
+                "SELECT id, array::len(embedding) AS dimension FROM memory WHERE embedding IS NOT NONE",
+            ),
+            _ => anyhow::bail!("Unsupported embedding table: {}", table),
+        }
     }
 
     async fn rebuild_embedding_indexes(db: &Surreal<Any>, dimension: usize) -> Result<()> {
@@ -3552,6 +3559,23 @@ impl PalaceStorage for SurrealStorage {
 #[cfg(test)]
 mod retry_tests {
     use super::*;
+
+    #[test]
+    fn embedding_dimension_validation_never_projects_vectors() {
+        for (table, expected) in [
+            (
+                "entity",
+                "SELECT id, array::len(embedding) AS dimension FROM entity WHERE embedding IS NOT NONE",
+            ),
+            (
+                "memory",
+                "SELECT id, array::len(embedding) AS dimension FROM memory WHERE embedding IS NOT NONE",
+            ),
+        ] {
+            let query = SurrealStorage::embedding_dimension_query(table).unwrap();
+            assert_eq!(query, expected);
+        }
+    }
 
     #[test]
     fn test_retry_config_defaults() {
