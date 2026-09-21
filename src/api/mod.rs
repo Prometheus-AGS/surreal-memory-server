@@ -18,7 +18,7 @@ use axum::{Json, http::StatusCode};
 use axum::{Router, routing::get};
 use serde::Serialize;
 use serde_json::json;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
@@ -90,9 +90,18 @@ pub fn build_router(
     storage: Arc<dyn MemoryStorage>,
     embedding_service: Arc<dyn EmbeddingService>,
 ) -> Router {
-    let operations = crate::operations::OperationService::start(
+    build_router_with_query_timeout(storage, embedding_service, Duration::from_secs(10))
+}
+
+pub fn build_router_with_query_timeout(
+    storage: Arc<dyn MemoryStorage>,
+    embedding_service: Arc<dyn EmbeddingService>,
+    query_timeout: Duration,
+) -> Router {
+    let operations = crate::operations::OperationService::start_with_query_timeout(
         Arc::clone(&storage),
         Arc::clone(&embedding_service),
+        query_timeout,
     );
     let state = AppState {
         storage: Arc::clone(&storage),

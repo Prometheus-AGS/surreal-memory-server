@@ -103,6 +103,7 @@ async fn main() -> Result<()> {
     let config = load_config().await?;
     let embedding_service = init_embedding_service(&config).await?;
     let retry_config = parse_retry_config_from_env();
+    let operation_query_timeout = std::time::Duration::from_millis(retry_config.query_timeout_ms);
 
     let mlx_backend = matches!(
         &config.embedding_provider,
@@ -153,8 +154,15 @@ async fn main() -> Result<()> {
 
     // ── Axum REST API + HTTP/SSE MCP ─────────────────────────────────────────
     let api_storage = Arc::clone(&storage);
-    let api_handle =
-        tokio::spawn(async move { run_api_server(api_storage, api_port, health_embedding).await });
+    let api_handle = tokio::spawn(async move {
+        run_api_server(
+            api_storage,
+            api_port,
+            health_embedding,
+            operation_query_timeout,
+        )
+        .await
+    });
 
     // ── MCP stdio ─────────────────────────────────────────────────────────────
     let enable_stdio_mcp = std::env::var("MCP_STDIO")
@@ -596,10 +604,12 @@ async fn run_api_server(
     storage: Arc<dyn MemoryStorage>,
     port: u16,
     embedding_service: Arc<dyn EmbeddingService>,
+    operation_query_timeout: std::time::Duration,
 ) -> Result<()> {
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("🌐 Starting REST API + HTTP MCP server on http://{}", addr);
-    let router = api::build_router(storage, embedding_service);
+    let router =
+        api::build_router_with_query_timeout(storage, embedding_service, operation_query_timeout);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .context("Failed to bind REST API port")?;
