@@ -8,8 +8,10 @@
 use std::{
     collections::{HashSet, VecDeque},
     convert::Infallible,
+    future::IntoFuture,
     pin::Pin,
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -321,6 +323,7 @@ impl From<DbOperationEvent> for OperationEvent {
 pub struct OperationService {
     storage: Arc<dyn MemoryStorage>,
     embedding_service: Arc<dyn EmbeddingService>,
+    query_timeout: Duration,
     wake_tx: mpsc::Sender<String>,
     events_tx: broadcast::Sender<OperationEvent>,
 }
@@ -337,12 +340,21 @@ impl OperationService {
         storage: Arc<dyn MemoryStorage>,
         embedding_service: Arc<dyn EmbeddingService>,
     ) -> Self {
-        Self::start_with_capacities(storage, embedding_service, 256, 1024)
+        Self::start_with_query_timeout(storage, embedding_service, Duration::from_secs(10))
+    }
+
+    pub fn start_with_query_timeout(
+        storage: Arc<dyn MemoryStorage>,
+        embedding_service: Arc<dyn EmbeddingService>,
+        query_timeout: Duration,
+    ) -> Self {
+        Self::start_with_capacities(storage, embedding_service, query_timeout, 256, 1024)
     }
 
     fn start_with_capacities(
         storage: Arc<dyn MemoryStorage>,
         embedding_service: Arc<dyn EmbeddingService>,
+        query_timeout: Duration,
         wake_capacity: usize,
         event_capacity: usize,
     ) -> Self {
@@ -351,6 +363,7 @@ impl OperationService {
         let service = Self {
             storage,
             embedding_service,
+            query_timeout,
             wake_tx,
             events_tx,
         };
@@ -368,6 +381,22 @@ impl OperationService {
             .as_any()
             .downcast_ref::<SurrealStorage>()
             .context("durable operations require SurrealStorage")
+    }
+
+    async fn await_database<T, E, F>(&self, stage: &'static str, future: F) -> Result<T>
+    where
+        F: IntoFuture<Output = std::result::Result<T, E>>,
+        anyhow::Error: From<E>,
+    {
+        tokio::time::timeout(self.query_timeout, future.into_future())
+            .await
+            .with_context(|| {
+                format!(
+                    "operation database {stage} timed out after {}ms",
+                    self.query_timeout.as_millis()
+                )
+            })?
+            .map_err(anyhow::Error::from)
     }
 
     pub async fn submit(
@@ -429,20 +458,23 @@ impl OperationService {
             .map_err(SubmitError::Storage)?
             .db()
             .map_err(SubmitError::Storage)?;
-        let response = db
-            .query(
-                "BEGIN TRANSACTION;\n\
+        let response = self
+            .await_database(
+                "submit",
+                db.query(
+                    "BEGIN TRANSACTION;\n\
                  CREATE type::record('memory_operation', $key) CONTENT $operation;\n\
                  CREATE type::record('memory_operation_event', $event_key) CONTENT $event;\n\
                  COMMIT TRANSACTION;",
+                )
+                .bind(("key", key))
+                .bind(("operation", db_record))
+                .bind(("event_key", event_key))
+                .bind(("event", event)),
             )
-            .bind(("key", key))
-            .bind(("operation", db_record))
-            .bind(("event_key", event_key))
-            .bind(("event", event))
             .await;
 
-        if let Err(error) = response.and_then(|response| response.check()) {
+        if let Err(error) = response.and_then(|response| response.check().map_err(Into::into)) {
             // A concurrent submit may have won the unique-index race. Re-read
             // the authoritative row and apply the same hash rule.
             if let Some(existing) = self
@@ -480,9 +512,12 @@ impl OperationService {
 
     pub async fn get(&self, operation_id: &str) -> Result<Option<OperationReceipt>> {
         let db = self.surreal()?.db()?;
-        let mut rows: Vec<DbOperationReceipt> = db
-            .query(GET_OPERATION_RECEIPT_QUERY)
-            .bind(("id", operation_id.to_owned()))
+        let mut rows: Vec<DbOperationReceipt> = self
+            .await_database(
+                "receipt lookup",
+                db.query(GET_OPERATION_RECEIPT_QUERY)
+                    .bind(("id", operation_id.to_owned())),
+            )
             .await?
             .check()?
             .take(0)?;
@@ -491,15 +526,20 @@ impl OperationService {
 
     async fn get_db(&self, operation_id: &str) -> Result<Option<DbOperation>> {
         let db = self.surreal()?.db()?;
-        Ok(db
-            .select(("memory_operation", record_key(operation_id)))
-            .await?)
+        self.await_database(
+            "operation lookup",
+            db.select(("memory_operation", record_key(operation_id))),
+        )
+        .await
     }
 
     async fn list_nonterminal_ids(&self) -> Result<Vec<String>> {
         let db = self.surreal()?.db()?;
-        let rows: Vec<DbOperationId> = db
-            .query(LIST_NONTERMINAL_OPERATION_IDS_QUERY)
+        let rows: Vec<DbOperationId> = self
+            .await_database(
+                "reconciliation discovery",
+                db.query(LIST_NONTERMINAL_OPERATION_IDS_QUERY),
+            )
             .await?
             .check()?
             .take(0)?;
@@ -508,12 +548,15 @@ impl OperationService {
 
     async fn events_after(&self, operation_id: &str, sequence: u64) -> Result<Vec<OperationEvent>> {
         let db = self.surreal()?.db()?;
-        let rows: Vec<DbOperationEvent> = db
-            .query(
+        let rows: Vec<DbOperationEvent> = self
+            .await_database(
+                "event history lookup",
+                db.query(
                 "SELECT * FROM memory_operation_event WHERE operation_id = $id AND sequence > $sequence ORDER BY sequence ASC",
             )
             .bind(("id", operation_id.to_owned()))
-            .bind(("sequence", sequence))
+            .bind(("sequence", sequence)),
+            )
             .await?
             .check()?
             .take(0)?;
@@ -548,7 +591,9 @@ impl OperationService {
         };
         let event_key = format!("{}-{sequence:016}", record_key(operation_id));
         let db = self.surreal()?.db()?;
-        db.query(
+        self.await_database(
+            "state transition",
+            db.query(
             "BEGIN TRANSACTION;\n\
              UPDATE memory_operation SET state = $state, blocked_by = $blocked_by, result = $result, error = $error, progress_seq = $sequence, updated_at = $now WHERE operation_id = $id;\n\
              CREATE type::record('memory_operation_event', $event_key) CONTENT $event;\n\
@@ -562,7 +607,8 @@ impl OperationService {
         .bind(("now", now))
         .bind(("id", operation_id.to_owned()))
         .bind(("event_key", event_key))
-        .bind(("event", event))
+        .bind(("event", event)),
+        )
         .await?
         .check()?;
         let published = OperationEvent {
@@ -595,11 +641,14 @@ impl OperationService {
 
     async fn operation_parts(&self, operation_id: &str) -> Result<Vec<DbOperationPart>> {
         let db = self.surreal()?.db()?;
-        let parts: Vec<DbOperationPart> = db
-            .query(
+        let parts: Vec<DbOperationPart> = self
+            .await_database(
+                "part lookup",
+                db.query(
                 "SELECT * FROM memory_operation_part WHERE operation_id = $id ORDER BY part_index ASC",
             )
-            .bind(("id", operation_id.to_owned()))
+            .bind(("id", operation_id.to_owned())),
+            )
             .await?
             .check()?
             .take(0)?;
@@ -642,12 +691,15 @@ impl OperationService {
                 }
             })
             .collect::<Vec<_>>();
-        db.query(
-            "BEGIN TRANSACTION;\n\
+        self.await_database(
+            "plan persistence",
+            db.query(
+                "BEGIN TRANSACTION;\n\
              INSERT INTO memory_operation_part $parts;\n\
              COMMIT TRANSACTION;",
+            )
+            .bind(("parts", rows)),
         )
-        .bind(("parts", rows))
         .await?
         .check()?;
         Ok(())
@@ -660,13 +712,16 @@ impl OperationService {
         embedding: Vec<f32>,
     ) -> Result<()> {
         let db = self.surreal()?.db()?;
-        db.query(
+        self.await_database(
+            "part persistence",
+            db.query(
             "UPDATE memory_operation_part SET state = 'indexed', embedding = $embedding, updated_at = $now WHERE operation_id = $id AND part_index = $index",
         )
         .bind(("embedding", embedding))
         .bind(("now", Datetime::default()))
         .bind(("id", operation_id.to_owned()))
-        .bind(("index", part_index))
+        .bind(("index", part_index)),
+        )
         .await?
         .check()?;
         Ok(())
@@ -744,13 +799,15 @@ impl OperationService {
             event.generation,
             event.progress_seq
         );
-        self.surreal()?
-            .db()?
-            .query("CREATE type::record('memory_executor_event', $key) CONTENT $event")
-            .bind(("key", key))
-            .bind(("event", row))
-            .await?
-            .check()?;
+        let db = self.surreal()?.db()?;
+        self.await_database(
+            "executor event persistence",
+            db.query("CREATE type::record('memory_executor_event', $key) CONTENT $event")
+                .bind(("key", key))
+                .bind(("event", row)),
+        )
+        .await?
+        .check()?;
         Ok(())
     }
 
@@ -761,9 +818,10 @@ impl OperationService {
         else {
             return Ok(());
         };
-        self.surreal()?
-            .db()?
-            .query(
+        let db = self.surreal()?.db()?;
+        self.await_database(
+            "executor snapshot persistence",
+            db.query(
                 "UPDATE memory_operation SET executor_generation = $generation, executor_progress_seq = $progress, executor_exit_count = $exit_count, executor_last_exit = $last_exit, executor_error = $executor_error, updated_at = $now WHERE operation_id = $id",
             )
             .bind(("generation", snapshot.generation))
@@ -772,7 +830,8 @@ impl OperationService {
             .bind(("last_exit", snapshot.last_exit))
             .bind(("executor_error", snapshot.error))
             .bind(("now", Datetime::default()))
-            .bind(("id", operation_id.to_owned()))
+            .bind(("id", operation_id.to_owned())),
+        )
             .await?
             .check()?;
         Ok(())
@@ -2017,6 +2076,7 @@ mod tests {
         let service = OperationService::start_with_capacities(
             Arc::clone(&storage) as Arc<dyn MemoryStorage>,
             embedder,
+            Duration::from_secs(10),
             4,
             16,
         );
@@ -2055,6 +2115,7 @@ mod tests {
         let service = OperationService::start_with_capacities(
             Arc::clone(&storage) as Arc<dyn MemoryStorage>,
             embedder,
+            Duration::from_secs(10),
             4,
             16,
         );
@@ -2131,6 +2192,7 @@ mod tests {
         let service = OperationService::start_with_capacities(
             storage as Arc<dyn MemoryStorage>,
             embedder,
+            Duration::from_secs(10),
             16,
             4,
         );
