@@ -64,3 +64,43 @@ The repaired source is not yet the installed binary. Deployment certification
 requires the merged commit to be built, signed, installed at both owned paths,
 and observed draining every accepted receipt before `prometheus doctor --json`
 can pass.
+
+## Installed-runtime follow-up
+
+The first installed build remained ready but its startup reconciliation timed
+out twice at the 10-second discovery deadline. Direct HTTP measurements against
+the same database showed the cause: the `state NOT IN [...]` discovery query
+took 8.74 seconds, while separate state-index equality queries took 1.20–2.22
+seconds each. The coordinator also repeated the full discovery query after
+every commit, making backlog recovery quadratic.
+
+The follow-up implementation queries `accepted`, `validated`, `blocked`, and
+`processing` separately under the configured per-query deadline, then sorts
+and deduplicates the combined identities. The drain loop now rescans once after
+a wave that committed work, preserving dependency recovery without one full
+ledger scan per committed operation.
+
+- `cargo fmt --all --check` and `git diff --check` — exit 0.
+- `openspec validate complete-operation-ledger-recovery --strict` — exit 0.
+- `openspec validate bound-operation-query-deadlines --strict` — exit 0.
+- `openspec validate bound-operation-reconciliation-projection --strict` —
+  exit 0.
+- `RUSTC_WRAPPER= cargo test --locked --test operation_query_deadline --no-default-features --features server-only -- --nocapture`
+  — exit 0; 2 passed, 0 failed. The added real-server case proves an
+  earlier-sorted dependent operation commits in a second drain wave after its
+  later-sorted prerequisite commits.
+- The first run of that integration target produced 1 pass and 1 failure
+  because the new fixture used literal record keys instead of the production
+  SHA-256 key derivation. Correcting the fixture made the unchanged production
+  path pass.
+- `RUSTC_WRAPPER= cargo test --locked --test executor_recovery -- --nocapture`
+  — exit 0; 4 passed, 0 failed.
+- `prometheus-rust-auditor enforce`, `format`, and `inventory` — exit 0 with
+  no findings. `partition` exited 0 with the same six informational
+  AI-loop-pending rows.
+
+The task's isolated review budget was already consumed by the two recorded
+rounds, ending in PASS. The installed-runtime regression therefore proceeds to
+the same local gates and a fresh deployment proof rather than a third critic
+round. Task 3.1 remains open until the new build drains accepted receipts to
+zero and `prometheus doctor --json` exits successfully.

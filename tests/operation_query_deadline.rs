@@ -245,3 +245,151 @@ async fn concurrent_receipt_timeouts_leave_the_same_coordinator_able_to_commit_l
     .expect("the original coordinator commits later work");
     assert_eq!(receipt["operation_id"], "deadline-probe");
 }
+
+#[tokio::test]
+async fn startup_reconciliation_processes_a_dependency_in_a_later_drain_wave() {
+    let (_server, endpoint) = start_server().await;
+    let embedder: Arc<dyn EmbeddingService> = Arc::new(NoOpEmbedder);
+    let storage = Arc::new(
+        SurrealStorage::new(
+            &SurrealConfig {
+                mode: SurrealMode::Server,
+                endpoint: Some(endpoint),
+                embedded_path: None,
+                username: None,
+                password: None,
+                namespace: format!("reconcile_{}", uuid::Uuid::new_v4().simple()),
+                database: "operations".to_owned(),
+                retry: RetryConfig {
+                    max_connect_retries: 0,
+                    query_timeout_ms: 10_000,
+                    ..RetryConfig::default()
+                },
+            },
+            Arc::clone(&embedder),
+        )
+        .await
+        .expect("isolated server-mode SurrealStorage"),
+    );
+    let database = storage.db().unwrap().clone();
+    let dependent_payload = json!({
+        "name": "dependent",
+        "description": "must wait for the later-sorted prerequisite",
+        "agent_id": null,
+        "user_id": "test"
+    });
+    let prerequisite_payload = json!({
+        "name": "prerequisite",
+        "description": "commits in the first drain wave",
+        "agent_id": null,
+        "user_id": "test"
+    });
+    let dependent_hash = Sha256::digest(serde_json::to_vec(&dependent_payload).unwrap())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let prerequisite_hash = Sha256::digest(serde_json::to_vec(&prerequisite_payload).unwrap())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let dependent_key = Sha256::digest(b"a-dependent")
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let prerequisite_key = Sha256::digest(b"z-prerequisite")
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+
+    for (key, operation_id, dependencies, payload_hash, payload) in [
+        (
+            dependent_key,
+            "a-dependent",
+            vec!["z-prerequisite"],
+            dependent_hash,
+            dependent_payload,
+        ),
+        (
+            prerequisite_key,
+            "z-prerequisite",
+            Vec::new(),
+            prerequisite_hash,
+            prerequisite_payload,
+        ),
+    ] {
+        database
+            .query(
+                "CREATE type::record('memory_operation', $key) CONTENT {
+                    operation_id: $id,
+                    schema_version: 2,
+                    kind: 'create_task_stream',
+                    dependencies: $dependencies,
+                    payload_hash: $payload_hash,
+                    payload: $payload,
+                    state: 'accepted',
+                    blocked_by: [],
+                    result: NONE,
+                    error: NONE,
+                    executor_generation: 0,
+                    executor_progress_seq: 0,
+                    executor_exit_count: 0,
+                    executor_last_exit: NONE,
+                    executor_error: NONE,
+                    progress_seq: 1,
+                    created_at: time::now(),
+                    updated_at: time::now()
+                }",
+            )
+            .bind(("key", key))
+            .bind(("id", operation_id))
+            .bind(("dependencies", dependencies))
+            .bind(("payload_hash", payload_hash))
+            .bind(("payload", payload))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+
+    let router = api::build_router_with_query_timeout(
+        Arc::clone(&storage) as Arc<dyn MemoryStorage>,
+        embedder,
+        Duration::from_secs(10),
+    );
+
+    let receipts = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let mut committed = Vec::new();
+            for operation_id in ["a-dependent", "z-prerequisite"] {
+                let response = router
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri(format!("/api/v2/operations/{operation_id}"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let body: Value = serde_json::from_slice(
+                    &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+                )
+                .unwrap();
+                committed.push(body);
+            }
+            if committed
+                .iter()
+                .all(|receipt| receipt["state"] == "committed")
+            {
+                break committed;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("startup reconciliation commits both drain waves");
+
+    assert_eq!(receipts[0]["operation_id"], "a-dependent");
+    assert_eq!(receipts[1]["operation_id"], "z-prerequisite");
+}
