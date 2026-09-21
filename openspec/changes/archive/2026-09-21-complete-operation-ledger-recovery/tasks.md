@@ -8,4 +8,4 @@
 
 ## 3. Installed runtime certification
 
-- [ ] 3.1 Build and sign the merged binary, reinstall and restart managed services, drain accepted receipts to zero, and prove service health plus `prometheus doctor --json` success.
+- [x] 3.1 Build and sign the merged binary, reinstall and restart managed services, drain accepted receipts to zero, and prove service health plus `prometheus doctor --json` success.

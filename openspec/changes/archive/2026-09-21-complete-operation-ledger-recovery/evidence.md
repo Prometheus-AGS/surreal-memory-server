@@ -100,7 +100,38 @@ ledger scan per committed operation.
   AI-loop-pending rows.
 
 The task's isolated review budget was already consumed by the two recorded
-rounds, ending in PASS. The installed-runtime regression therefore proceeds to
+rounds, ending in PASS. The installed-runtime regression therefore proceeded to
 the same local gates and a fresh deployment proof rather than a third critic
-round. Task 3.1 remains open until the new build drains accepted receipts to
-zero and `prometheus doctor --json` exits successfully.
+round.
+
+## Deployment certification
+
+- Deployed source: `bc3d1ea4d3460afcece646e5655583aee3650744`.
+- `RUSTFLAGS='-Dwarnings' RUSTC_WRAPPER= cargo build --release --locked --no-default-features --features embedded,metal,local-embeddings`
+  — exit 0 in 23.94 seconds.
+- The release binary and both installed copies at
+  `~/.local/bin/surreal-memory-server` and
+  `/usr/local/bin/surreal-memory-server` have SHA-256
+  `981d37e83316e983f383e7de0ff69f945325b1b00968a288ea37cdf708afd290`;
+  both installed copies passed `codesign --verify`.
+- The first SurrealDB LaunchAgent bootstrap returned a transient launchd error
+  5 while the prior process was still shutting down. The retry succeeded.
+- The deployed ledger started with 258 accepted operations. Indexed state
+  probes observed it drain to zero; the final full nonterminal query across
+  accepted, validated, blocked, planned, and processing returned an empty set.
+- The learning worker then reconciled all 261 accepted filesystem receipts:
+  `memory/accepted` fell from 261 to 0 and `memory/completed` rose from 2296 to
+  2557, with zero rejected or dead receipts. The worker exited 0 and its
+  LaunchAgent remains loaded.
+- `GET http://127.0.0.1:23001/ready` — HTTP 200 with ledger, storage,
+  coordinator, tokenizer, model executor, and search index all ready.
+- `prometheus doctor --json` — exit 0; 15 passed, 0 failed, 3 warned, and 2
+  skipped. The warnings are the unavailable legacy sovereign-sync control
+  socket, an unstarted KBD rollout observation, and unmeasured discovery
+  budgets for four harnesses.
+
+The deployed logs contain recovered operation lookup and executor persistence
+timeouts after the intrusive aggregate monitor was removed, including events
+at 05:37 and 06:18 UTC. They did not prevent the durable ledger or filesystem
+queue from reaching zero, but they remain measured runtime limitations rather
+than a clean-log claim.

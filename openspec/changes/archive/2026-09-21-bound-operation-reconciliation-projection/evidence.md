@@ -25,14 +25,19 @@ Date: 2026-09-21
 
 ## Deployment state
 
-The projection changes are installed through the signed
-`surreal-memory-server` binary whose SHA-256 is
-`63d4b297a9e4b1ebd2cb61ebac0752a00532eaf611b5b0a967ed9dc875942046`
-at both `~/.local/bin` and `/usr/local/bin`. Both copies pass
-`codesign --verify`.
+The final deployed source is
+`bc3d1ea4d3460afcece646e5655583aee3650744`. The signed release binary and both
+owned installed copies have SHA-256
+`981d37e83316e983f383e7de0ff69f945325b1b00968a288ea37cdf708afd290`;
+both installed copies pass `codesign --verify`.
 
-Backlog recovery is still running. The installed service reduced the local
-durable queue from 271 accepted and 2,286 completed operations to 261 accepted
-and 2,296 completed operations while both database health and memory readiness
-returned HTTP 200. Task 1.3 remains open until the accepted count reaches zero
-and the final doctor check exits successfully.
+The installed service drained 258 accepted durable operations to zero. The
+final full query over accepted, validated, blocked, planned, and processing
+states returned no rows. The learning worker reconciled 261 accepted
+filesystem receipts to completed, leaving zero accepted, rejected, or dead
+files. `GET /ready` returned HTTP 200 with every reported capability true, and
+`prometheus doctor --json` exited 0 with 15 passed and 0 failed checks.
+
+The deployed logs contain recovered operation lookup and executor persistence
+timeouts after startup. They did not prevent complete recovery and remain
+recorded limitations.

@@ -42,13 +42,21 @@ Date: 2026-09-21
 
 ## Deployment state
 
-The signed installed binary has SHA-256
-`63d4b297a9e4b1ebd2cb61ebac0752a00532eaf611b5b0a967ed9dc875942046`
-at both owned install paths, and both copies pass `codesign --verify`.
+The final deployed source is
+`bc3d1ea4d3460afcece646e5655583aee3650744`. The release binary and both owned
+installed copies have SHA-256
+`981d37e83316e983f383e7de0ff69f945325b1b00968a288ea37cdf708afd290`;
+both installed copies pass `codesign --verify`.
 
-The deployed server recorded
-`operation database reconciliation discovery timed out after 10000ms` instead
-of leaving the startup future pending indefinitely. The service stayed ready,
-and the durable queue continued to advance after the learning worker loaded.
-Backlog recovery is still running, so task 1.3 remains open until the accepted
-count reaches zero and the final doctor check exits successfully.
+The corrected startup discovery uses state-index equality queries with an
+independent deadline for each state. The installed service drained 258
+accepted durable operations to zero. The final full query over accepted,
+validated, blocked, planned, and processing states returned an empty set.
+`GET /ready` returned HTTP 200 with all capabilities true, and
+`prometheus doctor --json` exited 0 with 15 passed, 0 failed, 3 warned, and 2
+skipped checks. The learning worker also reconciled all 261 accepted
+filesystem receipts to completed with zero rejected or dead receipts.
+
+The deployed logs include recovered executor and operation-lookup timeouts at
+05:37 and 06:18 UTC. They did not prevent the queue from reaching zero and are
+retained as measured runtime limitations.
