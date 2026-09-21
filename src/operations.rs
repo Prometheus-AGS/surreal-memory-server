@@ -183,6 +183,33 @@ struct DbOperationId {
 
 const LIST_NONTERMINAL_OPERATION_IDS_QUERY: &str = "SELECT operation_id FROM memory_operation WHERE state NOT IN ['committed', 'rejected'] ORDER BY operation_id ASC";
 
+#[derive(Debug, Deserialize, SurrealValue)]
+struct DbOperationReceipt {
+    operation_id: String,
+    schema_version: u32,
+    kind: String,
+    dependencies: Vec<String>,
+    payload_hash: String,
+    state: String,
+    blocked_by: Vec<String>,
+    result: Option<Value>,
+    error: Option<String>,
+    executor_generation: u64,
+    #[serde(default)]
+    executor_progress_seq: u64,
+    #[serde(default)]
+    executor_exit_count: u64,
+    #[serde(default)]
+    executor_last_exit: Option<String>,
+    #[serde(default)]
+    executor_error: Option<String>,
+    progress_seq: u64,
+    created_at: Datetime,
+    updated_at: Datetime,
+}
+
+const GET_OPERATION_RECEIPT_QUERY: &str = "SELECT operation_id, schema_version, kind, dependencies, payload_hash, state, blocked_by, result, error, executor_generation, executor_progress_seq, executor_exit_count, executor_last_exit, executor_error, progress_seq, created_at, updated_at FROM memory_operation WHERE operation_id = $id LIMIT 1";
+
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbOperationEvent {
     #[serde(default)]
@@ -228,6 +255,32 @@ impl TryFrom<DbOperation> for OperationReceipt {
     type Error = anyhow::Error;
 
     fn try_from(value: DbOperation) -> Result<Self> {
+        Ok(Self {
+            operation_id: value.operation_id,
+            schema_version: value.schema_version,
+            kind: value.kind,
+            payload_hash: value.payload_hash,
+            dependencies: value.dependencies,
+            state: parse_state(&value.state)?,
+            blocked_by: value.blocked_by,
+            result: value.result,
+            error: value.error,
+            executor_generation: value.executor_generation,
+            executor_progress_seq: value.executor_progress_seq,
+            executor_exit_count: value.executor_exit_count,
+            executor_last_exit: value.executor_last_exit,
+            executor_error: value.executor_error,
+            progress_seq: value.progress_seq,
+            created_at: value.created_at.to_string(),
+            updated_at: value.updated_at.to_string(),
+        })
+    }
+}
+
+impl TryFrom<DbOperationReceipt> for OperationReceipt {
+    type Error = anyhow::Error;
+
+    fn try_from(value: DbOperationReceipt) -> Result<Self> {
         Ok(Self {
             operation_id: value.operation_id,
             schema_version: value.schema_version,
@@ -427,10 +480,13 @@ impl OperationService {
 
     pub async fn get(&self, operation_id: &str) -> Result<Option<OperationReceipt>> {
         let db = self.surreal()?.db()?;
-        let operation: Option<DbOperation> = db
-            .select(("memory_operation", record_key(operation_id)))
-            .await?;
-        operation.map(TryInto::try_into).transpose()
+        let mut rows: Vec<DbOperationReceipt> = db
+            .query(GET_OPERATION_RECEIPT_QUERY)
+            .bind(("id", operation_id.to_owned()))
+            .await?
+            .check()?
+            .take(0)?;
+        rows.pop().map(TryInto::try_into).transpose()
     }
 
     async fn get_db(&self, operation_id: &str) -> Result<Option<DbOperation>> {
@@ -2037,6 +2093,31 @@ mod tests {
             .expect("nonterminal operation identity is projected");
         assert_eq!(row.as_object().unwrap().len(), 1);
         assert!(!serde_json::to_string(&rows).unwrap().contains(sentinel));
+
+        let receipt = service
+            .get("projected-reconciliation")
+            .await
+            .unwrap()
+            .expect("operation receipt");
+        assert_eq!(receipt.operation_id, "projected-reconciliation");
+        let receipt_rows: Vec<Value> = storage
+            .db()
+            .unwrap()
+            .query(GET_OPERATION_RECEIPT_QUERY)
+            .bind(("id", "projected-reconciliation".to_owned()))
+            .await
+            .unwrap()
+            .check()
+            .unwrap()
+            .take(0)
+            .unwrap();
+        let receipt_row = receipt_rows.first().expect("projected receipt row");
+        assert!(!receipt_row.as_object().unwrap().contains_key("payload"));
+        assert!(
+            !serde_json::to_string(&receipt_rows)
+                .unwrap()
+                .contains(sentinel)
+        );
     }
 
     #[tokio::test]

@@ -19,3 +19,14 @@ executor fields into the reconciliation list result.
 #### Scenario: Terminal operations share the ledger
 - **WHEN** committed or rejected operations exist beside nonterminal operations
 - **THEN** the reconciliation list excludes terminal identities without loading their payloads
+
+### Requirement: Receipt lookup excludes request payloads
+
+The durable coordinator SHALL return an operation receipt by projecting only
+the fields in the public receipt contract. It MUST NOT load the stored request
+payload into the receipt query result.
+
+#### Scenario: A client polls an operation with a large request payload
+- **WHEN** the client retrieves that operation's receipt by its stable identity
+- **THEN** the query result contains every public receipt field
+- **AND** the query result does not contain the stored request payload
