@@ -77,7 +77,7 @@ impl EmbeddingService for NoOpEmbedder {
 }
 
 #[tokio::test]
-async fn receipt_timeout_leaves_the_same_coordinator_able_to_commit_later_work() {
+async fn concurrent_receipt_timeouts_leave_the_same_coordinator_able_to_commit_later_work() {
     let (_server, endpoint) = start_server().await;
     let embedder: Arc<dyn EmbeddingService> = Arc::new(NoOpEmbedder);
     let storage = Arc::new(
@@ -92,7 +92,7 @@ async fn receipt_timeout_leaves_the_same_coordinator_able_to_commit_later_work()
                 database: "operations".to_owned(),
                 retry: RetryConfig {
                     max_connect_retries: 0,
-                    query_timeout_ms: 1_000,
+                    query_timeout_ms: 10_000,
                     ..RetryConfig::default()
                 },
             },
@@ -146,31 +146,45 @@ async fn receipt_timeout_leaves_the_same_coordinator_able_to_commit_later_work()
     let router = api::build_router_with_query_timeout(
         Arc::clone(&storage) as Arc<dyn MemoryStorage>,
         embedder,
-        Duration::from_millis(50),
+        Duration::from_millis(10),
     );
 
-    let timeout_response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/api/v2/operations/large-receipt")
-                .body(Body::empty())
+    let timeout_batch = futures_util::future::join_all((0..4).map(|_| {
+        let router = router.clone();
+        async move {
+            router
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v2/operations/large-receipt")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+    }));
+    let general_storage_health = async {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        tokio::time::timeout(Duration::from_millis(500), storage.health_check())
+            .await
+            .expect("general storage remains responsive during ledger cancellation")
+            .expect("general storage health query succeeds")
+    };
+    let (timeout_responses, storage_healthy) = tokio::join!(timeout_batch, general_storage_health);
+    assert!(storage_healthy);
+    for timeout_response in timeout_responses {
+        assert_eq!(timeout_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let timeout_body: Value = serde_json::from_slice(
+            &to_bytes(timeout_response.into_body(), usize::MAX)
+                .await
                 .unwrap(),
         )
-        .await
         .unwrap();
-    assert_eq!(timeout_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let timeout_body: Value = serde_json::from_slice(
-        &to_bytes(timeout_response.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        timeout_body["error"],
-        "operation database receipt lookup timed out after 50ms"
-    );
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
+        assert_eq!(
+            timeout_body["error"],
+            "operation database receipt lookup timed out after 10ms"
+        );
+    }
 
     let payload = json!({
         "name": "deadline-probe",

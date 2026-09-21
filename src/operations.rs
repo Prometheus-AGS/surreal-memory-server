@@ -8,13 +8,14 @@
 use std::{
     collections::{HashSet, VecDeque},
     convert::Infallible,
-    future::IntoFuture,
+    future::{Future, IntoFuture},
     pin::Pin,
     sync::Arc,
     time::Duration,
 };
 
 use anyhow::{Context, Result};
+use arc_swap::ArcSwapOption;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -32,6 +33,7 @@ use surreal_memory::{
     embeddings::{EmbeddingPlanPart, ExecutorEvent, ExecutorEventKind, ExecutorSnapshot},
 };
 use surrealdb::types::{Datetime, RecordId};
+use surrealdb::{Surreal, engine::any::Any};
 use surrealdb_types::SurrealValue;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::StreamExt;
@@ -324,8 +326,52 @@ pub struct OperationService {
     storage: Arc<dyn MemoryStorage>,
     embedding_service: Arc<dyn EmbeddingService>,
     query_timeout: Duration,
+    ledger_connector: LedgerConnector,
+    ledger_connection: Arc<ArcSwapOption<LedgerConnection>>,
+    connection_replacement: Arc<tokio::sync::Mutex<()>>,
     wake_tx: mpsc::Sender<String>,
     events_tx: broadcast::Sender<OperationEvent>,
+    #[cfg(test)]
+    process_override: Option<ProcessOverride>,
+}
+
+struct LedgerConnection {
+    generation: u64,
+    db: Surreal<Any>,
+}
+
+type LedgerConnectFuture = Pin<Box<dyn Future<Output = Result<Surreal<Any>>> + Send>>;
+type LedgerConnector = Arc<dyn Fn() -> LedgerConnectFuture + Send + Sync>;
+#[cfg(test)]
+type ProcessOverrideFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+#[cfg(test)]
+type ProcessOverride = Arc<dyn Fn(String) -> ProcessOverrideFuture + Send + Sync>;
+
+#[derive(Debug, thiserror::Error)]
+#[error("operation database {stage} timed out after {timeout_ms}ms")]
+struct LedgerDeadlineExceeded {
+    stage: &'static str,
+    timeout_ms: u128,
+    recovered: bool,
+}
+
+fn is_recovered_ledger_deadline(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<LedgerDeadlineExceeded>()
+            .is_some_and(|deadline| deadline.recovered)
+    })
+}
+
+async fn retry_recovered_ledger_once<T, F, Fut>(mut operation: F) -> (Result<T>, bool)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    match operation().await {
+        Err(error) if is_recovered_ledger_deadline(&error) => (operation().await, true),
+        result => (result, false),
+    }
 }
 
 #[derive(Debug)]
@@ -360,12 +406,28 @@ impl OperationService {
     ) -> Self {
         let (wake_tx, wake_rx) = mpsc::channel(wake_capacity);
         let (events_tx, _) = broadcast::channel(event_capacity);
+        let connector_storage = Arc::clone(&storage);
+        let ledger_connector: LedgerConnector = Arc::new(move || {
+            let storage = Arc::clone(&connector_storage);
+            Box::pin(async move {
+                let surreal = storage
+                    .as_any()
+                    .downcast_ref::<SurrealStorage>()
+                    .context("durable operations require SurrealStorage")?;
+                surreal.operation_ledger_connection().await
+            })
+        });
         let service = Self {
             storage,
             embedding_service,
             query_timeout,
+            ledger_connector,
+            ledger_connection: Arc::new(ArcSwapOption::empty()),
+            connection_replacement: Arc::new(tokio::sync::Mutex::new(())),
             wake_tx,
             events_tx,
+            #[cfg(test)]
+            process_override: None,
         };
         if let Some(executor_events) = service.embedding_service.subscribe_executor_events() {
             let journal = service.clone();
@@ -383,20 +445,80 @@ impl OperationService {
             .context("durable operations require SurrealStorage")
     }
 
-    async fn await_database<T, E, F>(&self, stage: &'static str, future: F) -> Result<T>
+    async fn ledger_connection(&self) -> Result<Arc<LedgerConnection>> {
+        if let Some(connection) = self.ledger_connection.load_full() {
+            return Ok(connection);
+        }
+        let _replacement = self.connection_replacement.lock().await;
+        if let Some(connection) = self.ledger_connection.load_full() {
+            return Ok(connection);
+        }
+        let db = (self.ledger_connector)().await?;
+        let connection = Arc::new(LedgerConnection { generation: 0, db });
+        self.ledger_connection.store(Some(Arc::clone(&connection)));
+        Ok(connection)
+    }
+
+    async fn replace_ledger_connection(&self, stale_generation: u64) -> Result<()> {
+        let _replacement = self.connection_replacement.lock().await;
+        if self
+            .ledger_connection
+            .load_full()
+            .is_some_and(|connection| connection.generation != stale_generation)
+        {
+            return Ok(());
+        }
+        let db = (self.ledger_connector)().await?;
+        self.ledger_connection
+            .store(Some(Arc::new(LedgerConnection {
+                generation: stale_generation.saturating_add(1),
+                db,
+            })));
+        Ok(())
+    }
+
+    async fn await_database<T, E, F>(
+        &self,
+        stage: &'static str,
+        generation: u64,
+        future: F,
+    ) -> Result<T>
     where
         F: IntoFuture<Output = std::result::Result<T, E>>,
         anyhow::Error: From<E>,
     {
-        tokio::time::timeout(self.query_timeout, future.into_future())
-            .await
-            .with_context(|| {
-                format!(
-                    "operation database {stage} timed out after {}ms",
-                    self.query_timeout.as_millis()
+        match tokio::time::timeout(self.query_timeout, future.into_future()).await {
+            Ok(result) => result.map_err(anyhow::Error::from),
+            Err(_) => {
+                let replacement_timeout = self.query_timeout.max(Duration::from_secs(1));
+                let replacement = tokio::time::timeout(
+                    replacement_timeout,
+                    self.replace_ledger_connection(generation),
                 )
-            })?
-            .map_err(anyhow::Error::from)
+                .await;
+                let recovered = match replacement {
+                    Ok(Ok(())) => true,
+                    Ok(Err(error)) => {
+                        tracing::error!(%error, stage, "operation database connection replacement failed");
+                        false
+                    }
+                    Err(_) => {
+                        tracing::error!(
+                            stage,
+                            timeout_ms = replacement_timeout.as_millis(),
+                            "operation database connection replacement timed out"
+                        );
+                        false
+                    }
+                };
+                Err(LedgerDeadlineExceeded {
+                    stage,
+                    timeout_ms: self.query_timeout.as_millis(),
+                    recovered,
+                }
+                .into())
+            }
+        }
     }
 
     pub async fn submit(
@@ -453,14 +575,15 @@ impl OperationService {
         };
         let key = record_key(&request.operation_id);
         let event_key = format!("{key}-0000000000000001");
-        let db = self
-            .surreal()
-            .map_err(SubmitError::Storage)?
-            .db()
+        let connection = self
+            .ledger_connection()
+            .await
             .map_err(SubmitError::Storage)?;
+        let db = connection.db.clone();
         let response = self
             .await_database(
                 "submit",
+                connection.generation,
                 db.query(
                     "BEGIN TRANSACTION;\n\
                  CREATE type::record('memory_operation', $key) CONTENT $operation;\n\
@@ -487,7 +610,7 @@ impl OperationService {
                 }
                 return Err(SubmitError::Conflict(Box::new(existing)));
             }
-            return Err(SubmitError::Storage(error.into()));
+            return Err(SubmitError::Storage(error));
         }
 
         let receipt = self
@@ -511,10 +634,12 @@ impl OperationService {
     }
 
     pub async fn get(&self, operation_id: &str) -> Result<Option<OperationReceipt>> {
-        let db = self.surreal()?.db()?;
+        let connection = self.ledger_connection().await?;
+        let db = connection.db.clone();
         let mut rows: Vec<DbOperationReceipt> = self
             .await_database(
                 "receipt lookup",
+                connection.generation,
                 db.query(GET_OPERATION_RECEIPT_QUERY)
                     .bind(("id", operation_id.to_owned())),
             )
@@ -525,19 +650,23 @@ impl OperationService {
     }
 
     async fn get_db(&self, operation_id: &str) -> Result<Option<DbOperation>> {
-        let db = self.surreal()?.db()?;
+        let connection = self.ledger_connection().await?;
+        let db = connection.db.clone();
         self.await_database(
             "operation lookup",
+            connection.generation,
             db.select(("memory_operation", record_key(operation_id))),
         )
         .await
     }
 
     async fn list_nonterminal_ids(&self) -> Result<Vec<String>> {
-        let db = self.surreal()?.db()?;
+        let connection = self.ledger_connection().await?;
+        let db = connection.db.clone();
         let rows: Vec<DbOperationId> = self
             .await_database(
                 "reconciliation discovery",
+                connection.generation,
                 db.query(LIST_NONTERMINAL_OPERATION_IDS_QUERY),
             )
             .await?
@@ -547,10 +676,12 @@ impl OperationService {
     }
 
     async fn events_after(&self, operation_id: &str, sequence: u64) -> Result<Vec<OperationEvent>> {
-        let db = self.surreal()?.db()?;
+        let connection = self.ledger_connection().await?;
+        let db = connection.db.clone();
         let rows: Vec<DbOperationEvent> = self
             .await_database(
                 "event history lookup",
+                connection.generation,
                 db.query(
                 "SELECT * FROM memory_operation_event WHERE operation_id = $id AND sequence > $sequence ORDER BY sequence ASC",
             )
@@ -590,9 +721,11 @@ impl OperationService {
             occurred_at: now,
         };
         let event_key = format!("{}-{sequence:016}", record_key(operation_id));
-        let db = self.surreal()?.db()?;
+        let connection = self.ledger_connection().await?;
+        let db = connection.db.clone();
         self.await_database(
             "state transition",
+            connection.generation,
             db.query(
             "BEGIN TRANSACTION;\n\
              UPDATE memory_operation SET state = $state, blocked_by = $blocked_by, result = $result, error = $error, progress_seq = $sequence, updated_at = $now WHERE operation_id = $id;\n\
@@ -640,10 +773,12 @@ impl OperationService {
     }
 
     async fn operation_parts(&self, operation_id: &str) -> Result<Vec<DbOperationPart>> {
-        let db = self.surreal()?.db()?;
+        let connection = self.ledger_connection().await?;
+        let db = connection.db.clone();
         let parts: Vec<DbOperationPart> = self
             .await_database(
                 "part lookup",
+                connection.generation,
                 db.query(
                 "SELECT * FROM memory_operation_part WHERE operation_id = $id ORDER BY part_index ASC",
             )
@@ -671,7 +806,8 @@ impl OperationService {
             return Ok(());
         }
 
-        let db = self.surreal()?.db()?;
+        let connection = self.ledger_connection().await?;
+        let db = connection.db.clone();
         let rows = plan
             .iter()
             .map(|part| {
@@ -693,6 +829,7 @@ impl OperationService {
             .collect::<Vec<_>>();
         self.await_database(
             "plan persistence",
+            connection.generation,
             db.query(
                 "BEGIN TRANSACTION;\n\
              INSERT INTO memory_operation_part $parts;\n\
@@ -711,9 +848,11 @@ impl OperationService {
         part_index: u64,
         embedding: Vec<f32>,
     ) -> Result<()> {
-        let db = self.surreal()?.db()?;
+        let connection = self.ledger_connection().await?;
+        let db = connection.db.clone();
         self.await_database(
             "part persistence",
+            connection.generation,
             db.query(
             "UPDATE memory_operation_part SET state = 'indexed', embedding = $embedding, updated_at = $now WHERE operation_id = $id AND part_index = $index",
         )
@@ -799,9 +938,11 @@ impl OperationService {
             event.generation,
             event.progress_seq
         );
-        let db = self.surreal()?.db()?;
+        let connection = self.ledger_connection().await?;
+        let db = connection.db.clone();
         self.await_database(
             "executor event persistence",
+            connection.generation,
             db.query("CREATE type::record('memory_executor_event', $key) CONTENT $event")
                 .bind(("key", key))
                 .bind(("event", row)),
@@ -818,9 +959,11 @@ impl OperationService {
         else {
             return Ok(());
         };
-        let db = self.surreal()?.db()?;
+        let connection = self.ledger_connection().await?;
+        let db = connection.db.clone();
         self.await_database(
             "executor snapshot persistence",
+            connection.generation,
             db.query(
                 "UPDATE memory_operation SET executor_generation = $generation, executor_progress_seq = $progress, executor_exit_count = $exit_count, executor_last_exit = $last_exit, executor_error = $executor_error, updated_at = $now WHERE operation_id = $id",
             )
@@ -837,13 +980,30 @@ impl OperationService {
         Ok(())
     }
 
+    async fn process_pending(&self, operation_id: &str) -> Result<()> {
+        #[cfg(test)]
+        if let Some(process) = &self.process_override {
+            return process(operation_id.to_owned()).await;
+        }
+        self.process(operation_id).await
+    }
+
     async fn drain_pending(&self, initial: Vec<String>) {
         let mut pending = VecDeque::from(initial);
         let mut queued = pending.iter().cloned().collect::<HashSet<_>>();
+        let mut retried = HashSet::new();
 
         while let Some(operation_id) = pending.pop_front() {
             queued.remove(&operation_id);
-            if let Err(error) = self.process(&operation_id).await {
+            if let Err(error) = self.process_pending(&operation_id).await {
+                if is_recovered_ledger_deadline(&error)
+                    && retried.insert(operation_id.clone())
+                    && queued.insert(operation_id.clone())
+                {
+                    tracing::warn!(%operation_id, "retrying stale-ledger interruption once");
+                    pending.push_back(operation_id);
+                    continue;
+                }
                 tracing::error!(%operation_id, %error, "operation processing paused");
                 self.record_processing_error(&operation_id, &error).await;
                 continue;
@@ -881,8 +1041,16 @@ impl OperationService {
     }
 
     async fn run(self, mut wake_rx: mpsc::Receiver<String>) {
-        match self.reconcile_nonterminal().await {
+        let (reconciliation, retried) =
+            retry_recovered_ledger_once(|| self.reconcile_nonterminal()).await;
+        match reconciliation {
+            Ok(_) if retried => {
+                tracing::warn!("operation startup reconciliation recovered after one retry")
+            }
             Ok(_) => {}
+            Err(error) if retried => {
+                tracing::error!(%error, "operation startup reconciliation retry failed");
+            }
             Err(error) => tracing::error!(%error, "operation startup reconciliation failed"),
         }
 
@@ -1591,6 +1759,295 @@ mod tests {
         fn dimensions(&self) -> usize {
             2
         }
+    }
+
+    fn service_without_coordinator(
+        storage: Arc<SurrealStorage>,
+        embedder: Arc<dyn EmbeddingService>,
+        ledger_connector: LedgerConnector,
+        initial_connection: Option<LedgerConnection>,
+        query_timeout: Duration,
+    ) -> OperationService {
+        let (wake_tx, _) = mpsc::channel(4);
+        let (events_tx, _) = broadcast::channel(4);
+        OperationService {
+            storage: storage as Arc<dyn MemoryStorage>,
+            embedding_service: embedder,
+            query_timeout,
+            ledger_connector,
+            ledger_connection: Arc::new(ArcSwapOption::new(initial_connection.map(Arc::new))),
+            connection_replacement: Arc::new(tokio::sync::Mutex::new(())),
+            wake_tx,
+            events_tx,
+            process_override: None,
+        }
+    }
+
+    fn deadline_error(recovered: bool) -> anyhow::Error {
+        LedgerDeadlineExceeded {
+            stage: "fixture",
+            timeout_ms: 1,
+            recovered,
+        }
+        .into()
+    }
+
+    #[tokio::test]
+    async fn concurrent_first_use_publishes_one_ledger_generation() {
+        let embedder: Arc<dyn EmbeddingService> = Arc::new(NoOpEmbedder);
+        let storage = Arc::new(
+            SurrealStorage::new_mem(Arc::clone(&embedder))
+                .await
+                .expect("in-memory SurrealStorage"),
+        );
+        let database = storage.db().unwrap();
+        let connect_calls = Arc::new(AtomicUsize::new(0));
+        let ledger_connector: LedgerConnector = {
+            let connect_calls = Arc::clone(&connect_calls);
+            Arc::new(move || {
+                let database = database.clone();
+                let connect_calls = Arc::clone(&connect_calls);
+                Box::pin(async move {
+                    connect_calls.fetch_add(1, Ordering::SeqCst);
+                    tokio::task::yield_now().await;
+                    Ok(database)
+                })
+            })
+        };
+        let service = service_without_coordinator(
+            Arc::clone(&storage),
+            embedder,
+            ledger_connector,
+            None,
+            Duration::from_secs(1),
+        );
+
+        let connections =
+            futures_util::future::join_all((0..4).map(|_| service.ledger_connection()))
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>>>()
+                .unwrap();
+
+        assert_eq!(connect_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            connections
+                .iter()
+                .all(|connection| connection.generation == 0)
+        );
+        assert!(
+            connections
+                .iter()
+                .all(|connection| Arc::ptr_eq(connection, &connections[0]))
+        );
+    }
+
+    #[tokio::test]
+    async fn overlapping_replacements_publish_only_the_next_generation() {
+        let embedder: Arc<dyn EmbeddingService> = Arc::new(NoOpEmbedder);
+        let storage = Arc::new(
+            SurrealStorage::new_mem(Arc::clone(&embedder))
+                .await
+                .expect("in-memory SurrealStorage"),
+        );
+        let database = storage.db().unwrap();
+        let connect_calls = Arc::new(AtomicUsize::new(0));
+        let ledger_connector: LedgerConnector = {
+            let connect_calls = Arc::clone(&connect_calls);
+            let replacement = database.clone();
+            Arc::new(move || {
+                let replacement = replacement.clone();
+                let connect_calls = Arc::clone(&connect_calls);
+                Box::pin(async move {
+                    connect_calls.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    Ok(replacement)
+                })
+            })
+        };
+        let service = service_without_coordinator(
+            Arc::clone(&storage),
+            embedder,
+            ledger_connector,
+            Some(LedgerConnection {
+                generation: 0,
+                db: database,
+            }),
+            Duration::from_secs(1),
+        );
+
+        let replacements =
+            futures_util::future::join_all((0..4).map(|_| service.replace_ledger_connection(0)))
+                .await;
+
+        assert!(replacements.into_iter().all(|result| result.is_ok()));
+        assert_eq!(connect_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(service.ledger_connection().await.unwrap().generation, 1);
+    }
+
+    #[tokio::test]
+    async fn replacement_failure_is_not_a_recovered_ledger_deadline() {
+        let embedder: Arc<dyn EmbeddingService> = Arc::new(NoOpEmbedder);
+        let storage = Arc::new(
+            SurrealStorage::new_mem(Arc::clone(&embedder))
+                .await
+                .expect("in-memory SurrealStorage"),
+        );
+        let database = storage.db().unwrap();
+        let connect_calls = Arc::new(AtomicUsize::new(0));
+        let ledger_connector: LedgerConnector = {
+            let connect_calls = Arc::clone(&connect_calls);
+            Arc::new(move || {
+                let connect_calls = Arc::clone(&connect_calls);
+                Box::pin(async move {
+                    connect_calls.fetch_add(1, Ordering::SeqCst);
+                    anyhow::bail!("fixture replacement failed")
+                })
+            })
+        };
+        let service = service_without_coordinator(
+            Arc::clone(&storage),
+            embedder,
+            ledger_connector,
+            Some(LedgerConnection {
+                generation: 0,
+                db: database,
+            }),
+            Duration::from_millis(1),
+        );
+
+        let error = service
+            .await_database(
+                "fixture",
+                0,
+                std::future::pending::<std::result::Result<(), anyhow::Error>>(),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "operation database fixture timed out after 1ms"
+        );
+        assert!(!is_recovered_ledger_deadline(&error));
+        assert_eq!(connect_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(service.ledger_connection().await.unwrap().generation, 0);
+    }
+
+    #[tokio::test]
+    async fn startup_retry_runs_once_only_for_a_recovered_ledger_deadline() {
+        let recovered_calls = Arc::new(AtomicUsize::new(0));
+        let recovered_counter = Arc::clone(&recovered_calls);
+        let (recovered_result, retried) = retry_recovered_ledger_once(move || {
+            let attempt = recovered_counter.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if attempt == 0 {
+                    Err(deadline_error(true))
+                } else {
+                    Ok("recovered")
+                }
+            }
+        })
+        .await;
+        assert_eq!(recovered_result.unwrap(), "recovered");
+        assert!(retried);
+        assert_eq!(recovered_calls.load(Ordering::SeqCst), 2);
+
+        for first_error in [deadline_error(false), anyhow::anyhow!("executor failed")] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&calls);
+            let mut first_error = Some(first_error);
+            let (result, retried) = retry_recovered_ledger_once(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let error = first_error.take().expect("only one attempt");
+                async move { Err::<(), _>(error) }
+            })
+            .await;
+            assert!(result.is_err());
+            assert!(!retried);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+
+        let repeated_calls = Arc::new(AtomicUsize::new(0));
+        let repeated_counter = Arc::clone(&repeated_calls);
+        let (result, retried) = retry_recovered_ledger_once(move || {
+            repeated_counter.fetch_add(1, Ordering::SeqCst);
+            async { Err::<(), _>(deadline_error(true)) }
+        })
+        .await;
+        assert!(result.is_err());
+        assert!(retried);
+        assert_eq!(repeated_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn coordinator_drain_retries_only_a_recovered_ledger_deadline_once() {
+        let embedder: Arc<dyn EmbeddingService> = Arc::new(NoOpEmbedder);
+        let storage = Arc::new(
+            SurrealStorage::new_mem(Arc::clone(&embedder))
+                .await
+                .expect("in-memory SurrealStorage"),
+        );
+        let database = storage.db().unwrap();
+
+        let make_service = |process_override: ProcessOverride| {
+            let replacement = database.clone();
+            let ledger_connector: LedgerConnector = Arc::new(move || {
+                let replacement = replacement.clone();
+                Box::pin(async move { Ok(replacement) })
+            });
+            let mut service = service_without_coordinator(
+                Arc::clone(&storage),
+                Arc::clone(&embedder),
+                ledger_connector,
+                Some(LedgerConnection {
+                    generation: 0,
+                    db: database.clone(),
+                }),
+                Duration::from_secs(1),
+            );
+            service.process_override = Some(process_override);
+            service
+        };
+
+        let recovered_then_executor_calls = Arc::new(AtomicUsize::new(0));
+        let recovered_counter = Arc::clone(&recovered_then_executor_calls);
+        let recovered_then_executor: ProcessOverride = Arc::new(move |_| {
+            let attempt = recovered_counter.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                if attempt == 0 {
+                    Err(deadline_error(true))
+                } else {
+                    anyhow::bail!("fixture executor failure")
+                }
+            })
+        });
+        make_service(recovered_then_executor)
+            .drain_pending(vec!["recovered-then-executor".to_owned()])
+            .await;
+        assert_eq!(recovered_then_executor_calls.load(Ordering::SeqCst), 2);
+
+        let repeated_deadline_calls = Arc::new(AtomicUsize::new(0));
+        let repeated_counter = Arc::clone(&repeated_deadline_calls);
+        let repeated_deadline: ProcessOverride = Arc::new(move |_| {
+            repeated_counter.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err(deadline_error(true)) })
+        });
+        make_service(repeated_deadline)
+            .drain_pending(vec!["repeated-deadline".to_owned()])
+            .await;
+        assert_eq!(repeated_deadline_calls.load(Ordering::SeqCst), 2);
+
+        let executor_calls = Arc::new(AtomicUsize::new(0));
+        let executor_counter = Arc::clone(&executor_calls);
+        let executor_failure: ProcessOverride = Arc::new(move |_| {
+            executor_counter.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { anyhow::bail!("fixture executor failure") })
+        });
+        make_service(executor_failure)
+            .drain_pending(vec!["executor-only".to_owned()])
+            .await;
+        assert_eq!(executor_calls.load(Ordering::SeqCst), 1);
     }
 
     async fn test_router() -> (Router, OperationService) {

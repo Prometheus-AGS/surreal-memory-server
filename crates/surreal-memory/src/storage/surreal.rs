@@ -924,6 +924,21 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
         self.live_db()
     }
 
+    /// Return a connection for the durable operation ledger.
+    ///
+    /// Server mode opens an independent transport so cancelling a ledger query
+    /// cannot strand unrelated storage work on the same WebSocket. Embedded
+    /// mode clones the in-process SDK handle because RocksDB cannot be opened a
+    /// second time at the same path.
+    pub async fn operation_ledger_connection(&self) -> Result<Surreal<Any>> {
+        match self.connection_info.config.mode {
+            SurrealMode::Embedded => self.live_db(),
+            SurrealMode::Server => {
+                Self::connect_with_attempts(&self.connection_info.config, 0).await
+            }
+        }
+    }
+
     /// Persist a fully planned and embedded logical memory under a stable key.
     ///
     /// The durable-operation coordinator derives `record_key` from its caller
