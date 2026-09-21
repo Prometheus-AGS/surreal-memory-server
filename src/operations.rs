@@ -185,7 +185,9 @@ struct DbOperationId {
     operation_id: String,
 }
 
-const LIST_NONTERMINAL_OPERATION_IDS_QUERY: &str = "SELECT operation_id FROM memory_operation WHERE state NOT IN ['committed', 'rejected'] ORDER BY operation_id ASC";
+const LIST_OPERATION_IDS_BY_STATE_QUERY: &str =
+    "SELECT operation_id FROM memory_operation WHERE state = $state ORDER BY operation_id ASC";
+const NONTERMINAL_OPERATION_STATES: [&str; 4] = ["accepted", "validated", "blocked", "processing"];
 
 #[derive(Debug, Deserialize, SurrealValue)]
 struct DbOperationReceipt {
@@ -663,16 +665,23 @@ impl OperationService {
     async fn list_nonterminal_ids(&self) -> Result<Vec<String>> {
         let connection = self.ledger_connection().await?;
         let db = connection.db.clone();
-        let rows: Vec<DbOperationId> = self
-            .await_database(
-                "reconciliation discovery",
-                connection.generation,
-                db.query(LIST_NONTERMINAL_OPERATION_IDS_QUERY),
-            )
-            .await?
-            .check()?
-            .take(0)?;
-        Ok(rows.into_iter().map(|row| row.operation_id).collect())
+        let mut operation_ids = Vec::new();
+        for state in NONTERMINAL_OPERATION_STATES {
+            let rows: Vec<DbOperationId> = self
+                .await_database(
+                    "reconciliation discovery",
+                    connection.generation,
+                    db.query(LIST_OPERATION_IDS_BY_STATE_QUERY)
+                        .bind(("state", state)),
+                )
+                .await?
+                .check()?
+                .take(0)?;
+            operation_ids.extend(rows.into_iter().map(|row| row.operation_id));
+        }
+        operation_ids.sort_unstable();
+        operation_ids.dedup();
+        Ok(operation_ids)
     }
 
     async fn events_after(&self, operation_id: &str, sequence: u64) -> Result<Vec<OperationEvent>> {
@@ -992,42 +1001,50 @@ impl OperationService {
         let mut pending = VecDeque::from(initial);
         let mut queued = pending.iter().cloned().collect::<HashSet<_>>();
         let mut retried = HashSet::new();
+        let mut rescan_after_wave = false;
 
-        while let Some(operation_id) = pending.pop_front() {
-            queued.remove(&operation_id);
-            if let Err(error) = self.process_pending(&operation_id).await {
-                if is_recovered_ledger_deadline(&error)
-                    && retried.insert(operation_id.clone())
-                    && queued.insert(operation_id.clone())
-                {
-                    tracing::warn!(%operation_id, "retrying stale-ledger interruption once");
-                    pending.push_back(operation_id);
+        loop {
+            while let Some(operation_id) = pending.pop_front() {
+                queued.remove(&operation_id);
+                if let Err(error) = self.process_pending(&operation_id).await {
+                    if is_recovered_ledger_deadline(&error)
+                        && retried.insert(operation_id.clone())
+                        && queued.insert(operation_id.clone())
+                    {
+                        tracing::warn!(%operation_id, "retrying stale-ledger interruption once");
+                        pending.push_back(operation_id);
+                        continue;
+                    }
+                    tracing::error!(%operation_id, %error, "operation processing paused");
+                    self.record_processing_error(&operation_id, &error).await;
                     continue;
                 }
-                tracing::error!(%operation_id, %error, "operation processing paused");
-                self.record_processing_error(&operation_id, &error).await;
-                continue;
+                let committed_now = match self.get(&operation_id).await {
+                    Ok(Some(receipt)) => receipt.state == OperationState::Committed,
+                    Ok(None) => false,
+                    Err(error) => {
+                        tracing::error!(%operation_id, %error, "operation post-process read failed");
+                        false
+                    }
+                };
+                rescan_after_wave |= committed_now;
             }
-            let committed_now = match self.get(&operation_id).await {
-                Ok(Some(receipt)) => receipt.state == OperationState::Committed,
-                Ok(None) => false,
-                Err(error) => {
-                    tracing::error!(%operation_id, %error, "operation post-process read failed");
-                    false
-                }
-            };
-            if committed_now {
-                match self.list_nonterminal_ids().await {
-                    Ok(ids) => {
-                        for id in ids {
-                            if queued.insert(id.clone()) {
-                                pending.push_back(id);
-                            }
+
+            if !rescan_after_wave {
+                break;
+            }
+            rescan_after_wave = false;
+            match self.list_nonterminal_ids().await {
+                Ok(ids) => {
+                    for id in ids {
+                        if queued.insert(id.clone()) {
+                            pending.push_back(id);
                         }
                     }
-                    Err(error) => {
-                        tracing::error!(%error, "dependent operation reconciliation failed")
-                    }
+                }
+                Err(error) => {
+                    tracing::error!(%error, "dependent operation reconciliation failed");
+                    break;
                 }
             }
         }
@@ -2598,7 +2615,8 @@ mod tests {
         let rows: Vec<Value> = storage
             .db()
             .unwrap()
-            .query(LIST_NONTERMINAL_OPERATION_IDS_QUERY)
+            .query(LIST_OPERATION_IDS_BY_STATE_QUERY)
+            .bind(("state", "blocked"))
             .await
             .unwrap()
             .check()

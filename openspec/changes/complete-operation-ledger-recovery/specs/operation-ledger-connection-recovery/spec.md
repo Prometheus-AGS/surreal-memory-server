@@ -76,3 +76,26 @@ database errors MUST NOT enter this retry path.
 - **WHEN** startup discovery returns the typed recovered stale-ledger condition
 - **THEN** discovery is attempted once on the replacement generation
 - **AND** any other startup error is reported without this retry
+
+### Requirement: Backlog discovery and dependency rescans remain bounded
+
+The operation coordinator SHALL discover nonterminal work through the indexed
+state values `accepted`, `validated`, `blocked`, and `processing`. Each state
+query SHALL have its own database deadline, and the combined identities SHALL
+be deduplicated and sorted before processing. After processing a drain wave,
+the coordinator SHALL rescan at most once when that wave committed work, so
+newly unblocked dependencies are recovered without one full-ledger query per
+commit.
+
+#### Scenario: A large terminal history shares the ledger
+
+- **WHEN** startup reconciliation runs beside many committed or rejected rows
+- **THEN** discovery queries only the four indexed nonterminal state values
+- **AND** every discovered operation identity is processed in deterministic order
+
+#### Scenario: A dependency commits during a drain wave
+
+- **WHEN** an operation was blocked earlier in the wave and its dependency later commits
+- **THEN** the coordinator performs one nonterminal rescan after the wave
+- **AND** the newly unblocked operation is processed in the next wave
+- **AND** the coordinator does not rescan the full ledger after every individual commit
