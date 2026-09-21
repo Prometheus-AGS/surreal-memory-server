@@ -4,7 +4,7 @@
 
 ## 2. Review and publication
 
-- [ ] 2.1 Pass formatting, compilation, focused tests, strict OpenSpec validation, the repository Rust format, enforcement, and inventory audit gates; record dependency and partition baseline findings; pass a fresh isolated critic review; commit, push, and merge a reviewable PR.
+- [x] 2.1 Pass formatting, compilation, focused tests, strict OpenSpec validation, the repository Rust format, enforcement, and inventory audit gates; record dependency and partition baseline findings; pass a fresh isolated critic review; commit, push, and merge a reviewable PR.
 
 ## 3. Installed runtime certification
 

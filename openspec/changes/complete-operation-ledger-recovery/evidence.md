@@ -51,6 +51,13 @@ Date: 2026-09-21
   bytes.
 - Round 2: PASS. No blocking findings.
 
+## Publication
+
+- Pull request: https://github.com/Prometheus-AGS/surreal-memory-server/pull/21
+- Source commits: `b844b8e` and `406200e`
+- Merge commit: `be198125eb27fb06adc2194037b48ed254bcbfb1`
+- PR state: MERGED at 2026-09-21T04:57:37Z.
+
 ## Deployment state
 
 The repaired source is not yet the installed binary. Deployment certification
