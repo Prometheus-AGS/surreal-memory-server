@@ -176,6 +176,13 @@ struct DbOperation {
     updated_at: Datetime,
 }
 
+#[derive(Debug, Deserialize, SurrealValue)]
+struct DbOperationId {
+    operation_id: String,
+}
+
+const LIST_NONTERMINAL_OPERATION_IDS_QUERY: &str = "SELECT operation_id FROM memory_operation WHERE state NOT IN ['committed', 'rejected'] ORDER BY operation_id ASC";
+
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbOperationEvent {
     #[serde(default)]
@@ -435,8 +442,8 @@ impl OperationService {
 
     async fn list_nonterminal_ids(&self) -> Result<Vec<String>> {
         let db = self.surreal()?.db()?;
-        let rows: Vec<DbOperation> = db
-            .query("SELECT * FROM memory_operation WHERE state NOT IN ['committed', 'rejected'] ORDER BY operation_id ASC")
+        let rows: Vec<DbOperationId> = db
+            .query(LIST_NONTERMINAL_OPERATION_IDS_QUERY)
             .await?
             .check()?
             .take(0)?;
@@ -1979,6 +1986,57 @@ mod tests {
         }
 
         assert_eq!(service.reconcile_nonterminal().await.unwrap(), 12);
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_query_projects_only_operation_identity() {
+        let embedder: Arc<dyn EmbeddingService> = Arc::new(NoOpEmbedder);
+        let storage = Arc::new(
+            SurrealStorage::new_mem(Arc::clone(&embedder))
+                .await
+                .expect("in-memory SurrealStorage"),
+        );
+        let service = OperationService::start_with_capacities(
+            Arc::clone(&storage) as Arc<dyn MemoryStorage>,
+            embedder,
+            4,
+            16,
+        );
+        let sentinel = "payload-must-not-enter-reconciliation-list";
+        let payload = json!({
+            "name": "projected-reconciliation",
+            "description": sentinel.repeat(16_384),
+            "agent_id": null,
+            "user_id": "test"
+        });
+        service
+            .submit(OperationRequest {
+                operation_id: "projected-reconciliation".to_owned(),
+                schema_version: OPERATION_SCHEMA_VERSION,
+                kind: "create_task_stream".to_owned(),
+                dependencies: vec!["missing-prerequisite".to_owned()],
+                payload_hash: payload_hash(&payload).unwrap(),
+                payload,
+            })
+            .await
+            .unwrap();
+
+        let rows: Vec<Value> = storage
+            .db()
+            .unwrap()
+            .query(LIST_NONTERMINAL_OPERATION_IDS_QUERY)
+            .await
+            .unwrap()
+            .check()
+            .unwrap()
+            .take(0)
+            .unwrap();
+        let row = rows
+            .iter()
+            .find(|row| row["operation_id"] == "projected-reconciliation")
+            .expect("nonterminal operation identity is projected");
+        assert_eq!(row.as_object().unwrap().len(), 1);
+        assert!(!serde_json::to_string(&rows).unwrap().contains(sentinel));
     }
 
     #[tokio::test]
