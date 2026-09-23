@@ -12,7 +12,6 @@ use surreal_memory_server::{
 };
 use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
-use surrealdb::opt::auth::Root;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -351,6 +350,8 @@ fn load_surreal_config_without_embeddings() -> Result<surreal_memory::SurrealCon
     };
 
     Ok(surreal_memory::SurrealConfig {
+        auth_level: std::env::var("SURREAL_AUTH_LEVEL")
+            .unwrap_or_else(|_| "root".to_string()).parse()?,
         mode,
         endpoint: std::env::var("SURREAL_ENDPOINT").ok(),
         embedded_path: std::env::var("SURREAL_PATH")
@@ -384,14 +385,7 @@ async fn connect_surreal_for_repair(
         }
     };
 
-    if let (Some(username), Some(password)) = (&config.username, &config.password) {
-        db.signin(Root {
-            username: username.clone(),
-            password: password.clone(),
-        })
-        .await
-        .context("Failed to sign in to SurrealDB")?;
-    }
+    config.authenticate(&db).await?;
 
     db.use_ns(&config.namespace)
         .use_db(&config.database)

@@ -20,7 +20,6 @@ use serde::{Serialize, de::DeserializeOwned};
 use std::{cmp::Ordering, sync::Arc};
 use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
-use surrealdb::opt::auth::Root;
 use surrealdb::types::{Datetime, RecordId, RecordIdKey};
 use surrealdb_types::{SurrealValue, Value};
 use uuid::Uuid;
@@ -619,6 +618,7 @@ pub enum SurrealMode {
 
 #[derive(Debug, Clone)]
 pub struct SurrealConfig {
+    pub auth_level: super::auth::SurrealAuthLevel,
     pub mode: SurrealMode,
     pub endpoint: Option<String>,
     pub embedded_path: Option<String>,
@@ -632,6 +632,7 @@ pub struct SurrealConfig {
 impl Default for SurrealConfig {
     fn default() -> Self {
         Self {
+            auth_level: super::auth::SurrealAuthLevel::Root,
             mode: SurrealMode::Embedded,
             endpoint: None,
             embedded_path: None,
@@ -743,14 +744,7 @@ impl SurrealStorage {
             }
         };
 
-        if let (Some(username), Some(password)) = (&config.username, &config.password) {
-            db.signin(Root {
-                username: username.clone(),
-                password: password.clone(),
-            })
-            .await
-            .context("Failed to sign in to SurrealDB")?;
-        }
+        config.authenticate(&db).await?;
 
         db.use_ns(&config.namespace)
             .use_db(&config.database)
@@ -3341,6 +3335,7 @@ impl SurrealStorage {
         let path = dir.display().to_string();
 
         let config = SurrealConfig {
+            auth_level: Default::default(),
             mode: SurrealMode::Embedded,
             embedded_path: Some(path),
             namespace: "test".to_string(),
@@ -3699,6 +3694,7 @@ mod retry_tests {
     async fn test_connect_with_retry_succeeds_after_transient_failure() {
         // Test that the static connect_with_retry function has correct signature.
         let config = SurrealConfig {
+            auth_level: Default::default(),
             mode: SurrealMode::Embedded,
             embedded_path: Some("/tmp/test-retry".to_string()),
             ..Default::default()
@@ -3916,6 +3912,7 @@ mod retry_tests {
         }
 
         let config = SurrealConfig {
+            auth_level: Default::default(),
             mode: SurrealMode::Embedded,
             embedded_path: Some("/tmp/test".to_string()),
             endpoint: None,

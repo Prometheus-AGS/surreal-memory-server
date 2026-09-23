@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use std::any::Any;
 
 pub mod migrations;
+pub mod auth;
 pub mod surreal;
 
 use crate::entity::{Entity, KnowledgeGraph, Relation, SemanticSearchResult};

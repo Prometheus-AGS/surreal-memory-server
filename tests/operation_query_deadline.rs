@@ -83,6 +83,7 @@ async fn concurrent_receipt_timeouts_leave_the_same_coordinator_able_to_commit_l
     let storage = Arc::new(
         SurrealStorage::new(
             &SurrealConfig {
+                auth_level: Default::default(),
                 mode: SurrealMode::Server,
                 endpoint: Some(endpoint),
                 embedded_path: None,
@@ -253,6 +254,7 @@ async fn startup_reconciliation_processes_a_dependency_in_a_later_drain_wave() {
     let storage = Arc::new(
         SurrealStorage::new(
             &SurrealConfig {
+                auth_level: Default::default(),
                 mode: SurrealMode::Server,
                 endpoint: Some(endpoint),
                 embedded_path: None,

@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1.4
 # ── Stage 1: Build ─────────────────────────────────────────────────────────────
-FROM rust:1.93-slim AS builder
+FROM rust:1.97.1-slim AS builder
 
-ARG CARGO_BUILD_FLAGS="--no-default-features --features server-only,palace"
+ARG CARGO_BUILD_FLAGS="--no-default-features --features server-only,palace,local-embeddings"
 ARG PREBUILD_DEPS="1"
 
 RUN apt-get update && apt-get install -y \
@@ -34,7 +34,7 @@ RUN if [ "${PREBUILD_DEPS}" = "1" ]; then \
 # Now copy and build the real source
 COPY . .
 RUN touch src/main.rs crates/surreal-memory/src/lib.rs \
-    && cargo build --release --bin surreal-memory-server ${CARGO_BUILD_FLAGS}
+    && cargo build --release --locked --bin surreal-memory-server ${CARGO_BUILD_FLAGS}
 
 # ── Stage 2: Runtime ───────────────────────────────────────────────────────────
 FROM debian:trixie-slim AS runtime

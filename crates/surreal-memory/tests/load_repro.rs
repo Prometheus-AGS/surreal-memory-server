@@ -59,6 +59,7 @@ async fn server_storage(namespace: String) -> Arc<SurrealStorage> {
     let endpoint = std::env::var("TEST_SURREAL_ENDPOINT")
         .unwrap_or_else(|_| "ws://127.0.0.1:28000".to_string());
     let config = SurrealConfig {
+        auth_level: Default::default(),
         mode: SurrealMode::Server,
         endpoint: Some(endpoint),
         embedded_path: None,
@@ -82,6 +83,7 @@ async fn server_storage(namespace: String) -> Arc<SurrealStorage> {
 async fn embedded_storage(path: String) -> Arc<SurrealStorage> {
     let embedder: Arc<dyn surreal_memory::embeddings::EmbeddingService> = Arc::new(NoOpEmbedder);
     let config = SurrealConfig {
+        auth_level: Default::default(),
         mode: SurrealMode::Embedded,
         endpoint: None,
         embedded_path: Some(path),
