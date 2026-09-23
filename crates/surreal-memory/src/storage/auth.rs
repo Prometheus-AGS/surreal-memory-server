@@ -6,7 +6,8 @@ use surrealdb::{Surreal, engine::any::Any, opt::auth::{Database, Namespace, Root
 use super::surreal::SurrealConfig;
 
 /// Root remains the compatibility default for existing library consumers.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SurrealAuthLevel {
     #[default]
     Root,

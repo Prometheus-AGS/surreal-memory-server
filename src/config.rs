@@ -23,6 +23,7 @@ impl LocalEmbeddingBackend {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
+    #[serde(default)]
     pub surreal_auth_level: surreal_memory::SurrealAuthLevel,
     pub surreal_mode: SurrealMode,
     pub surreal_endpoint: Option<String>,
