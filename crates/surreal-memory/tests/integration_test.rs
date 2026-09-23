@@ -51,6 +51,7 @@ async fn make_server_storage() -> Arc<SurrealStorage> {
 async fn make_server_storage_with_namespace(namespace: String) -> Arc<SurrealStorage> {
     let embedder: Arc<dyn surreal_memory::embeddings::EmbeddingService> = Arc::new(NoOpEmbedder);
     let config = SurrealConfig {
+        auth_level: Default::default(),
         mode: SurrealMode::Server,
         endpoint: Some(
             std::env::var("TEST_SURREAL_ENDPOINT")
@@ -1659,6 +1660,7 @@ async fn test_operation_survives_transient_failure() {
     };
 
     let config = SurrealConfig {
+        auth_level: Default::default(),
         mode: SurrealMode::Embedded,
         embedded_path: Some(test_dir.display().to_string()),
         namespace: "test".to_string(),

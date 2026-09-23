@@ -23,6 +23,7 @@ impl LocalEmbeddingBackend {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
+    pub surreal_auth_level: surreal_memory::SurrealAuthLevel,
     pub surreal_mode: SurrealMode,
     pub surreal_endpoint: Option<String>,
     pub surreal_namespace: String,
@@ -90,6 +91,8 @@ impl Config {
         };
 
         let config = Config {
+            surreal_auth_level: env::var("SURREAL_AUTH_LEVEL")
+                .unwrap_or_else(|_| "root".to_string()).parse()?,
             surreal_mode,
             surreal_endpoint: env::var("SURREAL_ENDPOINT").ok(),
             surreal_namespace: env::var("SURREAL_NAMESPACE")

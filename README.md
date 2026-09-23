@@ -51,3 +51,12 @@ The native service is the canonical local deployment. Configure the SurrealDB en
 ## Recovery contract
 
 Do not infer success from HTTP timeouts, process lifetime, elapsed time, or attempt counts. Preserve the original operation ID and payload hash, retrieve the receipt, resume events after the last processed sequence, and allow persisted plans to continue after restart.
+
+### Scoped database authentication
+
+Set `SURREAL_AUTH_LEVEL=namespace` to authenticate the server with a namespace user,
+or `database` for a database user. `SURREAL_NAMESPACE` and `SURREAL_DATABASE` select
+the scope. The default remains `root` for existing deployments. The library exposes
+`SurrealConfig.auth_level` and `SurrealAuthLevel`; normal startup, reconnects and
+repair commands share the same authentication path. The Boss uses a dedicated
+namespace user for memory, separate from Compass.

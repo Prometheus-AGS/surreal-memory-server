@@ -31,6 +31,7 @@ pub async fn create_storage(
     retry_config: RetryConfig,
 ) -> Result<Arc<dyn MemoryStorage>> {
     let surreal_config = SurrealConfig {
+        auth_level: config.surreal_auth_level,
         mode: match config.surreal_mode {
             ServerMode::Embedded => SurrealMode::Embedded,
             ServerMode::Server => SurrealMode::Server,

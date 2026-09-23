@@ -407,12 +407,21 @@ When told to "commit and push", do `git add -A && git commit -m "..." && git pus
 
 **Failure mode this prevents:** Spinning in verification loops instead of executing a simple command. This wasted 4+ turns.
 
-### 3. One Build Verification, Then Move On
-Run `cargo check` or `cargo build` exactly ONCE after making changes. If it succeeds, proceed. Do not:
-- Run it again "to be sure"
-- Wait for process output that already showed success
-- Kill and restart builds because you couldn't read the output
-- Run clippy separately if the build already passed
+### 3. Phase-Gated Integration Verification
+After a meaningful set of production functionality is complete at a change or phase
+boundary, run one consolidated integration batch at the smallest scope that exercises
+the real production path. A package-scoped compiler check before that boundary is
+allowed only when it is required to unblock implementation. Unit, module-local,
+mock-only, and filtered function tests do not count as completion evidence. If
+validation succeeds, proceed. Do not:
+
+- rerun it "to be sure";
+- wait again for output that already showed success;
+- kill and restart a build because its completed output was missed;
+- run broader checks until the applicable major or final boundary.
+
+After a failure, read all diagnostics, batch the fixes, and rerun only the smallest
+command that confirms them.
 
 **Failure mode this prevents:** Timeout/retry spirals with Desktop Commander process tools.
 
@@ -446,3 +455,23 @@ UAR pins this library by git rev:
 surreal-memory = { git = "https://github.com/Prometheus-AGS/surreal-memory-server", rev = "COMMIT_SHA", ... }
 ```
 After pushing changes here, you MUST update the rev in UAR's Cargo.toml and run `cargo update -p surreal-memory` to refresh Cargo.lock.
+
+## Rust development
+
+For Rust code, Cargo workspaces, manifests, compiler diagnostics, or Rust
+architecture, load `prometheus-rust-workspace` first. It uses `rust-router`
+to select the minimum relevant installed skills; its on-demand catalog includes
+the language-mechanics, codebase-analysis, unsafe-Rust, and domain skills.
+
+Always use `rust-best-practices` for general implementation and review. Add
+`rust-async-patterns` for Tokio, concurrency, or cancellation work, and
+`rust-mcp-server-generator` for Rust MCP server or transport work. Repository
+dependency pins and protocol contracts override generator examples.
+
+Skill activation does not authorize immediate Cargo execution. Finish a meaningful
+set of production functionality, then run one serialized validation batch at the
+completed change or phase boundary. Start with the smallest integration target that
+exercises the real production path and collaborators. Unit, module-local, mock-only,
+and filtered function tests do not count as completion evidence. Defer broader,
+specialized, release, and feature-matrix checks until the applicable final boundary.
+Read the skill's phase-gated verification reference before the first Cargo command.
