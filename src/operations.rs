@@ -2611,6 +2611,16 @@ mod tests {
             })
             .await
             .unwrap();
+        // `submit` only records `accepted` and wakes the executor; the
+        // dependency check that moves the operation to `blocked` runs
+        // asynchronously, so wait for it before reading the projection.
+        wait_for_service_state(
+            &service,
+            "projected-reconciliation",
+            OperationState::Blocked,
+            false,
+        )
+        .await;
 
         let rows: Vec<Value> = storage
             .db()
