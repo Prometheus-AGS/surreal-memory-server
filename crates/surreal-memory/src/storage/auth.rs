@@ -1,7 +1,11 @@
 //! Explicit authentication scope for shared SurrealDB servers.
 use anyhow::{Context, Result};
 use std::str::FromStr;
-use surrealdb::{Surreal, engine::any::Any, opt::auth::{Database, Namespace, Root}};
+use surrealdb::{
+    Surreal,
+    engine::any::Any,
+    opt::auth::{Database, Namespace, Root},
+};
 
 use super::surreal::SurrealConfig;
 
@@ -38,13 +42,25 @@ impl SurrealConfig {
         let password = password.clone();
         match self.auth_level {
             SurrealAuthLevel::Root => db.signin(Root { username, password }).await,
-            SurrealAuthLevel::Namespace => db.signin(Namespace {
-                namespace: self.namespace.clone(), username, password,
-            }).await,
-            SurrealAuthLevel::Database => db.signin(Database {
-                namespace: self.namespace.clone(), database: self.database.clone(), username, password,
-            }).await,
-        }.context("Failed to sign in to SurrealDB at the configured authentication scope")?;
+            SurrealAuthLevel::Namespace => {
+                db.signin(Namespace {
+                    namespace: self.namespace.clone(),
+                    username,
+                    password,
+                })
+                .await
+            }
+            SurrealAuthLevel::Database => {
+                db.signin(Database {
+                    namespace: self.namespace.clone(),
+                    database: self.database.clone(),
+                    username,
+                    password,
+                })
+                .await
+            }
+        }
+        .context("Failed to sign in to SurrealDB at the configured authentication scope")?;
         Ok(())
     }
 }

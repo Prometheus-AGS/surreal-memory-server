@@ -351,7 +351,8 @@ fn load_surreal_config_without_embeddings() -> Result<surreal_memory::SurrealCon
 
     Ok(surreal_memory::SurrealConfig {
         auth_level: std::env::var("SURREAL_AUTH_LEVEL")
-            .unwrap_or_else(|_| "root".to_string()).parse()?,
+            .unwrap_or_else(|_| "root".to_string())
+            .parse()?,
         mode,
         endpoint: std::env::var("SURREAL_ENDPOINT").ok(),
         embedded_path: std::env::var("SURREAL_PATH")
