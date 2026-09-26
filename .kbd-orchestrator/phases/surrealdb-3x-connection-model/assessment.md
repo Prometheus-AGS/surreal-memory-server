@@ -46,9 +46,24 @@ short-lived, each short one doing `attach`/`signin`/`use`. So the socket is
 torn down ~23 times per run and re-established. The server logs each `/rpc`
 request as finished normally with no error at debug level, so the teardown is
 observed client-side. Read-only and write-only workloads at ×64 never reset.
-Cause unknown; candidates to test, not assume: SDK WebSocket
-limits (frame/message size, pending-request or channel capacity), client-side
-ping/timeout handling, or something in the mixed interleaving itself.
+**Root cause (found in c2, 2026-09-26).** A debug-profile harness run with
+`LOAD_REPRO_TRACE=surrealdb::engine::remote::ws=trace` (the SDK compiles
+`trace!` out of release builds via `release_max_level_debug`) showed 19
+`Reconnecting...` events, every one immediately after
+`Space limit exceeded: Message too long: ~67,875,016 > 67108864`. A single
+query response exceeded the SDK's 64 MiB WebSocket message limit; the router
+treats the read error as a dead socket, fails every in-flight request with
+`Connection reset` and reconnects.
+
+The oversized response comes from `search_memories`: it calls
+`get_all_memories(scope)` and ranks every in-scope memory by cosine in Rust,
+so the HNSW index is never used and every call transfers the whole scoped
+table with full embeddings. `hybrid_search_memories` (vector branch) and
+`add_memory` (0.92 dedup) both call it, so every search and every insert pulls
+the table. At 1536 dimensions the response crosses 64 MiB near ~5,000
+memories, which the harness reaches only in its mixed phase. The live
+`memory/mcp` database (3,281 memories at 384 dimensions, ~13 MB per call) is
+on the same curve.
 
 ### E3 — Only one call site uses the retry path (open, c3)
 
