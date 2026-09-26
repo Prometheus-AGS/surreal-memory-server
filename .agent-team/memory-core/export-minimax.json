@@ -1,0 +1,5 @@
+{
+  "state": ".agent-team/memory-core/state.json",
+  "target": "minimax",
+  "out": ".agent-team/memory-core/exports/minimax"
+}

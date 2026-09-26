@@ -1,0 +1,53 @@
+{
+  "target": "codex",
+  "verification": {
+    "level": "source-verified",
+    "source": "https://learn.chatgpt.com/docs/agent-configuration/subagents",
+    "version": "documentation inspected 2026-09-24",
+    "live": "unverified"
+  },
+  "diagnostics": [
+    "Source-verified serialization only; installed native validation and live execution are unverified.",
+    "Only explicit model IDs are translated. Resolve tier, skill, capability and price policies with agent-team-models before native invocation.",
+    "Standalone agent files are supported. A Codex plugin agents manifest field is not verified; no such field is emitted.",
+    "Role overrides are preserved without native schema certification. Skill IDs refer to separately installed skills; prompt mentions do not install or authorize them."
+  ],
+  "instructions": [
+    "Review staged artifacts before installation. Export grants no execution or registration authority.",
+    "Review and merge .codex/agents and optional .codex/config.toml into the project; config values are native Codex options."
+  ],
+  "files": [
+    {
+      "file": ".codex/agents/memory-lead.toml",
+      "sha256": "37780abbfddde81d1a41d6180a6bd9181468009264a6809d0775710b977335cb"
+    },
+    {
+      "file": ".codex/agents/memory-product.toml",
+      "sha256": "434c619c9a59ba3136f972e25aed16b729416de29b20b8adca14a7e9205f6ed3"
+    },
+    {
+      "file": ".codex/agents/memory-runtime.toml",
+      "sha256": "67cb7f3fc5a11287a5694c6cb1e21838243c03bf05994d7a00b81baed3568511"
+    },
+    {
+      "file": ".codex/agents/memory-storage.toml",
+      "sha256": "e30b2b2ee61d125011e6f277924708e1a8ce0b42394fa283e8f0dd76fdd8fd99"
+    },
+    {
+      "file": ".codex/agents/memory-retrieval.toml",
+      "sha256": "6dceab92a6428a34a2da91dfd5e4a2b739180e1392dcd1dd8532d4d6cd13c8d3"
+    },
+    {
+      "file": ".codex/agents/memory-transports.toml",
+      "sha256": "171ef8fcb46c9ccf2ee878f45ff607200c5cc3328d3a39b5be7dd6b941622f63"
+    },
+    {
+      "file": ".codex/agents/memory-verifier.toml",
+      "sha256": "0b7772ca817bff9d73eea1cd081c30899a838e739433aae3b296cd1111bb556b"
+    },
+    {
+      "file": "export-receipt.json",
+      "sha256": "90594a1ccc7c4daa560e17b81394c354337e7489181ea09601542f7adf7c34f6"
+    }
+  ]
+}

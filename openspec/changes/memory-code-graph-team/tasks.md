@@ -1,0 +1,8 @@
+- [x] Research repository boundaries, current revision and pre-existing changes.
+- [x] Build scoped Compass graph and verify coverage, quality and representative calls.
+- [x] Configure and exercise the exact project-local MCP server command.
+- [x] Research and audit relevant skills and cross-project handoffs.
+- [x] Create and export memory-core for Codex, Claude Code, Kimi Code, OpenCode and MiniMax.
+- [x] Update project agent instructions and verify configuration and preservation.
+- [x] Complete independent adversarial review and sycophancy screening; record limitations.
+- [x] Apply the user-authorized Claude discovery clarification in both skill-pack authoring worktrees and the local creator copy; validate both packs.

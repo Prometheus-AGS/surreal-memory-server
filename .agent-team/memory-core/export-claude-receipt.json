@@ -1,0 +1,39 @@
+{
+  "directory": "/Users/gqadonis/Projects/prometheus/surreal-memory-server/.agent-team/memory-core/exports/claude",
+  "files": [
+    ".claude/agents/memory-lead.md",
+    "plugins/memory-core/agents/memory-lead.md",
+    ".claude/agents/memory-product.md",
+    "plugins/memory-core/agents/memory-product.md",
+    ".claude/agents/memory-runtime.md",
+    "plugins/memory-core/agents/memory-runtime.md",
+    ".claude/agents/memory-storage.md",
+    "plugins/memory-core/agents/memory-storage.md",
+    ".claude/agents/memory-retrieval.md",
+    "plugins/memory-core/agents/memory-retrieval.md",
+    ".claude/agents/memory-transports.md",
+    "plugins/memory-core/agents/memory-transports.md",
+    ".claude/agents/memory-verifier.md",
+    "plugins/memory-core/agents/memory-verifier.md",
+    "plugins/memory-core/.claude-plugin/plugin.json",
+    ".claude-plugin/marketplace.json",
+    "export-receipt.json",
+    "team-export.json"
+  ],
+  "verification": {
+    "level": "source-verified",
+    "source": "https://code.claude.com/docs/en/sub-agents",
+    "version": "documentation inspected 2026-09-24",
+    "live": "unverified"
+  },
+  "diagnostics": [
+    "Source-verified serialization only; installed native validation and live execution are unverified.",
+    "Only explicit model IDs are translated. Resolve tier, skill, capability and price policies with agent-team-models before native invocation.",
+    "These are native subagents; installing them does not create an experimental Claude agent team or enable that feature.",
+    "Role overrides are preserved without native schema certification. Skill IDs refer to separately installed skills; prompt mentions do not install or authorize them."
+  ],
+  "instructions": [
+    "Review staged artifacts before installation. Export grants no execution or registration authority.",
+    "Choose project .claude/agents or the staged local marketplace/plugin. Do not install both copies. Settings options are a proposed project .claude/settings.json."
+  ]
+}

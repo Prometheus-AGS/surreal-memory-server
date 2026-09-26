@@ -48,3 +48,8 @@ Cargo.lock.bak
 website/node_modules/
 website/build/
 website/.docusaurus/
+
+# Project-local source graph and caches
+/compass-out/
+/.compass/cache/
+/.compass/*.log

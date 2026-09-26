@@ -1,0 +1,13 @@
+{
+  "name": "memory-core-marketplace",
+  "owner": {
+    "name": "memory-core"
+  },
+  "plugins": [
+    {
+      "name": "memory-core",
+      "source": "./plugins/memory-core",
+      "description": "Develop and maintain the embeddable memory library and durable REST/MCP service with evidence-backed compatibility, storage, retrieval and operational correctness."
+    }
+  ]
+}

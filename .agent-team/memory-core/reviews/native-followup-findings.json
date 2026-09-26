@@ -1,0 +1,26 @@
+{
+  "mode": "artifact",
+  "target": "plan",
+  "verdict": "PASS",
+  "isolation_mode": "harness-native",
+  "producer_model": "GPT-6",
+  "judge_model": "GPT-6",
+  "cross_model_check": "same-family-fallback",
+  "isolation_limit": "Same-family reviewer context provides weaker isolation; different-family independence is not verified.",
+  "reviewed_packet": ".agent-team/memory-core/reviews/final-packet.json",
+  "scope": "Follow-up review of claudeCorrection, authorizedScopeUpdate, corrected Claude receipt and corresponding changed skill hashes. The original findings receipt remains unchanged.",
+  "findings": [],
+  "checked_classes": [
+    "Session listing versus custom-role discovery: claudeCorrection states that claude agents --json lists running sessions with PID, working directory and status, not .claude/agents definitions; it explicitly rejects absent roles as exporter-failure evidence.",
+    "Unsupported replacement command: claudeCorrection requests the installed version's documented discovery surface without inventing a subcommand. If unavailable, it directs source/frontmatter checks and source/syntax-only reporting rather than inference merely to list roles.",
+    "Discovery versus successful invocation: the correction explicitly requires those claims to be distinguished and states that neither a session listing nor --version validates exported roles. verification.nativeDiscovery.claude now records source-and-syntax-only and rejects the session listing as discovery evidence.",
+    "File watching versus discovery evidence: the correction attributes file-watching and its restart conditions to linked subagent documentation, separately identifies agent view as session monitoring, and does not claim watching proves this installation discovered or invoked a role.",
+    "Scope conflict: authorizedScopeUpdate explicitly records subsequent user authorization for correcting SKILL.md and references/native-harnesses.md in the full and mini authoring worktrees and synchronizing the local copy. That bounded authorization explains the exception to the initial repository-only scope; it does not authorize application or peer implementation changes.",
+    "Receipt and provenance drift: comparison with packet.json shows the Claude discovery receipt replaced by the restricted support claim and changed local skill hashes only for .agents/skills/agent-team-creator/SKILL.md and its references/native-harnesses.md. The unchanged role/artifact bodies do not acquire new execution claims from this correction."
+  ],
+  "limits": [
+    "This follow-up judges supplied artifact text and receipts; it does not independently verify the external documentation or inspect authoring-worktree diffs.",
+    "No native discovery command, file-watching experiment, custom-role invocation or model inference was run by this reviewer.",
+    "The final packet supplies a correction excerpt and updated provenance hashes, not the complete changed skill bodies; this verdict covers the supplied supplement."
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "target": "kimi",
+  "verification": {
+    "level": "source-verified",
+    "source": "https://github.com/MoonshotAI/kimi-code/blob/main/docs/en/customization/agents.md",
+    "version": "main documentation inspected 2026-09-24",
+    "live": "unverified"
+  },
+  "nativeProvenance": null,
+  "nativeOptions": null,
+  "roleOverrides": {
+    "memory-lead": {},
+    "memory-product": {},
+    "memory-runtime": {},
+    "memory-storage": {},
+    "memory-retrieval": {},
+    "memory-transports": {},
+    "memory-verifier": {}
+  },
+  "diagnostics": [
+    "Source-verified serialization only; installed native validation and live execution are unverified.",
+    "Only explicit model IDs are translated. Resolve tier, skill, capability and price policies with agent-team-models before native invocation.",
+    "Role overrides are preserved without native schema certification. Skill IDs refer to separately installed skills; prompt mentions do not install or authorize them."
+  ],
+  "instructions": [
+    "Review staged artifacts before installation. Export grants no execution or registration authority.",
+    "Choose project .kimi-code/agents or the staged Kimi v2 marketplace/plugin. Literal ${base_prompt} in supplied prompts remains unchanged."
+  ]
+}

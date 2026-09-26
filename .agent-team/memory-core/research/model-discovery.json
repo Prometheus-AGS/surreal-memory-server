@@ -1,0 +1,209 @@
+{
+  "schemaVersion": 1,
+  "models": [
+    {
+      "id": "MiniMax-M3",
+      "provider": null,
+      "catalogId": null,
+      "available": true,
+      "tier": null,
+      "capabilities": {},
+      "pricing": {
+        "inputPerMillion": null,
+        "outputPerMillion": null,
+        "currency": "USD",
+        "basis": "maximum-known-context-tier",
+        "sourceUnit": "per-token"
+      },
+      "provenance": {
+        "discovery": {
+          "kind": "openai",
+          "url": "http://localhost:4000/v1/models",
+          "fetchedAt": "2026-09-25T00:16:23.936Z",
+          "httpStatus": 200
+        },
+        "catalog": null,
+        "availabilityBasis": "configured-discovery-response",
+        "metadataBasis": "identifier-only"
+      },
+      "freshness": {
+        "fetchedAt": "2026-09-25T00:16:23.936Z",
+        "ageDays": 0,
+        "stale": null
+      }
+    },
+    {
+      "id": "gpt-5.4",
+      "provider": null,
+      "catalogId": null,
+      "available": true,
+      "tier": null,
+      "capabilities": {},
+      "pricing": {
+        "inputPerMillion": null,
+        "outputPerMillion": null,
+        "currency": "USD",
+        "basis": "maximum-known-context-tier",
+        "sourceUnit": "per-token"
+      },
+      "provenance": {
+        "discovery": {
+          "kind": "openai",
+          "url": "http://localhost:4000/v1/models",
+          "fetchedAt": "2026-09-25T00:16:23.936Z",
+          "httpStatus": 200
+        },
+        "catalog": null,
+        "availabilityBasis": "configured-discovery-response",
+        "metadataBasis": "identifier-only"
+      },
+      "freshness": {
+        "fetchedAt": "2026-09-25T00:16:23.936Z",
+        "ageDays": 0,
+        "stale": null
+      }
+    },
+    {
+      "id": "gpt-5.5",
+      "provider": null,
+      "catalogId": null,
+      "available": true,
+      "tier": null,
+      "capabilities": {},
+      "pricing": {
+        "inputPerMillion": null,
+        "outputPerMillion": null,
+        "currency": "USD",
+        "basis": "maximum-known-context-tier",
+        "sourceUnit": "per-token"
+      },
+      "provenance": {
+        "discovery": {
+          "kind": "openai",
+          "url": "http://localhost:4000/v1/models",
+          "fetchedAt": "2026-09-25T00:16:23.936Z",
+          "httpStatus": 200
+        },
+        "catalog": null,
+        "availabilityBasis": "configured-discovery-response",
+        "metadataBasis": "identifier-only"
+      },
+      "freshness": {
+        "fetchedAt": "2026-09-25T00:16:23.936Z",
+        "ageDays": 0,
+        "stale": null
+      }
+    },
+    {
+      "id": "k3",
+      "provider": null,
+      "catalogId": null,
+      "available": true,
+      "tier": null,
+      "capabilities": {},
+      "pricing": {
+        "inputPerMillion": null,
+        "outputPerMillion": null,
+        "currency": "USD",
+        "basis": "maximum-known-context-tier",
+        "sourceUnit": "per-token"
+      },
+      "provenance": {
+        "discovery": {
+          "kind": "openai",
+          "url": "http://localhost:4000/v1/models",
+          "fetchedAt": "2026-09-25T00:16:23.936Z",
+          "httpStatus": 200
+        },
+        "catalog": null,
+        "availabilityBasis": "configured-discovery-response",
+        "metadataBasis": "identifier-only"
+      },
+      "freshness": {
+        "fetchedAt": "2026-09-25T00:16:23.936Z",
+        "ageDays": 0,
+        "stale": null
+      }
+    },
+    {
+      "id": "k3-256k",
+      "provider": null,
+      "catalogId": null,
+      "available": true,
+      "tier": null,
+      "capabilities": {},
+      "pricing": {
+        "inputPerMillion": null,
+        "outputPerMillion": null,
+        "currency": "USD",
+        "basis": "maximum-known-context-tier",
+        "sourceUnit": "per-token"
+      },
+      "provenance": {
+        "discovery": {
+          "kind": "openai",
+          "url": "http://localhost:4000/v1/models",
+          "fetchedAt": "2026-09-25T00:16:23.936Z",
+          "httpStatus": 200
+        },
+        "catalog": null,
+        "availabilityBasis": "configured-discovery-response",
+        "metadataBasis": "identifier-only"
+      },
+      "freshness": {
+        "fetchedAt": "2026-09-25T00:16:23.936Z",
+        "ageDays": 0,
+        "stale": null
+      }
+    },
+    {
+      "id": "kimi-for-coding",
+      "provider": null,
+      "catalogId": null,
+      "available": true,
+      "tier": null,
+      "capabilities": {},
+      "pricing": {
+        "inputPerMillion": null,
+        "outputPerMillion": null,
+        "currency": "USD",
+        "basis": "maximum-known-context-tier",
+        "sourceUnit": "per-token"
+      },
+      "provenance": {
+        "discovery": {
+          "kind": "openai",
+          "url": "http://localhost:4000/v1/models",
+          "fetchedAt": "2026-09-25T00:16:23.936Z",
+          "httpStatus": 200
+        },
+        "catalog": null,
+        "availabilityBasis": "configured-discovery-response",
+        "metadataBasis": "identifier-only"
+      },
+      "freshness": {
+        "fetchedAt": "2026-09-25T00:16:23.936Z",
+        "ageDays": 0,
+        "stale": null
+      }
+    }
+  ],
+  "catalogProvenance": {
+    "source": null,
+    "sourceSha256": null,
+    "fetched": null,
+    "libraryVersion": null,
+    "adapter": "liter-llm/catalog-schema-1",
+    "sourceRevision": "c5c6caac617eb931cd5009146a70831422ec236c"
+  },
+  "catalogFreshness": {
+    "fetchedAt": null,
+    "ageDays": null,
+    "stale": null,
+    "maxAgeDays": 30
+  },
+  "diagnostics": [
+    "Discovery describes configured availability, not a successful inference.",
+    "Strength tiers are operator annotations; unspecified metadata remains unknown."
+  ]
+}

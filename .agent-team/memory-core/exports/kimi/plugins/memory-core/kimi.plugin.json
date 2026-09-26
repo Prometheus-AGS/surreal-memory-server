@@ -1,0 +1,8 @@
+{
+  "name": "memory-core",
+  "version": "1.0.0",
+  "description": "Develop and maintain the embeddable memory library and durable REST/MCP service with evidence-backed compatibility, storage, retrieval and operational correctness.",
+  "agents": [
+    "./agents"
+  ]
+}

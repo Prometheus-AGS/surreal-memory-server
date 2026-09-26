@@ -1,0 +1,53 @@
+{
+  "target": "minimax",
+  "verification": {
+    "level": "source-verified",
+    "source": "https://github.com/MiniMax-AI/minimax-code/blob/main/packages/local-runtime-v2/src/service/agent/storage/canonical-agent-config.ts",
+    "version": "@minimax-ai/code 0.4.12; source inspected 2026-09-24",
+    "live": "unverified"
+  },
+  "diagnostics": [
+    "Source-verified serialization only; installed native validation and live execution are unverified.",
+    "Only explicit model IDs are translated. Resolve tier, skill, capability and price policies with agent-team-models before native invocation.",
+    "mcode exec has no verified custom-agent selector. The MiniMax plugin manifest supports skills/MCP/hooks/apps, not an agents field; no agent plugin is invented.",
+    "Role overrides are preserved without native schema certification. Skill IDs refer to separately installed skills; prompt mentions do not install or authorize them."
+  ],
+  "instructions": [
+    "Review staged artifacts before installation. Export grants no execution or registration authority.",
+    "Install agents/<name>/agent.md under the active MiniMax user-data directory: MINIMAX_DATA_DIR, MAVIS_DATA_DIR, or default ~/.minimax. Export does not install there."
+  ],
+  "files": [
+    {
+      "file": "agents/memory-lead/agent.md",
+      "sha256": "4f9be2766d1877c2a23f31263624bee7e66820171c94e9f981075696e5a0de1c"
+    },
+    {
+      "file": "agents/memory-product/agent.md",
+      "sha256": "8be3962ee392e4c47b7ab944fad8b6af947b6dfae72981df9234f391940277a6"
+    },
+    {
+      "file": "agents/memory-runtime/agent.md",
+      "sha256": "2d874caaaef5228565bbc0691f4cd8cfce7709331c44ce110b5ed5d652a838cc"
+    },
+    {
+      "file": "agents/memory-storage/agent.md",
+      "sha256": "d8c4b594c24572751cdb169fd9c93f932dfb89695ff798fcd0f82d64ca4d8245"
+    },
+    {
+      "file": "agents/memory-retrieval/agent.md",
+      "sha256": "e43cf91c7b389b3ade5356e21f76d47dc8b8ace4849a7aab3228e68e44660238"
+    },
+    {
+      "file": "agents/memory-transports/agent.md",
+      "sha256": "64607ce7fbd31f8ae386b0a2d03461b6dd20907fb788796eb333eaf4bcdc8c30"
+    },
+    {
+      "file": "agents/memory-verifier/agent.md",
+      "sha256": "403b5cb1c8eead8d65830ab2eaf714969cb61d4c1b176518df044e347caac615"
+    },
+    {
+      "file": "export-receipt.json",
+      "sha256": "dc8bbecfc1a9ab6afeba5858cf045e5b0ab5f21a73e4a9a747c14f386a2ff549"
+    }
+  ]
+}

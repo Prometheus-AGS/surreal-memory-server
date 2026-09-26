@@ -1,0 +1,5 @@
+version = 1
+
+[build]
+include = ["src/**/*.rs", "crates/surreal-memory/src/**/*.rs"]
+exclude = ["src/bin/**", "**/tests/**", "**/benches/**", "**/examples/**", "**/target/**", "**/vendor/**", "**/.worktrees/**", "**/*_test.rs", "**/*_tests.rs"]

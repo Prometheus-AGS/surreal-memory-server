@@ -1,0 +1,88 @@
+{
+  "target": "kimi",
+  "verification": {
+    "level": "source-verified",
+    "source": "https://github.com/MoonshotAI/kimi-code/blob/main/docs/en/customization/agents.md",
+    "version": "main documentation inspected 2026-09-24",
+    "live": "unverified"
+  },
+  "diagnostics": [
+    "Source-verified serialization only; installed native validation and live execution are unverified.",
+    "Only explicit model IDs are translated. Resolve tier, skill, capability and price policies with agent-team-models before native invocation.",
+    "Role overrides are preserved without native schema certification. Skill IDs refer to separately installed skills; prompt mentions do not install or authorize them."
+  ],
+  "instructions": [
+    "Review staged artifacts before installation. Export grants no execution or registration authority.",
+    "Choose project .kimi-code/agents or the staged Kimi v2 marketplace/plugin. Literal ${base_prompt} in supplied prompts remains unchanged."
+  ],
+  "files": [
+    {
+      "file": ".kimi-code/agents/memory-lead.md",
+      "sha256": "fae32f0f1896d8a0650b8314052566ff6b75fc0c1bd754c25a77e3e031096d2e"
+    },
+    {
+      "file": "plugins/memory-core/agents/memory-lead.md",
+      "sha256": "fae32f0f1896d8a0650b8314052566ff6b75fc0c1bd754c25a77e3e031096d2e"
+    },
+    {
+      "file": ".kimi-code/agents/memory-product.md",
+      "sha256": "20fdd3b938da81f21023a148ef2854b5be0c12e89ff617adce1724560864f93a"
+    },
+    {
+      "file": "plugins/memory-core/agents/memory-product.md",
+      "sha256": "20fdd3b938da81f21023a148ef2854b5be0c12e89ff617adce1724560864f93a"
+    },
+    {
+      "file": ".kimi-code/agents/memory-runtime.md",
+      "sha256": "90ec07baa25127bcdf477c8acda40d10198fb2361f2dca4a65401a25f65b7528"
+    },
+    {
+      "file": "plugins/memory-core/agents/memory-runtime.md",
+      "sha256": "90ec07baa25127bcdf477c8acda40d10198fb2361f2dca4a65401a25f65b7528"
+    },
+    {
+      "file": ".kimi-code/agents/memory-storage.md",
+      "sha256": "a0434e99cf952c2f8d9fffdb7a38c69cc38dc980f3950f1237fbf6a47691cf15"
+    },
+    {
+      "file": "plugins/memory-core/agents/memory-storage.md",
+      "sha256": "a0434e99cf952c2f8d9fffdb7a38c69cc38dc980f3950f1237fbf6a47691cf15"
+    },
+    {
+      "file": ".kimi-code/agents/memory-retrieval.md",
+      "sha256": "9f2b2f4c1899a676d9c9045e866de92bfdcaea76f914eeae3493943d1b15abf9"
+    },
+    {
+      "file": "plugins/memory-core/agents/memory-retrieval.md",
+      "sha256": "9f2b2f4c1899a676d9c9045e866de92bfdcaea76f914eeae3493943d1b15abf9"
+    },
+    {
+      "file": ".kimi-code/agents/memory-transports.md",
+      "sha256": "fcb1d3e07f5412b93f2b83d745b2053a02d5ede3a34a1d8cd23f827dc1c5cd15"
+    },
+    {
+      "file": "plugins/memory-core/agents/memory-transports.md",
+      "sha256": "fcb1d3e07f5412b93f2b83d745b2053a02d5ede3a34a1d8cd23f827dc1c5cd15"
+    },
+    {
+      "file": ".kimi-code/agents/memory-verifier.md",
+      "sha256": "a60d737765ea86a38875073ba22df7545f56930df4c12a1405939e8a758c6d8c"
+    },
+    {
+      "file": "plugins/memory-core/agents/memory-verifier.md",
+      "sha256": "a60d737765ea86a38875073ba22df7545f56930df4c12a1405939e8a758c6d8c"
+    },
+    {
+      "file": "plugins/memory-core/kimi.plugin.json",
+      "sha256": "14919b7bb022102adae68b18dc8adc44e6419e7a454233d9a5ac18e0b103d24a"
+    },
+    {
+      "file": "marketplace.json",
+      "sha256": "4e2b158d8069063633a6a441b4c45a351725046e17efaae3c7a8ca7eeec08da0"
+    },
+    {
+      "file": "export-receipt.json",
+      "sha256": "96dac0e9756e2dbed0890ab375ac27d5201ead37b198cfb038af82c13efa4884"
+    }
+  ]
+}

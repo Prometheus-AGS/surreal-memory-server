@@ -1,0 +1,11 @@
+{
+  "producer": "GPT-6",
+  "judge": "MiniMax-M3",
+  "configuredGateway": "http://localhost:4000/v1",
+  "modelDiscovery": "succeeded",
+  "result": "timeout",
+  "timeoutMs": 60000,
+  "attempts": 1,
+  "verdict": null,
+  "fallback": "Fresh-context native reviewer; weaker same-family isolation"
+}
