@@ -37,7 +37,7 @@ would have appended to it.
 
 This repo has accumulated defects (e.g. the connection topology tracked in
 `.kbd-orchestrator/phases/surrealdb-connection-architecture/`) that are
-exactly the failure mode these rules prevent: wrapping a clone-safe handle
+exactly the failure mode these rules prevent: wrapping a shared SDK handle
 in a blocking lock (laziness + non-surgical), then adding retry knobs to
 mask the contention (root cause not addressed).
 
@@ -309,7 +309,7 @@ The `palace` feature flag opts into a separate vector store (`drawers` table,
 3. **HNSW index dimensions must match embeddings** — The v5 migration hardcodes `DIMENSION 1536` (memory/entity). The v16 palace migration uses `DIMENSION 384` (drawers). These are independent vector spaces — do not mix them.
 4. **`IF NOT EXISTS` is idempotent** — All DDL uses this, so migrations are safe to re-run.
 5. **Embedded mode creates RocksDB files** — Multiple processes CANNOT share the same embedded DB path simultaneously. For multi-process access, use server mode (`SURREAL_MODE=server`).
-6. **`Surreal<Any>` is already `Arc`-wrapped and clone-safe** — Do NOT wrap it in `std::sync::RwLock` / `Mutex`. Clone the handle per task; the SDK multiplexes queries internally. The current `Arc<std::sync::RwLock<ConnectionState>>` in `crates/surreal-memory/src/storage/surreal.rs:44` is a known defect being remediated (see `openspec/changes/fix-surrealdb-connection-architecture/`). Consult the `surrealdb-expert` skill before touching it.
+6. **A `Surreal<Any>` clone is a new server-side session (SDK 3.x)** — `impl Clone for Surreal<C>` calls `clone_session` (attach + replayed signin + `use`) and `Drop` detaches it. Share one connected handle instead: `SurrealStorage` holds `Arc<Surreal<Any>>` in an `ArcSwap` cell and `live_db()` hands out that `Arc` (one atomic load, no session). Do NOT wrap the handle in `std::sync::RwLock`, `tokio::sync::RwLock` or `Mutex`, and do NOT call `db.clone()` / `SurrealStorage::db()` per operation. Measured on 3.3.0: per-call clones cost ~2,700 signins per load run and 2–3 s search latency (see `.kbd-orchestrator/phases/surrealdb-3x-connection-model/`). Consult the `surrealdb-expert` skill before touching this code path.
 7. **Embedded mode is a first-class production target** — but RocksDB's stripe-locking (default 16 stripes/CF) means concurrent transactions on overlapping keys serialize at the storage engine. Any application-layer lock layered on top compounds this. The fix is (a) no application lock around `Surreal<Any>` (see Gotcha #6) and (b) bound in-flight ops with a semaphore sized to the stripe count (`SURREAL_EMBEDDED_MAX_INFLIGHT`, default 16). Do NOT frame embedded mode as "dev-only."
 
 ## Performance Considerations

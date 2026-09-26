@@ -8,11 +8,15 @@ Format: `YYYY-MM-DD — Rule — *(context: what went wrong)*`
 
 ## Connection / storage
 
-- 2026-05-24 — Do not wrap `Surreal<Any>` in `std::sync::RwLock`, `tokio::sync::RwLock`, or `Mutex`. The SDK handle is already `Arc`-wrapped and clone-safe. Clone per task. *(Context: `surreal.rs:44` wrapped the handle in a blocking lock at 47 sites, producing writer starvation, lock poisoning, and timeouts under load.)*
+- 2026-05-24 — Do not wrap `Surreal<Any>` in `std::sync::RwLock`, `tokio::sync::RwLock`, or `Mutex`. The SDK handle is already `Arc`-wrapped and clone-safe. Clone per task. **Superseded 2026-09-26 for SDK 3.x: a clone is a new server-side session; share one `Arc<Surreal<Any>>` instead (see below).** *(Context: `surreal.rs:44` wrapped the handle in a blocking lock at 47 sites, producing writer starvation, lock poisoning, and timeouts under load.)*
 - 2026-05-24 — When SurrealDB-related symptoms are load-dependent and hardware-sensitive, the cause is contention in the application's own concurrency primitives, not in SurrealDB. Look at the lock topology before tuning timeouts. *(Context: the `SURREAL_*_RETRIES` knobs were the wrong layer to fix.)*
 - 2026-05-24 — Embedded mode is a first-class production target. Its scaling story is: no application-layer lock + semaphore sized to RocksDB stripe count (16 default) + benchmark to prove it. Do not frame embedded as "dev-only." *(Context: corrected during execute planning — user confirmed embedded is a production deployment shape, not just a dev convenience.)*
 - 2026-05-24 — Pass `surrealdb::opt::Config::query_timeout(...)` at connect time. Application-level deadlines are a backstop, not the primary mechanism. *(Context: a slow server-side query head-of-line-blocked the multiplexed WebSocket for unrelated work.)*
 - 2026-05-24 — Classify retries on `surrealdb::Error` variants, not on stringified message substrings. *(Context: a "lock timeout" error was being treated as "reconnect needed", which hammered the contended path.)*
+
+- 2026-09-26 — In SDK 3.x `Surreal::clone()` opens a new server-side session (attach, replayed signin, `use`) and `Drop` detaches it. Share one connected handle through `Arc<Surreal<Any>>`; never clone it per operation. *(Context: `live_db()` cloned on every call; the server saw ~2,700 signins per load run and search p50 was 2–3 s. Sharing the handle cut signins to ~24 and search p50 to 14 ms.)*
+- 2026-09-26 — Never fetch a whole table (with embeddings) to rank in Rust. Push ranking into the index (`embedding <|K,EF|> $vec` with scope conditions in the same `WHERE`) so only K rows cross the wire. *(Context: `search_memories` pulled every in-scope memory; once a response passed the SDK's 64 MiB WebSocket message limit the SDK dropped the socket and failed all in-flight requests with `Connection reset` — ~68% of mixed-load ops.)*
+- 2026-09-26 — `Connection reset` from the 3.x SDK means its WebSocket router tore the socket down and failed every pending request; the reason is logged only at `trace`, and `surrealdb` compiles `trace!` out of release builds (`release_max_level_debug`). Diagnose with a debug-profile build and `surrealdb::engine::remote::ws=trace`.
 
 ## Refactor results
 
@@ -45,6 +49,9 @@ Format: `YYYY-MM-DD — Rule — *(context: what went wrong)*`
 - 2026-08-26 — A copied SwiftPM executable is not self-contained when a C target ships resources: install `mlx-swift_Cmlx.bundle` beside the executable and smoke-test the copied path, because the build-tree binary can hide a missing `default.metallib` deployment.
 - 2026-08-26 — Persisted executor generations span server processes, but a newly pre-warmed child starts with process-local numbering. Adopt the healthy child into the durable generation sequence; do not kill it merely because its initial number is lower, or queue recovery turns into an unnecessary cold model launch.
 - 2026-08-26 — A liveness heartbeat must run independently of the work it supervises. An async Swift `Task` heartbeat can be starved while MLX/Metal synchronously occupies a cooperative executor; use a dedicated Dispatch timer and synchronously drain it before writing the terminal protocol message.
+
+- 2026-09-26 — libtest captures `println!`/`eprintln!` of passing tests; absent output from a passing test proves nothing. Run diagnostic tests with `--nocapture`. *(Context: missing error samples were briefly misread as "zero errors".)*
+- 2026-09-26 — Another agent session may be sweeping this checkout and committing uncommitted work. Commit each change as soon as it builds, and check `git log` for foreign commits before assuming the tree is yours. Remove `.git/index.lock` only after confirming no `git` process is running. *(Context: a Codex integration sweep committed and merged in-progress storage edits via PR #26.)*
 
 ## Schema / migrations *(carried forward from CLAUDE.md operational rules)*
 

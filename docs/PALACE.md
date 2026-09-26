@@ -107,7 +107,7 @@ The palace integration is fully additive — the existing `MemoryStorage` trait 
 Key design decisions:
 - **Separate `PalaceStorage` trait** — no breaking change to `MemoryStorage`, clean opt-in for consumers
 - **`tokio::sync::OnceCell`** — lazy initialization on first palace call, zero cost when unused
-- **Shared DB connection** — `PalaceAdapter` reuses the existing `Surreal<Any>` handle (Arc-wrapped, cheap to clone)
+- **Shared DB connection** — `PalaceAdapter` reuses the existing SurrealDB connection. Note: its handle closure currently returns a `Surreal<Any>` clone, which in SDK 3.x opens a new server-side session per palace operation; tracked as c4 in `surrealdb-3x-connection-model`
 - **384-dim independent vector space** — palace drawers use `all-MiniLM-L6-v2` (384d), separate from the memory table's 1536d HNSW index
 
 ### Module Structure
