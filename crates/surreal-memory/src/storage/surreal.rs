@@ -36,9 +36,11 @@ const MINDMAP_UPDATE_TIMEOUT: &str = "30s";
 
 /// SurrealDB-backed memory storage.
 ///
-/// `Surreal<Any>` is internally `Arc`-wrapped and `Clone`-safe; the SDK
-/// multiplexes concurrent queries over a single physical connection
-/// (WebSocket in server mode, in-process for embedded). The connection
+/// One `Surreal<Any>` handle, and so one server-side session, is shared by
+/// every operation: the SDK multiplexes concurrent queries over a single
+/// physical connection (WebSocket in server mode, in-process for embedded).
+/// It is held as `Arc<Surreal<Any>>` because in SDK 3.x `Surreal::clone()`
+/// opens a new session (attach, replayed signin, `use`). The connection
 /// lifecycle (Connected/Reconnecting/Failed) is published via an atomic
 /// `ArcSwap` cell: hot-path readers do a single atomic load (no lock),
 /// reconnects do a single atomic store. This replaces the previous
