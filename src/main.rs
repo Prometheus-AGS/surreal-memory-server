@@ -123,6 +123,15 @@ async fn main() -> Result<()> {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(3001);
+    // Defaults to all interfaces so the container image keeps working; a
+    // host-local deployment sets API_HOST=127.0.0.1 to keep the unauthenticated
+    // REST/MCP surface off the network.
+    let api_host: std::net::IpAddr = match std::env::var("API_HOST") {
+        Ok(host) => host
+            .parse()
+            .with_context(|| format!("API_HOST must be an IP address, got {host:?}"))?,
+        Err(_) => std::net::IpAddr::from([0, 0, 0, 0]),
+    };
 
     // The API layer keeps a handle to the embedding service so `/health` can
     // report true readiness via `EmbeddingService::is_ready()`.
@@ -156,6 +165,7 @@ async fn main() -> Result<()> {
     let api_handle = tokio::spawn(async move {
         run_api_server(
             api_storage,
+            api_host,
             api_port,
             health_embedding,
             operation_query_timeout,
@@ -597,11 +607,12 @@ async fn warmup_embedding(service: Arc<dyn EmbeddingService>) -> Result<()> {
 
 async fn run_api_server(
     storage: Arc<dyn MemoryStorage>,
+    host: std::net::IpAddr,
     port: u16,
     embedding_service: Arc<dyn EmbeddingService>,
     operation_query_timeout: std::time::Duration,
 ) -> Result<()> {
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+    let addr = std::net::SocketAddr::new(host, port);
     tracing::info!("🌐 Starting REST API + HTTP MCP server on http://{}", addr);
     let router =
         api::build_router_with_query_timeout(storage, embedding_service, operation_query_timeout);

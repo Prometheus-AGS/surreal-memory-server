@@ -266,6 +266,7 @@ EMBEDDING_PROVIDER=openai OPENAI_API_KEY=sk-... ./target/release/surreal-memory-
 
 **Database**: `SURREAL_MODE=embedded|server`, `SURREAL_PATH`, `SURREAL_ENDPOINT`
 **Embeddings**: `EMBEDDING_PROVIDER=local|openai|cohere|fast`, `LOCAL_EMBEDDING_MODEL`, `MODEL_CACHE_DIR`
+**API**: `API_PORT` (default 3001), `API_HOST` (default `0.0.0.0` for the container image; host-local deployments such as the launch agent set `127.0.0.1`, because the REST/MCP endpoints have no authentication)
 **Features**: `embedded` (default), `server-only`, `palace`, `cuda`, `metal`, `local-embeddings`
 
 ## Migration System
