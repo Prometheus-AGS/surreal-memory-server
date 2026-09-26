@@ -339,6 +339,9 @@ pub struct OperationService {
 
 struct LedgerConnection {
     generation: u64,
+    /// Borrow this handle per call; never clone it. In SDK 3.x
+    /// `Surreal::clone()` opens a new server-side session that must replay
+    /// attach, signin and `use` before its query can run.
     db: Surreal<Any>,
 }
 
@@ -581,7 +584,7 @@ impl OperationService {
             .ledger_connection()
             .await
             .map_err(SubmitError::Storage)?;
-        let db = connection.db.clone();
+        let db = &connection.db;
         let response = self
             .await_database(
                 "submit",
@@ -637,7 +640,7 @@ impl OperationService {
 
     pub async fn get(&self, operation_id: &str) -> Result<Option<OperationReceipt>> {
         let connection = self.ledger_connection().await?;
-        let db = connection.db.clone();
+        let db = &connection.db;
         let mut rows: Vec<DbOperationReceipt> = self
             .await_database(
                 "receipt lookup",
@@ -653,7 +656,7 @@ impl OperationService {
 
     async fn get_db(&self, operation_id: &str) -> Result<Option<DbOperation>> {
         let connection = self.ledger_connection().await?;
-        let db = connection.db.clone();
+        let db = &connection.db;
         self.await_database(
             "operation lookup",
             connection.generation,
@@ -664,7 +667,7 @@ impl OperationService {
 
     async fn list_nonterminal_ids(&self) -> Result<Vec<String>> {
         let connection = self.ledger_connection().await?;
-        let db = connection.db.clone();
+        let db = &connection.db;
         let mut operation_ids = Vec::new();
         for state in NONTERMINAL_OPERATION_STATES {
             let rows: Vec<DbOperationId> = self
@@ -686,7 +689,7 @@ impl OperationService {
 
     async fn events_after(&self, operation_id: &str, sequence: u64) -> Result<Vec<OperationEvent>> {
         let connection = self.ledger_connection().await?;
-        let db = connection.db.clone();
+        let db = &connection.db;
         let rows: Vec<DbOperationEvent> = self
             .await_database(
                 "event history lookup",
@@ -731,7 +734,7 @@ impl OperationService {
         };
         let event_key = format!("{}-{sequence:016}", record_key(operation_id));
         let connection = self.ledger_connection().await?;
-        let db = connection.db.clone();
+        let db = &connection.db;
         self.await_database(
             "state transition",
             connection.generation,
@@ -783,7 +786,7 @@ impl OperationService {
 
     async fn operation_parts(&self, operation_id: &str) -> Result<Vec<DbOperationPart>> {
         let connection = self.ledger_connection().await?;
-        let db = connection.db.clone();
+        let db = &connection.db;
         let parts: Vec<DbOperationPart> = self
             .await_database(
                 "part lookup",
@@ -816,7 +819,7 @@ impl OperationService {
         }
 
         let connection = self.ledger_connection().await?;
-        let db = connection.db.clone();
+        let db = &connection.db;
         let rows = plan
             .iter()
             .map(|part| {
@@ -858,7 +861,7 @@ impl OperationService {
         embedding: Vec<f32>,
     ) -> Result<()> {
         let connection = self.ledger_connection().await?;
-        let db = connection.db.clone();
+        let db = &connection.db;
         self.await_database(
             "part persistence",
             connection.generation,
@@ -948,7 +951,7 @@ impl OperationService {
             event.progress_seq
         );
         let connection = self.ledger_connection().await?;
-        let db = connection.db.clone();
+        let db = &connection.db;
         self.await_database(
             "executor event persistence",
             connection.generation,
@@ -969,7 +972,7 @@ impl OperationService {
             return Ok(());
         };
         let connection = self.ledger_connection().await?;
-        let db = connection.db.clone();
+        let db = &connection.db;
         self.await_database(
             "executor snapshot persistence",
             connection.generation,
