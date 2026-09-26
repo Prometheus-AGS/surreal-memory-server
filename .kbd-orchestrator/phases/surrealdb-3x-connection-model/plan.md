@@ -24,9 +24,15 @@ Child of `surrealdb-connection-architecture`. Evidence in `assessment.md`.
 **Gate met**: `signin` per run ~2,700 → ~24; server `hybrid_search × 64` p50
 2.3–3.0 s → 14 ms. Did not change the reset rate (E2).
 
-### c2 — connection-reset-cause — NEXT
-Find why the WebSocket is torn down ~23 times per mixed-load run, then fix the
-cause.
+### c2 — connection-reset-cause — COMPLETE (`d0caa4c`)
+**Cause**: `search_memories` fetched the whole scoped table with embeddings;
+responses passed the SDK's 64 MiB WebSocket limit and the SDK dropped the
+socket. **Fix**: one scoped KNN query on `memory_embedding_hnsw`.
+**Gate met**: server mixed 0 errors (was ~2,200/3,200), 1 WebSocket per run
+(was 20–24); embedded mixed 0 timeouts (was 170–610).
+
+Original scope: find why the WebSocket is torn down ~23 times per mixed-load
+run, then fix the cause.
 1. Capture the full client-side error chain and SDK tracing
    (`surrealdb=debug`) for one mixed run, plus a packet-level view of which
    side sends the reset.
@@ -37,10 +43,12 @@ cause.
 **Gate**: mixed 50/50 × 128 in server mode shows 0 `connection` errors and one
 WebSocket per run in the server log.
 
-### c3 — retry-coverage
+### c3 — retry-coverage — NEXT
 Route all 44 direct `live_db()` operations through `retry_operation`, so every
 operation gets typed retry, the operation deadline and the embedded in-flight
-permit.
+permit. Note: after c2 the embedded mixed-load timeouts are already 0, so this
+change is now about consistent failure handling rather than a measured
+failure; re-check its value against the harness before starting.
 **Gate**: embedded mixed 50/50 × 128 shows 0 `timeout` errors, or honest
 backpressure (bounded queueing) rather than SDK query timeouts; no regression
 in server mode.

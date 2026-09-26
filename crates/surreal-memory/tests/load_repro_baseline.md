@@ -164,3 +164,28 @@ work; this change does not modify production code.
 | mixed 50/50 × 128 | 3200 | 5683 | 45762 | 86118 | 2182 | connection:2182 |
 
 - mixed 50/50 × 128 `connection` sample: Connection reset
+
+## Context for c2 gate run (search through the HNSW index)
+
+- **Code**: `d0caa4c` (`search_memories` runs one scoped KNN query on
+  `memory_embedding_hnsw` instead of fetching the whole scope). Fresh 3.3.0
+  scratch server at `--log=debug`; host 1-min load 9.2 at start.
+- **Gate met**: server mode mixed 50/50 × 128 has 0 errors (was 2165–2324 of
+  3200) and the server saw exactly 1 WebSocket connection (was 20–24).
+  Embedded mixed 50/50 × 128 also has 0 timeouts (was 170–610).
+
+## server-mode (3.3.0, c2 HNSW search) — 2026-09-26T15:35:18.515442+00:00
+
+| workload | n | p50_ms | p95_ms | p99_ms | err_total | err_breakdown |
+|---|---|---|---|---|---|---|
+| hybrid_search × 64 | 1600 | 32 | 48 | 63 | 0 | — |
+| add_memory × 64 | 1600 | 5075 | 8518 | 9431 | 0 | — |
+| mixed 50/50 × 128 | 3200 | 3296 | 28470 | 35599 | 0 | — |
+
+## embedded mode (3.3.0, c2 HNSW search) — 2026-09-26T15:37:40.349212+00:00
+
+| workload | n | p50_ms | p95_ms | p99_ms | err_total | err_breakdown |
+|---|---|---|---|---|---|---|
+| hybrid_search × 64 | 1600 | 4 | 10 | 12 | 0 | — |
+| add_memory × 64 | 1600 | 1028 | 2281 | 4566 | 0 | — |
+| mixed 50/50 × 128 | 3200 | 2926 | 12861 | 22953 | 0 | — |
