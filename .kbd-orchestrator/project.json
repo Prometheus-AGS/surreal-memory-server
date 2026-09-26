@@ -1,7 +1,7 @@
 {
   "name": "surreal-memory-server",
   "description": "High-performance MCP memory server in Rust with semantic search, knowledge graph, TaskStreams, mindmaps, and Memory Palace; ships a binary and an embeddable library crate.",
-  "active_phase": "task-stream-reliability",
+  "activePhase": "surrealdb-connection-architecture",
   "focus_project_path": "/Users/gqadonis/Projects/prometheus/surreal-memory-server",
   "spec_paths": ["openspec/specs"],
   "openspec_available": true,
