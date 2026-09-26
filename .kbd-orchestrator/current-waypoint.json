@@ -2,10 +2,10 @@
   "schemaVersion": "5",
   "generatedBy": "kbd-runtime",
   "projectionContractVersion": 2,
-  "sourceRevision": 44,
-  "derivedRevision": 44,
+  "sourceRevision": 45,
+  "derivedRevision": 45,
   "frontier": {
-    "fa91ef8b-263d-4bc4-8d16-13f71ac4a62b": 44
+    "fa91ef8b-263d-4bc4-8d16-13f71ac4a62b": 45
   },
   "conflictCount": 0,
   "projectId": "7831e934-53c6-4541-828b-504a430f7d9f",
@@ -33,9 +33,9 @@
   "implementationCompleted": 15,
   "implementationTotal": 25,
   "planRevision": 2,
-  "revision": 44,
+  "revision": 45,
   "exactNextCommand": "c2-connection-reset-cause: find why the WebSocket resets ~23x per mixed-load run (server logs clean closes)",
   "nextChange": "c2-connection-reset-cause",
   "nextTask": null,
-  "updatedAt": "2026-09-26T14:09:00.204521Z"
+  "updatedAt": "2026-09-26T14:25:02.322487Z"
 }

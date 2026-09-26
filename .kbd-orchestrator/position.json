@@ -2,13 +2,13 @@
   "schemaVersion": "1",
   "generatedBy": "kbd-runtime",
   "projectionContractVersion": 2,
-  "sourceRevision": 44,
-  "derivedRevision": 44,
+  "sourceRevision": 45,
+  "derivedRevision": 45,
   "frontier": {
-    "fa91ef8b-263d-4bc4-8d16-13f71ac4a62b": 44
+    "fa91ef8b-263d-4bc4-8d16-13f71ac4a62b": 45
   },
   "conflictCount": 0,
-  "updatedAt": "2026-09-26T14:09:00.204521Z",
+  "updatedAt": "2026-09-26T14:25:02.322487Z",
   "cursor": [
     "surrealdb-connection-architecture",
     "surrealdb-3x-connection-model",
@@ -55,7 +55,7 @@
               {
                 "type": "change",
                 "id": "c2-connection-reset-cause",
-                "status": "PENDING",
+                "status": "IN_PROGRESS",
                 "progress": {
                   "done": 0,
                   "total": 0

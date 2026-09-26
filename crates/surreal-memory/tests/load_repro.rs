@@ -298,11 +298,23 @@ fn append_baseline(section: &str, header: &str, rows: &[String], notes: &[String
 
 const HEADER: &str = "| workload | n | p50_ms | p95_ms | p99_ms | err_total | err_breakdown |";
 
+/// Opt-in tracing for diagnosing SDK behaviour, e.g.
+/// `LOAD_REPRO_TRACE=surrealdb::engine::remote::ws=trace`. Off by default.
+fn init_tracing() {
+    if let Ok(filter) = std::env::var("LOAD_REPRO_TRACE") {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+            .with_writer(std::io::stderr)
+            .try_init();
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore = "requires docker-compose up -d surrealdb"]
 async fn server_mixed_load() {
+    init_tracing();
     let namespace = format!("loadrepro_{}", Uuid::new_v4().simple());
     let storage = server_storage(namespace).await;
 
