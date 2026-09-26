@@ -236,7 +236,11 @@ struct ConnectionInfo {
 #[derive(Clone)]
 pub(crate) enum ConnectionCell {
     /// Active connection, ready to use.
-    Connected(Surreal<Any>),
+    ///
+    /// Held behind an `Arc` and shared, never cloned per call: in the 3.x SDK
+    /// `Surreal::clone()` opens a new server-side session (attach, signin,
+    /// use) and dropping it detaches that session.
+    Connected(Arc<Surreal<Any>>),
     /// Mid-reconnect; callers should fail fast and let the retry layer
     /// observe the new state on its next attempt.
     Reconnecting,
@@ -663,7 +667,7 @@ impl SurrealStorage {
         let embedded_semaphore = make_embedded_semaphore(&connection_info.config);
 
         Ok(Self {
-            connection: Arc::new(ArcSwap::new(Arc::new(ConnectionCell::Connected(db)))),
+            connection: Arc::new(ArcSwap::new(Arc::new(ConnectionCell::Connected(Arc::new(db))))),
             connection_info,
             embedding_service,
             embedded_semaphore,
@@ -882,15 +886,16 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
         Ok(())
     }
 
-    /// Hot-path accessor for the live `Surreal<Any>` handle.
+    /// Hot-path accessor for the shared `Surreal<Any>` handle.
     ///
-    /// One atomic load, one `Arc::clone` of the inner SDK handle. No lock,
-    /// no contention, safe to call across `.await`. Every storage method
-    /// goes through here.
-    pub(crate) fn live_db(&self) -> Result<Surreal<Any>> {
+    /// One atomic load and one `Arc::clone`. It deliberately does not call
+    /// `Surreal::clone()`, which in the 3.x SDK opens a new server-side
+    /// session per call. Every storage method shares the session established
+    /// at connect time.
+    pub(crate) fn live_db(&self) -> Result<Arc<Surreal<Any>>> {
         let cell = self.connection.load();
         match &**cell {
-            ConnectionCell::Connected(db) => Ok(db.clone()),
+            ConnectionCell::Connected(db) => Ok(Arc::clone(db)),
             ConnectionCell::Reconnecting => {
                 anyhow::bail!("Connection is currently reconnecting, please retry later")
             }
@@ -910,12 +915,15 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
             .context("SurrealDB health check failed")
     }
 
-    /// Clone the live `Surreal<Any>` handle for shared use by subsystems
-    /// (e.g. `PalaceAdapter`). `Surreal<Any>` is internally `Arc`-wrapped,
-    /// so this is cheap. Returns `Err` if the connection is in
-    /// `Reconnecting` or `Failed` state.
+    /// Clone the live `Surreal<Any>` handle for use outside this crate.
+    ///
+    /// Each call opens a new server-side session (the 3.x SDK's
+    /// `Surreal::clone()` attaches a session and replays signin and `use`), so
+    /// callers should hold the returned handle rather than call this per
+    /// operation. Returns `Err` if the connection is in `Reconnecting` or
+    /// `Failed` state.
     pub fn db(&self) -> Result<Surreal<Any>> {
-        self.live_db()
+        self.live_db().map(|db| (*db).clone())
     }
 
     /// Return a connection for the durable operation ledger.
@@ -926,7 +934,7 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
     /// second time at the same path.
     pub async fn operation_ledger_connection(&self) -> Result<Surreal<Any>> {
         match self.connection_info.config.mode {
-            SurrealMode::Embedded => self.live_db(),
+            SurrealMode::Embedded => self.live_db().map(|db| (*db).clone()),
             SurrealMode::Server => {
                 Self::connect_with_attempts(&self.connection_info.config, 0).await
             }
@@ -1068,7 +1076,7 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
             Ok(db) => {
                 guard.disarm();
                 self.connection
-                    .store(Arc::new(ConnectionCell::Connected(db)));
+                    .store(Arc::new(ConnectionCell::Connected(Arc::new(db))));
                 tracing::info!("Reconnection successful");
                 Ok(())
             }
@@ -1092,7 +1100,7 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
     /// `retry × reconnect × connect_with_retry` amplification.
     async fn retry_operation<F, R, Fut>(&self, op_name: &str, op: F) -> Result<R>
     where
-        F: Fn(Surreal<Any>) -> Fut,
+        F: Fn(Arc<Surreal<Any>>) -> Fut,
         Fut: std::future::Future<Output = Result<R>>,
     {
         use tracing::Instrument as _;
@@ -1137,7 +1145,7 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
     /// established by `retry_operation`.
     async fn retry_operation_inner<F, R, Fut>(&self, op_name: &str, op: F) -> Result<R>
     where
-        F: Fn(Surreal<Any>) -> Fut,
+        F: Fn(Arc<Surreal<Any>>) -> Fut,
         Fut: std::future::Future<Output = Result<R>>,
     {
         let max_retries = self.connection_info.config.retry.max_operation_retries;
@@ -1288,7 +1296,7 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
     /// when no step with that key exists. Backs the idempotency checks in
     /// `add_task_step` and `complete_step`.
     async fn find_task_step_by_key(&self, idempotency_key: &str) -> Result<Option<TaskStep>> {
-        let db = self.db()?;
+        let db = self.live_db()?;
         let steps: Vec<DbTaskStep> = db
             .query("SELECT * FROM task_step WHERE idempotency_key = $key LIMIT 1")
             .bind(("key", idempotency_key.to_string()))
@@ -2633,7 +2641,7 @@ impl MemoryStorage for SurrealStorage {
         result: Option<String>,
         error: Option<String>,
     ) -> Result<TaskStep> {
-        let db = self.db()?;
+        let db = self.live_db()?;
         let now = Datetime::default();
         // Set started_at the first time the step leaves Pending — for ANY
         // non-Pending target status, including a direct jump to Completed/
@@ -2683,7 +2691,7 @@ impl MemoryStorage for SurrealStorage {
             .with_context(|| format!("TaskStream '{}' not found", stream_name))?;
         let stream_id = stream.id.clone().context("TaskStream has no id")?;
 
-        let db = self.db()?;
+        let db = self.live_db()?;
         let steps: Vec<DbTaskStep> = db
             .query("SELECT * FROM task_step WHERE task_stream_id = $sid ORDER BY ordinal ASC")
             .bind(("sid", stream_id))
@@ -2707,7 +2715,7 @@ impl MemoryStorage for SurrealStorage {
             .with_context(|| format!("TaskStream '{}' not found", stream_name))?;
         let stream_id = stream.id.clone().context("TaskStream has no id")?;
 
-        let db = self.db()?;
+        let db = self.live_db()?;
         let steps: Vec<DbTaskStep> = db
             .query(
                 "SELECT * FROM task_step WHERE task_stream_id = $sid \
@@ -3354,7 +3362,7 @@ impl SurrealStorage {
         let embedded_semaphore = make_embedded_semaphore(&connection_info.config);
 
         Ok(Self {
-            connection: Arc::new(ArcSwap::new(Arc::new(ConnectionCell::Connected(db)))),
+            connection: Arc::new(ArcSwap::new(Arc::new(ConnectionCell::Connected(Arc::new(db))))),
             connection_info,
             embedding_service,
             embedded_semaphore,
