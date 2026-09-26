@@ -125,7 +125,7 @@ async fn run_op(storage: &Arc<SurrealStorage>, op: Op, i: usize) -> Result<(), S
             .add_memory(make_memory(i))
             .await
             .map(|_| ())
-            .map_err(|e| classify_error(&e)),
+            .map_err(|e| format!("{}: {e:#}", classify_error(&e))),
         Op::HybridSearch => storage
             .hybrid_search_memories(
                 "quick brown fox",
@@ -138,7 +138,7 @@ async fn run_op(storage: &Arc<SurrealStorage>, op: Op, i: usize) -> Result<(), S
             )
             .await
             .map(|_| ())
-            .map_err(|e| classify_error(&e)),
+            .map_err(|e| format!("{}: {e:#}", classify_error(&e))),
     }
 }
 
@@ -163,13 +163,19 @@ fn classify_error(err: &anyhow::Error) -> String {
 struct LatencyReport {
     samples_ms: Vec<u64>,
     errors: std::collections::BTreeMap<String, u64>,
+    /// First full error message seen per class, so a count can be traced to a cause.
+    error_samples: std::collections::BTreeMap<String, String>,
 }
 
 impl LatencyReport {
     fn record(&mut self, dur: Duration, result: Result<(), String>) {
         self.samples_ms.push(dur.as_millis() as u64);
-        if let Err(class) = result {
-            *self.errors.entry(class).or_insert(0) += 1;
+        if let Err(err) = result {
+            let (class, message) = err.split_once(": ").unwrap_or((err.as_str(), ""));
+            *self.errors.entry(class.to_string()).or_insert(0) += 1;
+            self.error_samples
+                .entry(class.to_string())
+                .or_insert_with(|| message.to_string());
         }
     }
 
@@ -181,6 +187,13 @@ impl LatencyReport {
         sorted.sort_unstable();
         let idx = ((sorted.len() as f64 - 1.0) * p).round() as usize;
         sorted[idx]
+    }
+
+    fn sample_notes(&self, label: &str) -> Vec<String> {
+        self.error_samples
+            .iter()
+            .map(|(class, message)| format!("- {label} `{class}` sample: {message}"))
+            .collect()
     }
 
     fn error_total(&self) -> u64 {
@@ -253,7 +266,7 @@ async fn run_workload(
 
 // ── Baseline file append ─────────────────────────────────────────────────────
 
-fn append_baseline(section: &str, header: &str, rows: &[String]) {
+fn append_baseline(section: &str, header: &str, rows: &[String], notes: &[String]) {
     use std::fs::OpenOptions;
     use std::io::Write as _;
 
@@ -273,6 +286,13 @@ fn append_baseline(section: &str, header: &str, rows: &[String]) {
     writeln!(file, "|---|---|---|---|---|---|---|").unwrap();
     for row in rows {
         writeln!(file, "{row}").unwrap();
+    }
+    if !notes.is_empty() {
+        writeln!(file).unwrap();
+        for note in notes {
+            eprintln!("{note}");
+            writeln!(file, "{note}").unwrap();
+        }
     }
 }
 
@@ -297,13 +317,19 @@ async fn server_mixed_load() {
     .await;
 
     append_baseline(
-        "server-mode (pre-refactor baseline)",
+        "server-mode (surrealdb 3.3.0 client + server)",
         HEADER,
         &[
             read_only.summary_md_row("hybrid_search × 64"),
             write_only.summary_md_row("add_memory × 64"),
             mixed.summary_md_row("mixed 50/50 × 128"),
         ],
+        &[
+            read_only.sample_notes("hybrid_search × 64"),
+            write_only.sample_notes("add_memory × 64"),
+            mixed.sample_notes("mixed 50/50 × 128"),
+        ]
+        .concat(),
     );
 
     // Test does NOT fail on errors — this is a measurement run.
@@ -328,13 +354,19 @@ async fn embedded_mixed_load() {
     .await;
 
     append_baseline(
-        "embedded mode (pre-refactor baseline)",
+        "embedded mode (surrealdb 3.3.0 client + server)",
         HEADER,
         &[
             read_only.summary_md_row("hybrid_search × 64"),
             write_only.summary_md_row("add_memory × 64"),
             mixed.summary_md_row("mixed 50/50 × 128"),
         ],
+        &[
+            read_only.sample_notes("hybrid_search × 64"),
+            write_only.sample_notes("add_memory × 64"),
+            mixed.sample_notes("mixed 50/50 × 128"),
+        ]
+        .concat(),
     );
 
     eprintln!("embedded_mixed_load: see crates/surreal-memory/tests/load_repro_baseline.md");

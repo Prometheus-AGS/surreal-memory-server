@@ -1,0 +1,53 @@
+{
+  "target": "opencode",
+  "verification": {
+    "level": "source-verified",
+    "source": "https://opencode.ai/docs/agents/",
+    "version": "deployed singular agent schema inspected 2026-09-24",
+    "live": "unverified"
+  },
+  "diagnostics": [
+    "Source-verified serialization only; installed native validation and live execution are unverified.",
+    "Only explicit model IDs are translated. Resolve tier, skill, capability and price policies with agent-team-models before native invocation.",
+    "OpenCode JS/TS or npm plugins are separate from agent definitions; no agent marketplace manifest is invented.",
+    "Role overrides are preserved without native schema certification. Skill IDs refer to separately installed skills; prompt mentions do not install or authorize them."
+  ],
+  "instructions": [
+    "Review staged artifacts before installation. Export grants no execution or registration authority.",
+    "Review .opencode/agents/*.md and optional opencode.json. Native configuration uses singular agent and permission keys."
+  ],
+  "files": [
+    {
+      "file": ".opencode/agents/memory-lead.md",
+      "sha256": "43fcd0578cd31ce57bc69630f936a6105b94b830c3064cbbf83231129af34551"
+    },
+    {
+      "file": ".opencode/agents/memory-product.md",
+      "sha256": "ac1cdffb61356f78d7dad5b57bcbb81ce98fa8d81a1c2b73cfff697a5b903c80"
+    },
+    {
+      "file": ".opencode/agents/memory-runtime.md",
+      "sha256": "52e807e8fbdd5acb168ba57933546d0ab251ebc97a2b663e6853dac1e3f04722"
+    },
+    {
+      "file": ".opencode/agents/memory-storage.md",
+      "sha256": "a223a9014559ea001184ff7d4c9ac0c674ff4294f33783a0da14904f001389de"
+    },
+    {
+      "file": ".opencode/agents/memory-retrieval.md",
+      "sha256": "1e5c2a7fa683dbe892feca748d6ad6b1cbddc29a7d24d3b23251d72fefb5fc9d"
+    },
+    {
+      "file": ".opencode/agents/memory-transports.md",
+      "sha256": "8fad0a75ca2d09e6080b62d6ee738be03ca81789aac1da0677354a9351832b4d"
+    },
+    {
+      "file": ".opencode/agents/memory-verifier.md",
+      "sha256": "16e15ab54a360cdcb5f1713a2fcadedd30483c4110deb38ccda2e2d9dc3c9276"
+    },
+    {
+      "file": "export-receipt.json",
+      "sha256": "b40fad9443baaf9f32f2a94e7eeef7fc53638ce46035950f9e56dc9867328cd7"
+    }
+  ]
+}

@@ -1,0 +1,808 @@
+{
+  "schemaVersion": 1,
+  "checkedAt": "2026-09-25T00:16:03.785Z",
+  "roleCount": 7,
+  "nativeCount": 35,
+  "manifestValidation": "creator CLI passed",
+  "nativeSyntax": [
+    {
+      "target": "codex",
+      "path": ".codex/agents/memory-lead.toml",
+      "name": "memory-lead",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "37780abbfddde81d1a41d6180a6bd9181468009264a6809d0775710b977335cb",
+      "nativeEnvelope": {
+        "name": "memory-lead",
+        "description": "Coordinate service/library architecture and bounded development work.",
+        "model": "gpt-6-astra",
+        "model_reasoning_effort": "high"
+      }
+    },
+    {
+      "target": "claude",
+      "path": ".claude/agents/memory-lead.md",
+      "name": "memory-lead",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "98565c2209f085bcb8e007eb7e06468b0f6972ea7d221544318a75f6cf3999c9",
+      "nativeEnvelope": {
+        "name": "memory-lead",
+        "description": "Coordinate service/library architecture and bounded development work.",
+        "skills": [],
+        "model": "opus",
+        "effort": "high"
+      }
+    },
+    {
+      "target": "kimi",
+      "path": ".kimi-code/agents/memory-lead.md",
+      "name": "memory-lead",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "fae32f0f1896d8a0650b8314052566ff6b75fc0c1bd754c25a77e3e031096d2e",
+      "nativeEnvelope": {
+        "name": "memory-lead",
+        "description": "Coordinate service/library architecture and bounded development work."
+      }
+    },
+    {
+      "target": "opencode",
+      "path": ".opencode/agents/memory-lead.md",
+      "name": "memory-lead",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "43fcd0578cd31ce57bc69630f936a6105b94b830c3064cbbf83231129af34551",
+      "nativeEnvelope": {
+        "description": "Coordinate service/library architecture and bounded development work.",
+        "mode": "primary"
+      }
+    },
+    {
+      "target": "minimax",
+      "path": ".minimax/agents/memory-lead/agent.md",
+      "name": "memory-lead",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "4f9be2766d1877c2a23f31263624bee7e66820171c94e9f981075696e5a0de1c",
+      "nativeEnvelope": {
+        "name": "memory-lead",
+        "description": "Coordinate service/library architecture and bounded development work.",
+        "skills": []
+      }
+    },
+    {
+      "target": "codex",
+      "path": ".codex/agents/memory-product.toml",
+      "name": "memory-product",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "434c619c9a59ba3136f972e25aed16b729416de29b20b8adca14a7e9205f6ed3",
+      "nativeEnvelope": {
+        "name": "memory-product",
+        "description": "Own product requirements, API usability and consumer coordination.",
+        "model": "gpt-6-astra",
+        "model_reasoning_effort": "high"
+      }
+    },
+    {
+      "target": "claude",
+      "path": ".claude/agents/memory-product.md",
+      "name": "memory-product",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "b8ce7937559f7e74bd7657216d7f74bbeedc832c5fa2558a278a2b416f52c614",
+      "nativeEnvelope": {
+        "name": "memory-product",
+        "description": "Own product requirements, API usability and consumer coordination.",
+        "skills": [],
+        "model": "opus",
+        "effort": "high"
+      }
+    },
+    {
+      "target": "kimi",
+      "path": ".kimi-code/agents/memory-product.md",
+      "name": "memory-product",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "20fdd3b938da81f21023a148ef2854b5be0c12e89ff617adce1724560864f93a",
+      "nativeEnvelope": {
+        "name": "memory-product",
+        "description": "Own product requirements, API usability and consumer coordination."
+      }
+    },
+    {
+      "target": "opencode",
+      "path": ".opencode/agents/memory-product.md",
+      "name": "memory-product",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "ac1cdffb61356f78d7dad5b57bcbb81ce98fa8d81a1c2b73cfff697a5b903c80",
+      "nativeEnvelope": {
+        "description": "Own product requirements, API usability and consumer coordination.",
+        "mode": "subagent"
+      }
+    },
+    {
+      "target": "minimax",
+      "path": ".minimax/agents/memory-product/agent.md",
+      "name": "memory-product",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "8be3962ee392e4c47b7ab944fad8b6af947b6dfae72981df9234f391940277a6",
+      "nativeEnvelope": {
+        "name": "memory-product",
+        "description": "Own product requirements, API usability and consumer coordination.",
+        "skills": []
+      }
+    },
+    {
+      "target": "codex",
+      "path": ".codex/agents/memory-runtime.toml",
+      "name": "memory-runtime",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "67cb7f3fc5a11287a5694c6cb1e21838243c03bf05994d7a00b81baed3568511",
+      "nativeEnvelope": {
+        "name": "memory-runtime",
+        "description": "Own durable operations, supervised execution and service lifecycle.",
+        "model": "gpt-6-astra",
+        "model_reasoning_effort": "high"
+      }
+    },
+    {
+      "target": "claude",
+      "path": ".claude/agents/memory-runtime.md",
+      "name": "memory-runtime",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "34f61af5a04af7d2b132a7afb551ab11f30361d31c18fc56664824b20e68bf24",
+      "nativeEnvelope": {
+        "name": "memory-runtime",
+        "description": "Own durable operations, supervised execution and service lifecycle.",
+        "skills": [],
+        "model": "opus",
+        "effort": "high"
+      }
+    },
+    {
+      "target": "kimi",
+      "path": ".kimi-code/agents/memory-runtime.md",
+      "name": "memory-runtime",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "90ec07baa25127bcdf477c8acda40d10198fb2361f2dca4a65401a25f65b7528",
+      "nativeEnvelope": {
+        "name": "memory-runtime",
+        "description": "Own durable operations, supervised execution and service lifecycle."
+      }
+    },
+    {
+      "target": "opencode",
+      "path": ".opencode/agents/memory-runtime.md",
+      "name": "memory-runtime",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "52e807e8fbdd5acb168ba57933546d0ab251ebc97a2b663e6853dac1e3f04722",
+      "nativeEnvelope": {
+        "description": "Own durable operations, supervised execution and service lifecycle.",
+        "mode": "subagent"
+      }
+    },
+    {
+      "target": "minimax",
+      "path": ".minimax/agents/memory-runtime/agent.md",
+      "name": "memory-runtime",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "2d874caaaef5228565bbc0691f4cd8cfce7709331c44ce110b5ed5d652a838cc",
+      "nativeEnvelope": {
+        "name": "memory-runtime",
+        "description": "Own durable operations, supervised execution and service lifecycle.",
+        "skills": []
+      }
+    },
+    {
+      "target": "codex",
+      "path": ".codex/agents/memory-storage.toml",
+      "name": "memory-storage",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "e30b2b2ee61d125011e6f277924708e1a8ce0b42394fa283e8f0dd76fdd8fd99",
+      "nativeEnvelope": {
+        "name": "memory-storage",
+        "description": "Own embedded library storage, domain models and migrations.",
+        "model": "gpt-6-astra",
+        "model_reasoning_effort": "high"
+      }
+    },
+    {
+      "target": "claude",
+      "path": ".claude/agents/memory-storage.md",
+      "name": "memory-storage",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "ae89eb916bace7a9d0eba92c0926a18688abb2c35827fd591e43416ea976ff98",
+      "nativeEnvelope": {
+        "name": "memory-storage",
+        "description": "Own embedded library storage, domain models and migrations.",
+        "skills": [],
+        "model": "opus",
+        "effort": "high"
+      }
+    },
+    {
+      "target": "kimi",
+      "path": ".kimi-code/agents/memory-storage.md",
+      "name": "memory-storage",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "a0434e99cf952c2f8d9fffdb7a38c69cc38dc980f3950f1237fbf6a47691cf15",
+      "nativeEnvelope": {
+        "name": "memory-storage",
+        "description": "Own embedded library storage, domain models and migrations."
+      }
+    },
+    {
+      "target": "opencode",
+      "path": ".opencode/agents/memory-storage.md",
+      "name": "memory-storage",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "a223a9014559ea001184ff7d4c9ac0c674ff4294f33783a0da14904f001389de",
+      "nativeEnvelope": {
+        "description": "Own embedded library storage, domain models and migrations.",
+        "mode": "subagent"
+      }
+    },
+    {
+      "target": "minimax",
+      "path": ".minimax/agents/memory-storage/agent.md",
+      "name": "memory-storage",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "d8c4b594c24572751cdb169fd9c93f932dfb89695ff798fcd0f82d64ca4d8245",
+      "nativeEnvelope": {
+        "name": "memory-storage",
+        "description": "Own embedded library storage, domain models and migrations.",
+        "skills": []
+      }
+    },
+    {
+      "target": "codex",
+      "path": ".codex/agents/memory-retrieval.toml",
+      "name": "memory-retrieval",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "6dceab92a6428a34a2da91dfd5e4a2b739180e1392dcd1dd8532d4d6cd13c8d3",
+      "nativeEnvelope": {
+        "name": "memory-retrieval",
+        "description": "Own embeddings, retrieval quality and the optional palace integration.",
+        "model": "gpt-6-astra",
+        "model_reasoning_effort": "high"
+      }
+    },
+    {
+      "target": "claude",
+      "path": ".claude/agents/memory-retrieval.md",
+      "name": "memory-retrieval",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "e4555d41ebff1db8317b208bcd72d14eb4d8b9d6c7bf4bfaf77bf3dc8883f722",
+      "nativeEnvelope": {
+        "name": "memory-retrieval",
+        "description": "Own embeddings, retrieval quality and the optional palace integration.",
+        "skills": [],
+        "model": "opus",
+        "effort": "high"
+      }
+    },
+    {
+      "target": "kimi",
+      "path": ".kimi-code/agents/memory-retrieval.md",
+      "name": "memory-retrieval",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "9f2b2f4c1899a676d9c9045e866de92bfdcaea76f914eeae3493943d1b15abf9",
+      "nativeEnvelope": {
+        "name": "memory-retrieval",
+        "description": "Own embeddings, retrieval quality and the optional palace integration."
+      }
+    },
+    {
+      "target": "opencode",
+      "path": ".opencode/agents/memory-retrieval.md",
+      "name": "memory-retrieval",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "1e5c2a7fa683dbe892feca748d6ad6b1cbddc29a7d24d3b23251d72fefb5fc9d",
+      "nativeEnvelope": {
+        "description": "Own embeddings, retrieval quality and the optional palace integration.",
+        "mode": "subagent"
+      }
+    },
+    {
+      "target": "minimax",
+      "path": ".minimax/agents/memory-retrieval/agent.md",
+      "name": "memory-retrieval",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "e43cf91c7b389b3ade5356e21f76d47dc8b8ace4849a7aab3228e68e44660238",
+      "nativeEnvelope": {
+        "name": "memory-retrieval",
+        "description": "Own embeddings, retrieval quality and the optional palace integration.",
+        "skills": []
+      }
+    },
+    {
+      "target": "codex",
+      "path": ".codex/agents/memory-transports.toml",
+      "name": "memory-transports",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "171ef8fcb46c9ccf2ee878f45ff607200c5cc3328d3a39b5be7dd6b941622f63",
+      "nativeEnvelope": {
+        "name": "memory-transports",
+        "description": "Own REST/MCP/A2A contracts and source-grounded transport security.",
+        "model": "gpt-5.6-terra",
+        "model_reasoning_effort": "high"
+      }
+    },
+    {
+      "target": "claude",
+      "path": ".claude/agents/memory-transports.md",
+      "name": "memory-transports",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "bd1ee6064cc306dfe00a7e2070ae805be96d3d86dec72d82108932cfdc5da268",
+      "nativeEnvelope": {
+        "name": "memory-transports",
+        "description": "Own REST/MCP/A2A contracts and source-grounded transport security.",
+        "skills": [],
+        "model": "sonnet",
+        "effort": "high"
+      }
+    },
+    {
+      "target": "kimi",
+      "path": ".kimi-code/agents/memory-transports.md",
+      "name": "memory-transports",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "fcb1d3e07f5412b93f2b83d745b2053a02d5ede3a34a1d8cd23f827dc1c5cd15",
+      "nativeEnvelope": {
+        "name": "memory-transports",
+        "description": "Own REST/MCP/A2A contracts and source-grounded transport security."
+      }
+    },
+    {
+      "target": "opencode",
+      "path": ".opencode/agents/memory-transports.md",
+      "name": "memory-transports",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "8fad0a75ca2d09e6080b62d6ee738be03ca81789aac1da0677354a9351832b4d",
+      "nativeEnvelope": {
+        "description": "Own REST/MCP/A2A contracts and source-grounded transport security.",
+        "mode": "subagent"
+      }
+    },
+    {
+      "target": "minimax",
+      "path": ".minimax/agents/memory-transports/agent.md",
+      "name": "memory-transports",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "64607ce7fbd31f8ae386b0a2d03461b6dd20907fb788796eb333eaf4bcdc8c30",
+      "nativeEnvelope": {
+        "name": "memory-transports",
+        "description": "Own REST/MCP/A2A contracts and source-grounded transport security.",
+        "skills": []
+      }
+    },
+    {
+      "target": "codex",
+      "path": ".codex/agents/memory-verifier.toml",
+      "name": "memory-verifier",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "0b7772ca817bff9d73eea1cd081c30899a838e739433aae3b296cd1111bb556b",
+      "nativeEnvelope": {
+        "name": "memory-verifier",
+        "description": "Independently verify completed changes, compatibility and evidence.",
+        "model": "gpt-6-astra",
+        "model_reasoning_effort": "high"
+      }
+    },
+    {
+      "target": "claude",
+      "path": ".claude/agents/memory-verifier.md",
+      "name": "memory-verifier",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "b62aa4604acc6bc9e1700014256f19b7b296f104c7c119ec48d56c7d2c7e98f9",
+      "nativeEnvelope": {
+        "name": "memory-verifier",
+        "description": "Independently verify completed changes, compatibility and evidence.",
+        "skills": [],
+        "model": "opus",
+        "effort": "high"
+      }
+    },
+    {
+      "target": "kimi",
+      "path": ".kimi-code/agents/memory-verifier.md",
+      "name": "memory-verifier",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "a60d737765ea86a38875073ba22df7545f56930df4c12a1405939e8a758c6d8c",
+      "nativeEnvelope": {
+        "name": "memory-verifier",
+        "description": "Independently verify completed changes, compatibility and evidence."
+      }
+    },
+    {
+      "target": "opencode",
+      "path": ".opencode/agents/memory-verifier.md",
+      "name": "memory-verifier",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "16e15ab54a360cdcb5f1713a2fcadedd30483c4110deb38ccda2e2d9dc3c9276",
+      "nativeEnvelope": {
+        "description": "Independently verify completed changes, compatibility and evidence.",
+        "mode": "subagent"
+      }
+    },
+    {
+      "target": "minimax",
+      "path": ".minimax/agents/memory-verifier/agent.md",
+      "name": "memory-verifier",
+      "syntax": "passed",
+      "promptMatches": true,
+      "sha256": "403b5cb1c8eead8d65830ab2eaf714969cb61d4c1b176518df044e347caac615",
+      "nativeEnvelope": {
+        "name": "memory-verifier",
+        "description": "Independently verify completed changes, compatibility and evidence.",
+        "skills": []
+      }
+    }
+  ],
+  "exportBytesMatch": true,
+  "skillBindings": "all present",
+  "skillHashes": "all matched",
+  "mcpDefinitions": "matching exact project graph command",
+  "preservation": [
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-01292e86f284184b.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-014e7215387c6674.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-10a9252284019f78.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-1387d1c085152039.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-19c97f33a08e7598.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-34031cd6d43ba9c7.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-3e4f8508e1c1e306.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-3fc3c7eeb7d09395.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-42f4d76829700c8f.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-43bd4b6930d45ea9.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-451238e4b7ffb324.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-45aa5754db648111.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-4c63a2f145fe4b7f.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-51f9c4e235dd261b.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-5671779b000d7dc8.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-585eaae338b196a4.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-5b8eb4bf4c1231b6.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-5bcc4e58915dc148.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-6172c3e46d70a250.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-691b9d16a3059696.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-701d211d06b0ad54.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-7507d85c683cd5c4.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-7dc17141a10522d3.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-7e95b31b80743f66.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-854042c3931f6cb3.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-8562a17c2277e920.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-87bbdb2a738da798.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-937ee31f03d082b3.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-965133ca99862c8a.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-98efc3c677050101.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-9b169c4eb64e70d7.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-a2361af0a62fd9ef.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-a4581bc55ccc4c93.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-a7b38d4d6fc8c973.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-a9af8f907daf546a.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-aabf70e2c2ebc6af.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-afc4a00414078ae5.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-b0c38d2157869110.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-baddab8370bcfd09.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-bf111008ef4f2261.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-cbc5d16e02f2bb51.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-d0124063b8da3db5.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-da22d025f1abab6b.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-db7d80f2078fe176.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-dc195d11ee752631.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-e31032c14183b143.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-e5c95881d4726b8f.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/karpathy-session-f23bdf88418aa7ad.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/project.json",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": "history.txt",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".claude/settings.local.json",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/index.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": ".prometheus/knowledge/wiki/log.md",
+      "preserved": true,
+      "mode": "byte identical"
+    },
+    {
+      "path": "AGENTS.md",
+      "preserved": true,
+      "mode": "original bytes retained; routing appended"
+    },
+    {
+      "path": "CLAUDE.md",
+      "preserved": true,
+      "mode": "original bytes retained; routing appended"
+    }
+  ],
+  "nativeDiscovery": {
+    "opencode": {
+      "exitCode": 0,
+      "name": "memory-lead",
+      "mode": "primary",
+      "promptMatches": true
+    },
+    "claude": {
+      "status": "source-and-syntax-only",
+      "limitation": "Installed claude agents --json lists active sessions, not custom role definitions; not accepted as discovery evidence."
+    },
+    "otherHarnesses": "Source contracts and serialization checked; custom-role discovery/execution not tested. MiniMax launcher --version returned 0.5.4."
+  },
+  "limits": [
+    "No live role/model execution.",
+    "Source contracts and serialization do not prove all installed native discovery.",
+    "No application code or dependency manifests changed; no Cargo execution.",
+    "This optional syntax verifier uses the existing sibling Boss smol-toml parser read-only; agent definitions and launcher do not depend on it."
+  ],
+  "installedVersions": {
+    "codex": "0.154.0",
+    "claude": "2.1.282",
+    "kimi": "0.42.0",
+    "opencode": "1.18.25-fork",
+    "minimax": "0.5.4",
+    "provenance": "CLI version calls on 2026-09-24; mcode via project launcher"
+  },
+  "finalCheckedAt": "2026-09-25T00:25:04.762Z",
+  "review": {
+    "primary": "reviews/native-findings.json",
+    "followup": "reviews/native-followup-findings.json",
+    "verdict": "PASS",
+    "critical": 0,
+    "warnings": 0,
+    "independence": "fresh-context same-family fallback; gateway MiniMax-M3 timed out after one 60-second attempt",
+    "sycophancy": {
+      "descriptorScore": 0.01785714365541935,
+      "findingsScore": 0,
+      "descriptorNote": "Low length heuristic reviewed; seven distinct responsibilities justify the content."
+    }
+  },
+  "peerSkillCorrection": {
+    "authorizedBy": "User follow-up specifically requested mini and full skill pack correction",
+    "sourceRoots": [
+      "/Users/gqadonis/Projects/prometheus/prometheus-skills-mini/.worktrees/agent-team-creator/skills/agent-team-creator",
+      "/Users/gqadonis/Projects/prometheus/prometheus-skill-pack/.worktrees/agent-team-creator/skills/process/agent-team-creator"
+    ],
+    "files": [
+      "SKILL.md",
+      "references/native-harnesses.md"
+    ],
+    "validation": "Strict skill validation passed in both worktrees, no errors or warnings; source files identical across packs; git diff --check passed.",
+    "distribution": "Source authoring worktrees and current project copy updated. Global installed copies and generated distributions not rebuilt or published."
+  },
+  "documentationLinks": "No broken local team/plan Markdown links",
+  "finalPreservation": "All 55 pre-existing dirty files retained; root instructions preserve original byte prefixes; all 43 extracted runtime source hashes unchanged."
+}

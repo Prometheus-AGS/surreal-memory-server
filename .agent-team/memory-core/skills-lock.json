@@ -1,0 +1,329 @@
+{
+  "created": "2026-09-25T00:09:50.467Z",
+  "copied": [
+    {
+      "name": "agent-team-creator",
+      "source": "/Users/gqadonis/Projects/prometheus/the-boss/.agents/skills/agent-team-creator",
+      "upstream": null,
+      "files": [
+        {
+          "path": ".agents/skills/agent-team-creator/SKILL.md",
+          "sha256": "7f7332b5702ff960c778d8769ceb2f9bd75fb544edc22d6cbc40bd0a420f9907"
+        },
+        {
+          "path": ".agents/skills/agent-team-creator/agents/openai.yaml",
+          "sha256": "6605ed41446890050e2b32534d10ffa2e3d99f5abc7bcb4f810991b9a42d46d1"
+        },
+        {
+          "path": ".agents/skills/agent-team-creator/assets/intake.json",
+          "sha256": "3a6b9ad249b0adf16c730f99143280ace41355a9592efe3eb834b720543477f3"
+        },
+        {
+          "path": ".agents/skills/agent-team-creator/references/manifest.md",
+          "sha256": "d419e580599a586d0511e245453c660e29c809698d8ad7ba9facb13f97b2f321"
+        },
+        {
+          "path": ".agents/skills/agent-team-creator/references/models-memory.md",
+          "sha256": "948d23f9c3596899f77405590b9f521fa0428cc1aebc7984604a1b37e80cabec"
+        },
+        {
+          "path": ".agents/skills/agent-team-creator/references/native-harnesses.md",
+          "sha256": "2bfc3b0352af3d5a419c64c8233b3b1d7e49e53b33b768aac0623a8324f7674c"
+        },
+        {
+          "path": ".agents/skills/agent-team-creator/references/task-handoff.md",
+          "sha256": "44c7f046c7d9e0de7a64a364fb8259c7f5570bfc0bf8eb1fedcc16334d2ce9c1"
+        },
+        {
+          "path": ".agents/skills/agent-team-creator/schemas/team.schema.json",
+          "sha256": "76ccd7ef710ee72f60ae89480167fa0129da9f795a103849b2315595d2ff59e9"
+        },
+        {
+          "path": ".agents/skills/agent-team-creator/scripts/adapters-codecs.mjs",
+          "sha256": "67c59ed9c1b8cf00223ce6e6374d72451ea5d26556d814cbbefa26ac704118dd"
+        },
+        {
+          "path": ".agents/skills/agent-team-creator/scripts/adapters-local.mjs",
+          "sha256": "5fa8663c2ffe14aaa47c713679fbe73e37ce642c8de4e4caf1304380b16e6182"
+        },
+        {
+          "path": ".agents/skills/agent-team-creator/scripts/adapters-services.mjs",
+          "sha256": "1940041ed303215a1df62dffbc137eaded255f68056692618e6978fc88341d63"
+        },
+        {
+          "path": ".agents/skills/agent-team-creator/scripts/adapters.mjs",
+          "sha256": "b1e7e4a62e2bd518534aef779f04f8f1d62c5bda7f00cdc4530d08aaf9f035dd"
+        },
+        {
+          "path": ".agents/skills/agent-team-creator/scripts/cli.mjs",
+          "sha256": "a04c9d2ccfb974bff561e7f170c862caf30410a8db3026310db1b8a71728635b"
+        },
+        {
+          "path": ".agents/skills/agent-team-creator/scripts/export-files.mjs",
+          "sha256": "8f193b8cc9190c5ba4b83c4c37eb0757e34438d9920737f5f852e6ce0143a196"
+        },
+        {
+          "path": ".agents/skills/agent-team-creator/scripts/guidance.mjs",
+          "sha256": "aae5e5057f54de0e58dadcba2f8ed79cef0d66a76638d2e6b32d3113e48b8992"
+        },
+        {
+          "path": ".agents/skills/agent-team-creator/scripts/handoff.mjs",
+          "sha256": "1510e7cbcac0e685dd155fca0369fd08d20163b0d8aa104dc846da8e836c14ae"
+        },
+        {
+          "path": ".agents/skills/agent-team-creator/scripts/memory.mjs",
+          "sha256": "5d86cb097580a1d018effe7e27075574610762d6ca338c5eeec7644e7be53e78"
+        },
+        {
+          "path": ".agents/skills/agent-team-creator/scripts/models-http.mjs",
+          "sha256": "aea304aa515f8468446094ef3c5e140c78cffdbe63d4b54d414e3d1de709dc28"
+        },
+        {
+          "path": ".agents/skills/agent-team-creator/scripts/models.mjs",
+          "sha256": "8fbb72e7815e4f3e23d535679fae8a2deb73f013dfd40466952acf95d70f7b22"
+        },
+        {
+          "path": ".agents/skills/agent-team-creator/scripts/state-kbd.mjs",
+          "sha256": "d6083c558b54b994553208d4cbcfe221c71a48e7a5edbee03da730e3c6be5aad"
+        },
+        {
+          "path": ".agents/skills/agent-team-creator/scripts/state-tasks.mjs",
+          "sha256": "3ef330a0f3689da1bd74f8a1998f51877c2e4f0d79d0b1fd23ff3b593504120d"
+        },
+        {
+          "path": ".agents/skills/agent-team-creator/scripts/state-validation.mjs",
+          "sha256": "da6086611c376daf42472aa2548b5874d622917d4ecd8d16077b31c1a563cc9e"
+        },
+        {
+          "path": ".agents/skills/agent-team-creator/scripts/state.mjs",
+          "sha256": "90ef7e07aae91ef787245d384fdac1c5e99fc676fa40db7d34bc1044257c9928"
+        },
+        {
+          "path": ".agents/skills/agent-team-creator/scripts/types.mjs",
+          "sha256": "aa827d89df419fc4e721044b2170dc50e540e67ab15d568b7cd01e50b352ce2f"
+        },
+        {
+          "path": ".agents/skills/agent-team-creator/scripts/validation.mjs",
+          "sha256": "cf776cd2508a6a89702b45154258f72824eabbe1eb336b1c0bbb449d5e48f6d3"
+        }
+      ],
+      "adaptations": [
+        {
+          "path": ".agents/skills/agent-team-creator/SKILL.md",
+          "before": "f9499c34faf89af0b11c8a791998ed4b8dfc643df5e4d976e60885c49a4a4e8b",
+          "after": "7f7332b5702ff960c778d8769ceb2f9bd75fb544edc22d6cbc40bd0a420f9907",
+          "reason": "User-authorized upstream clarification: Claude active-session listing is not custom-role discovery; synchronized with both authoring worktrees."
+        },
+        {
+          "path": ".agents/skills/agent-team-creator/references/native-harnesses.md",
+          "before": "bf35120b77eb7f18f55c0fd0b86cee8e23681334adcd97639fe23e4781fd4181",
+          "after": "2bfc3b0352af3d5a419c64c8233b3b1d7e49e53b33b768aac0623a8324f7674c",
+          "reason": "User-authorized upstream clarification: Claude active-session listing is not custom-role discovery; synchronized with both authoring worktrees."
+        }
+      ]
+    },
+    {
+      "name": "agent-team-manage",
+      "source": "/Users/gqadonis/Projects/prometheus/the-boss/.agents/skills/agent-team-manage",
+      "upstream": null,
+      "files": [
+        {
+          "path": ".agents/skills/agent-team-manage/SKILL.md",
+          "sha256": "851a75e5854ad0a2778d274c00585d7da796e96e11b2903d2fd35efd911bc224"
+        },
+        {
+          "path": ".agents/skills/agent-team-manage/agents/openai.yaml",
+          "sha256": "cfaf68e2410f6ebb078c8c4e8ed3b0547728f913ad94b0f112ec5c680816f87e"
+        }
+      ]
+    },
+    {
+      "name": "agent-team-models",
+      "source": "/Users/gqadonis/Projects/prometheus/the-boss/.agents/skills/agent-team-models",
+      "upstream": null,
+      "files": [
+        {
+          "path": ".agents/skills/agent-team-models/SKILL.md",
+          "sha256": "1d5bdc4306a02986129563954cbac2b7697b13d3a87771168b4cb6006f912a5c"
+        },
+        {
+          "path": ".agents/skills/agent-team-models/agents/openai.yaml",
+          "sha256": "1a10ef43d4e3fb9b6950c8085baed0bcb690971daf47d1942903ed3b2dbedcae"
+        }
+      ]
+    },
+    {
+      "name": "agent-team-handoff",
+      "source": "/Users/gqadonis/Projects/prometheus/the-boss/.agents/skills/agent-team-handoff",
+      "upstream": null,
+      "files": [
+        {
+          "path": ".agents/skills/agent-team-handoff/SKILL.md",
+          "sha256": "ce8e6c64a50e35ee5f7ce44a07fc98bafd9592cbb896c3dbc076df04d7c5db3e"
+        },
+        {
+          "path": ".agents/skills/agent-team-handoff/agents/openai.yaml",
+          "sha256": "72e890158a9d95da16c829ce97ab76036d156c572888fee688e05fcde6e270ac"
+        }
+      ]
+    },
+    {
+      "name": "rust-best-practices",
+      "source": "/Users/gqadonis/Projects/prometheus/universal-agent-runtime/.agents/skills/rust-best-practices",
+      "upstream": null,
+      "files": [
+        {
+          "path": ".agents/skills/rust-best-practices/.prometheus-generation",
+          "sha256": "b22fa510eccbbc58c8101a8d691339c2f3e87743285eefd4fb8d2925da9084f7"
+        },
+        {
+          "path": ".agents/skills/rust-best-practices/SKILL.md",
+          "sha256": "83d48cf362d3a9bab5966df2835df2f67b263eb887abc6cb7768763a8d20e17c"
+        },
+        {
+          "path": ".agents/skills/rust-best-practices/references/chapter_01.md",
+          "sha256": "05aed21a95cce7a97badc44f628eb7e23466f7be178a8c8ce8e3c7c1f82fd306"
+        },
+        {
+          "path": ".agents/skills/rust-best-practices/references/chapter_02.md",
+          "sha256": "05c6495150ea1b3a038555231e1965b75dc4c2499e4c7a784a0a35640eaee579"
+        },
+        {
+          "path": ".agents/skills/rust-best-practices/references/chapter_03.md",
+          "sha256": "160883f80db912c748cb73884942b6824be0599c98b8f16e9256f27fb9a44c6a"
+        },
+        {
+          "path": ".agents/skills/rust-best-practices/references/chapter_04.md",
+          "sha256": "3257b7dfa06698bd59fe2d315b33b22181926d30cda3776bc16c792b51eeb239"
+        },
+        {
+          "path": ".agents/skills/rust-best-practices/references/chapter_05.md",
+          "sha256": "7b44b4a6e245e692feb07df573162ce8b2c7ffc20716f8a5518d3d4ee2793c7c"
+        },
+        {
+          "path": ".agents/skills/rust-best-practices/references/chapter_06.md",
+          "sha256": "c001d3dbffe3e403cfc52ad81e4fe0468416f61add2e140d0f442fee1812049c"
+        },
+        {
+          "path": ".agents/skills/rust-best-practices/references/chapter_07.md",
+          "sha256": "a3c989e1aff99c6de53123ce97f3cf9496e0d68fe4099faabe436758ac1a5475"
+        },
+        {
+          "path": ".agents/skills/rust-best-practices/references/chapter_08.md",
+          "sha256": "452edcd46db8bf105c9b208ffb9ee41f876ae1a26ea60c699660047861e077c6"
+        },
+        {
+          "path": ".agents/skills/rust-best-practices/references/chapter_09.md",
+          "sha256": "6edd831122b04ee9f11c0a529a9ebddf2d34b5d1d8edef9bd6929d41693ad262"
+        }
+      ]
+    },
+    {
+      "name": "rust-async-patterns",
+      "source": "/Users/gqadonis/Projects/prometheus/universal-agent-runtime/.agents/skills/rust-async-patterns",
+      "upstream": null,
+      "files": [
+        {
+          "path": ".agents/skills/rust-async-patterns/.prometheus-generation",
+          "sha256": "b22fa510eccbbc58c8101a8d691339c2f3e87743285eefd4fb8d2925da9084f7"
+        },
+        {
+          "path": ".agents/skills/rust-async-patterns/SKILL.md",
+          "sha256": "b81c636edbd28065dd94d5876b1250610e0ab5f41e5ecf1746f60f307fee5be1"
+        },
+        {
+          "path": ".agents/skills/rust-async-patterns/references/details.md",
+          "sha256": "cd8a987c59cf704b7a2145e0dea6891b10194e7304b894bd14a5692d9fdfa76d"
+        }
+      ]
+    },
+    {
+      "name": "prometheus-rust-workspace",
+      "source": "/Users/gqadonis/Projects/prometheus/prometheus-skills-mini/.agents/skills/prometheus-rust-workspace",
+      "upstream": null,
+      "files": [
+        {
+          "path": ".agents/skills/prometheus-rust-workspace/SKILL.md",
+          "sha256": "cc2455f63617f76256bc7144e3c73395a2f3c71213f4cf19239c0561f3686d39"
+        },
+        {
+          "path": ".agents/skills/prometheus-rust-workspace/references/phase-gated-verification.md",
+          "sha256": "318f1efd9f4c37a56dc0995f78779869982d291ebe8d14bf565cfa4b057b8399"
+        },
+        {
+          "path": ".agents/skills/prometheus-rust-workspace/references/skill-routing.md",
+          "sha256": "a745dd48ddeb1d1d18a95901d7d6bc9b1d1405f404ce6e898412c1ade748b7cd"
+        }
+      ]
+    },
+    {
+      "name": "rust-mcp-server-generator",
+      "source": "/Users/gqadonis/.codex/skills/rust-mcp-server-generator",
+      "upstream": null,
+      "files": [
+        {
+          "path": ".agents/skills/rust-mcp-server-generator/.prometheus-generation",
+          "sha256": "b22fa510eccbbc58c8101a8d691339c2f3e87743285eefd4fb8d2925da9084f7"
+        },
+        {
+          "path": ".agents/skills/rust-mcp-server-generator/SKILL.md",
+          "sha256": "b8ac40f870c277cf56b1e1cd699f925b7f28789ca5e8def97fa84c2fd1d17dce"
+        },
+        {
+          "path": ".agents/skills/rust-mcp-server-generator/references/generator.md",
+          "sha256": "797379a6a9241dd0a800dc51a9a44a8f182e377e75b1194362ce6b17ae5106a6"
+        }
+      ]
+    },
+    {
+      "name": "api-and-interface-design",
+      "source": "/Users/gqadonis/.TOOLS/skills/agents/api-and-interface-design",
+      "upstream": null,
+      "files": [
+        {
+          "path": ".agents/skills/api-and-interface-design/SKILL.md",
+          "sha256": "5dafd0c44a3aabf11cae5bcb34f6fcc24dfa5c01ba6e0d3176bce997f4d68bc8"
+        }
+      ]
+    },
+    {
+      "name": "surrealql-performance",
+      "source": "/Users/gqadonis/Projects/prometheus/surreal-memory-server/.agent-team/memory-core/research/candidates/skills/surrealql-performance",
+      "upstream": {
+        "repository": "https://github.com/surrealdb/agent-skills",
+        "commit": "e5eadc5901337f20ad06ab5acf48d8f83bbfc961",
+        "license": "MIT",
+        "audit": "All four Markdown files and LICENSE inspected; documentation only, no hooks or executable installers. Pinned project versions override latest-stable advice."
+      },
+      "files": [
+        {
+          "path": ".agents/skills/surrealql-performance/LICENSE",
+          "sha256": "fef82f3bef35ad9a90557468d775ee7862be1d5d9c6bff229d1361f39d93bcaa"
+        },
+        {
+          "path": ".agents/skills/surrealql-performance/SKILL.md",
+          "sha256": "b3606581fc9de8544502b8081d2df88d5a0f9ed36012488d29d33812f928c25e"
+        },
+        {
+          "path": ".agents/skills/surrealql-performance/references/computed-fields.md",
+          "sha256": "90ea90193fa0851a41a7aebb0cc3cb4c610388950c8ebeade58084caceaa54dc"
+        },
+        {
+          "path": ".agents/skills/surrealql-performance/references/indexing.md",
+          "sha256": "4a2b3e899077f88ccdc6729f9d1dca44af63407bac4b1efb52f8acbf94780248"
+        },
+        {
+          "path": ".agents/skills/surrealql-performance/references/keys.md",
+          "sha256": "6df79dc5fecdf3941bc28e02a7267ac09b8625f88f50cff96c77ddd49c09485c"
+        }
+      ]
+    }
+  ],
+  "preservedExisting": [
+    "surrealql",
+    "surrealdb-vector",
+    "surrealdb-expert",
+    "surrealdb-python"
+  ],
+  "policy": "Instructions and references only except creator compiled Node runtime; no downloaded code executed. Existing user skills retained. Pin-sensitive examples require current docs and project version checks."
+}

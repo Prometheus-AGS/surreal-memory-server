@@ -1,10 +1,11 @@
 {
   "schemaVersion": "5",
   "generatedBy": "kbd-runtime",
-  "sourceRevision": 21,
-  "derivedRevision": 21,
+  "projectionContractVersion": 2,
+  "sourceRevision": 31,
+  "derivedRevision": 31,
   "frontier": {
-    "fa91ef8b-263d-4bc4-8d16-13f71ac4a62b": 21
+    "fa91ef8b-263d-4bc4-8d16-13f71ac4a62b": 31
   },
   "conflictCount": 0,
   "projectId": "7831e934-53c6-4541-828b-504a430f7d9f",
@@ -16,16 +17,23 @@
     "surrealdb-connection-architecture"
   ],
   "activePhaseId": "surrealdb-connection-architecture",
+  "activePhase": "surrealdb-connection-architecture",
   "phase": "surrealdb-connection-architecture",
+  "parentPhase": null,
   "childPointer": null,
-  "change": null,
+  "change": "change-8",
   "currentTask": null,
   "status": "ready",
+  "lifecycle": "ready",
+  "stageId": null,
+  "stageStatus": null,
   "completionMetric": "implementation",
-  "implementationCompleted": 13,
-  "implementationTotal": 17,
-  "planRevision": 1,
-  "revision": 21,
+  "implementationCompleted": 14,
+  "implementationTotal": 18,
+  "planRevision": 2,
+  "revision": 31,
   "exactNextCommand": null,
-  "updatedAt": "2026-08-26T06:17:21.138079Z"
+  "nextChange": "change-8",
+  "nextTask": null,
+  "updatedAt": "2026-09-26T13:36:08.873202Z"
 }

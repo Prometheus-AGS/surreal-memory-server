@@ -20,6 +20,7 @@ Format: `YYYY-MM-DD — Rule — *(context: what went wrong)*`
 - 2026-05-24 — `Config::query_timeout` now flows from `SURREAL_QUERY_TIMEOUT_MS` (default 10s) into every `connect()` site. Application `operation_deadline_ms` is now a backstop, not the primary mechanism.
 - 2026-05-24 — `RetryAction { Retry, Reconnect, FailFast }` replaces `is_retriable_error: bool`. `Reconnect` is reserved for transport-level loss; server-busy / lock-timeout / serialization errors backoff-and-retry on the same connection (the previous code churned a reconnect on each, hammering the contended path).
 - 2026-05-24 — Embedded-mode in-flight semaphore (`SURREAL_EMBEDDED_MAX_INFLIGHT`, default 16 = RocksDB stripe count) caps concurrent ops at the application layer, turning storage-engine contention into honest backpressure instead of "lock timeout" / "serialization failure" error storms.
+- 2026-09-26 — Removing the lock did not make mixed load healthy. On 3.3.0 client + server, `mixed 50/50 × 128` fails ~68% of ops in server mode (`Connection reset`) and 5–19% in embedded mode (SDK 10s `query_timeout`), while read-only and write-only at ×64 see zero errors. A fix is not verified until the harness is re-run against it. *(Context: the ArcSwap refactor was recorded as done without the load-harness re-run it was gated on; see `crates/surreal-memory/tests/load_repro_baseline.md`.)*
 
 ## Process / discipline
 

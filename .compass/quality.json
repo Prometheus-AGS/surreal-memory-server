@@ -1,0 +1,84 @@
+{
+  "schema": "compass.graph-quality/1",
+  "quality_scope": "full",
+  "input_path": "compass-out/snapshots/snapshot-1790294641179558000-3660-0/graph.json",
+  "graph_schema": "compass.graph/1",
+  "file_size_bytes": 5664109,
+  "node_count": 2057,
+  "edge_count": 4122,
+  "node_confidence": {
+    "exact": 2057
+  },
+  "edge_confidence": {
+    "exact": 4122
+  },
+  "node_kinds": {
+    "constant": 39,
+    "enum": 19,
+    "enum_member": 73,
+    "field": 717,
+    "file": 43,
+    "function": 277,
+    "method": 534,
+    "module": 55,
+    "parameter": 34,
+    "route": 65,
+    "struct": 177,
+    "trait": 3,
+    "type_alias": 21
+  },
+  "edge_kinds": {
+    "calls": 790,
+    "contains": 1949,
+    "exports": 56,
+    "implements": 14,
+    "imports": 260,
+    "instantiates": 9,
+    "references": 427,
+    "returns": 343,
+    "routes_to": 65,
+    "tests": 134,
+    "type_of": 75
+  },
+  "source_backed_nodes": 2057,
+  "source_backed_edges": 4122,
+  "valid_node_anchors": 2057,
+  "valid_edge_anchors": 4122,
+  "external_placeholder_nodes": 0,
+  "heuristic_nodes": 0,
+  "heuristic_edges": 0,
+  "dangling_edges": 0,
+  "duplicate_node_ids": 0,
+  "graph_diagnostics": {
+    "total": 11,
+    "by_code": {
+      "excluded_input": 2,
+      "normalized_constructor_call": 9
+    },
+    "by_severity": {
+      "info": 11
+    },
+    "publication_omitted_nodes": 0,
+    "publication_omitted_edges": 0,
+    "identity_collisions": 0
+  },
+  "output_consistency": {
+    "stats_file_present": true,
+    "stats_match_graph": true,
+    "stats_bytes_match_graph": true,
+    "stats_nodes": 2057,
+    "stats_edges": 4122,
+    "overview_file_present": false,
+    "overview_node_count": 0
+  },
+  "ratios": {
+    "exact_edge_ratio": 1.0,
+    "inferred_edge_ratio": 0.0,
+    "anchored_edge_ratio": 1.0,
+    "anchored_node_ratio": 1.0,
+    "external_placeholder_ratio": 0.0
+  },
+  "recommendations": [
+    "No blocking graph-quality findings detected."
+  ]
+}

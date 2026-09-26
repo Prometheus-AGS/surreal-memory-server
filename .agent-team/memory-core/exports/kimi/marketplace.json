@@ -1,0 +1,10 @@
+{
+  "version": "2",
+  "plugins": [
+    {
+      "id": "memory-core",
+      "displayName": "memory-core",
+      "source": "./plugins/memory-core"
+    }
+  ]
+}

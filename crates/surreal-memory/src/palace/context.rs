@@ -45,7 +45,7 @@ impl PalaceContext {
         let adapter = Arc::new(PalaceAdapter::new(move || {
             let cell = conn.load();
             match &**cell {
-                ConnectionCell::Connected(db) => Ok(db.clone()),
+                ConnectionCell::Connected(db) => Ok((**db).clone()),
                 ConnectionCell::Reconnecting => {
                     anyhow::bail!("Connection is reconnecting")
                 }
@@ -84,7 +84,7 @@ impl PalaceContext {
         let adapter = Arc::new(PalaceAdapter::new(move || {
             let cell = conn.load();
             match &**cell {
-                ConnectionCell::Connected(db) => Ok(db.clone()),
+                ConnectionCell::Connected(db) => Ok((**db).clone()),
                 ConnectionCell::Reconnecting => {
                     anyhow::bail!("Connection is reconnecting")
                 }

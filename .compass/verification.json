@@ -1,0 +1,229 @@
+{
+  "checkedAt": "2026-09-25T00:08:16.156Z",
+  "sourceCommit": "dd7fdcd6d8974af4059d1d51401bd33ae29f65db",
+  "graphSha256": "dc6d69dd8cbe6e67305928329e5549c55a643182ebc910bb1fc38df6bf31e89b",
+  "build": {
+    "builderVersion": "0.3.28",
+    "schemaFingerprint": "sha256:ef30f24aab6e9246a9b350f964ede9d154db362efd9ddfca0823e68a6959468b",
+    "sourceTreeDigest": "sha256:ed2506f7a325d14b7f529ff4266b754c6a42f35d9f11266073dfd9af648ddabb",
+    "configurationDigest": "sha256:bdc18307d37c8b07b7f0e80d69ad8f7f7a6ecff741f7267eaccc6b3f4322a124",
+    "generationId": "sha256:98759efef858a276d667bc6b3c47086b216122183e76d6da9784596847d6503e",
+    "sourceCommit": "dd7fdcd6d8974af4059d1d51401bd33ae29f65db"
+  },
+  "files": 43,
+  "missing": [],
+  "unexpected": [],
+  "stale": [],
+  "extractionFailures": [],
+  "excludedMetadata": [
+    {
+      "path": ".DS_Store",
+      "extractionStatus": "excluded"
+    },
+    {
+      "path": ".env",
+      "extractionStatus": "excluded"
+    }
+  ],
+  "quality": {
+    "schema": "compass.graph-quality/1",
+    "quality_scope": "full",
+    "input_path": "compass-out/snapshots/snapshot-1790294641179558000-3660-0/graph.json",
+    "graph_schema": "compass.graph/1",
+    "file_size_bytes": 5664109,
+    "node_count": 2057,
+    "edge_count": 4122,
+    "node_confidence": {
+      "exact": 2057
+    },
+    "edge_confidence": {
+      "exact": 4122
+    },
+    "node_kinds": {
+      "constant": 39,
+      "enum": 19,
+      "enum_member": 73,
+      "field": 717,
+      "file": 43,
+      "function": 277,
+      "method": 534,
+      "module": 55,
+      "parameter": 34,
+      "route": 65,
+      "struct": 177,
+      "trait": 3,
+      "type_alias": 21
+    },
+    "edge_kinds": {
+      "calls": 790,
+      "contains": 1949,
+      "exports": 56,
+      "implements": 14,
+      "imports": 260,
+      "instantiates": 9,
+      "references": 427,
+      "returns": 343,
+      "routes_to": 65,
+      "tests": 134,
+      "type_of": 75
+    },
+    "source_backed_nodes": 2057,
+    "source_backed_edges": 4122,
+    "valid_node_anchors": 2057,
+    "valid_edge_anchors": 4122,
+    "external_placeholder_nodes": 0,
+    "heuristic_nodes": 0,
+    "heuristic_edges": 0,
+    "dangling_edges": 0,
+    "duplicate_node_ids": 0,
+    "graph_diagnostics": {
+      "total": 11,
+      "by_code": {
+        "excluded_input": 2,
+        "normalized_constructor_call": 9
+      },
+      "by_severity": {
+        "info": 11
+      },
+      "publication_omitted_nodes": 0,
+      "publication_omitted_edges": 0,
+      "identity_collisions": 0
+    },
+    "output_consistency": {
+      "stats_file_present": true,
+      "stats_match_graph": true,
+      "stats_bytes_match_graph": true,
+      "stats_nodes": 2057,
+      "stats_edges": 4122,
+      "overview_file_present": false,
+      "overview_node_count": 0
+    },
+    "ratios": {
+      "exact_edge_ratio": 1,
+      "inferred_edge_ratio": 0,
+      "anchored_edge_ratio": 1,
+      "anchored_node_ratio": 1,
+      "external_placeholder_ratio": 0
+    },
+    "recommendations": [
+      "No blocking graph-quality findings detected."
+    ]
+  },
+  "representativeCalls": [
+    {
+      "from": "surreal_memory_server::main",
+      "to": "surreal_memory_server::run_api_server",
+      "site": {
+        "file": "src/main.rs",
+        "startByte": 5016,
+        "endByte": 5030,
+        "startLine": 146,
+        "startColumn": 34,
+        "endLine": 146,
+        "endColumn": 48
+      },
+      "edgeId": "sha256:0a65eb1c450c3f1517fb31ca80fe0b5c49cb549fcfdcdf48470a8b63f0ad0dee"
+    },
+    {
+      "from": "surreal_memory_server::api::build_router",
+      "to": "surreal_memory_server::operations::OperationService::start",
+      "site": {
+        "file": "src/api/mod.rs",
+        "startByte": 2728,
+        "endByte": 2770,
+        "startLine": 93,
+        "startColumn": 21,
+        "endLine": 93,
+        "endColumn": 63
+      },
+      "edgeId": "sha256:0375454ef1e854e8645e26468d58dfbe2f621d85cf5d4920cad4bf3f9485fe94"
+    },
+    {
+      "from": "surreal_memory_server::operations::payload_hash",
+      "to": "surreal_memory_server::operations::digest_hex",
+      "site": {
+        "file": "src/operations.rs",
+        "startByte": 47133,
+        "endByte": 47143,
+        "startLine": 1367,
+        "startColumn": 7,
+        "endLine": 1367,
+        "endColumn": 17
+      },
+      "edgeId": "sha256:055d00b31774106d0b72620cc2c9ec80bb586ed6249401e4165dddc11229f372"
+    },
+    {
+      "from": "surreal_memory_server::executor::run_embedding_executor",
+      "to": "surreal_memory_server::executor::execute_request",
+      "site": {
+        "file": "src/executor.rs",
+        "startByte": 28208,
+        "endByte": 28223,
+        "startLine": 788,
+        "startColumn": 19,
+        "endLine": 788,
+        "endColumn": 34
+      },
+      "edgeId": "sha256:0f0e62bc598797c09ab24ecc83252ba1da0e9c276f50dd68e5cc569d65a6f692"
+    },
+    {
+      "from": "surreal_memory_server::mcp::MemoryMcpServer::add_mindmap_node",
+      "to": "surreal_memory_server::mcp::progress::run_with_progress",
+      "site": {
+        "file": "src/mcp/mod.rs",
+        "startByte": 15595,
+        "endByte": 15612,
+        "startLine": 423,
+        "startColumn": 8,
+        "endLine": 423,
+        "endColumn": 25
+      },
+      "edgeId": "sha256:93104688934015b927b033e434d4a51e472e02f40bf0ecbe609f1d0fc5c58b60"
+    }
+  ],
+  "mcp": {
+    "command": {
+      "command": "/usr/local/bin/compass",
+      "args": [
+        "serve",
+        "--graph",
+        "/Users/gqadonis/Projects/prometheus/surreal-memory-server/compass-out/graph.json",
+        "--transport",
+        "stdio"
+      ]
+    },
+    "discoveredTools": [
+      "search_symbols",
+      "get_callers",
+      "get_callees",
+      "get_impact",
+      "explore_code",
+      "get_node",
+      "query_graph",
+      "get_neighbors",
+      "get_community",
+      "god_nodes",
+      "graph_stats",
+      "shortest_path",
+      "list_prs",
+      "get_pr_impact",
+      "triage_prs",
+      "review_pull_request",
+      "pr_readiness",
+      "task_context"
+    ],
+    "successfulQueries": [
+      "graph_stats",
+      "search_symbols",
+      "get_callees"
+    ],
+    "protocol": "2026-07-28"
+  },
+  "limits": [
+    "File-level scope: inline cfg(test) modules may be extracted.",
+    "Feature-gated source graph is not one compiled feature configuration.",
+    "Macros, dyn traits, SQL and child-process boundaries may be unresolved.",
+    "134 test relations confirm inline tests are present; counts are not production-only symbol counts.",
+    "Graph exact confidence is extractor evidence, not proof of runtime dispatch or complete reachability."
+  ]
+}

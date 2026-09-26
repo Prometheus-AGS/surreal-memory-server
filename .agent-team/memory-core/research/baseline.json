@@ -1,0 +1,227 @@
+{
+  "date": "2026-09-25T00:03:58.987Z",
+  "head": "dd7fdcd6d8974af4059d1d51401bd33ae29f65db",
+  "status": " M .claude/settings.local.json\n M .prometheus/knowledge/wiki/index.md\n M .prometheus/knowledge/wiki/log.md\n M AGENTS.md\n M CLAUDE.md\n?? .prometheus/knowledge/wiki/karpathy-session-01292e86f284184b.md\n?? .prometheus/knowledge/wiki/karpathy-session-014e7215387c6674.md\n?? .prometheus/knowledge/wiki/karpathy-session-10a9252284019f78.md\n?? .prometheus/knowledge/wiki/karpathy-session-1387d1c085152039.md\n?? .prometheus/knowledge/wiki/karpathy-session-19c97f33a08e7598.md\n?? .prometheus/knowledge/wiki/karpathy-session-34031cd6d43ba9c7.md\n?? .prometheus/knowledge/wiki/karpathy-session-3e4f8508e1c1e306.md\n?? .prometheus/knowledge/wiki/karpathy-session-3fc3c7eeb7d09395.md\n?? .prometheus/knowledge/wiki/karpathy-session-42f4d76829700c8f.md\n?? .prometheus/knowledge/wiki/karpathy-session-43bd4b6930d45ea9.md\n?? .prometheus/knowledge/wiki/karpathy-session-451238e4b7ffb324.md\n?? .prometheus/knowledge/wiki/karpathy-session-45aa5754db648111.md\n?? .prometheus/knowledge/wiki/karpathy-session-4c63a2f145fe4b7f.md\n?? .prometheus/knowledge/wiki/karpathy-session-51f9c4e235dd261b.md\n?? .prometheus/knowledge/wiki/karpathy-session-5671779b000d7dc8.md\n?? .prometheus/knowledge/wiki/karpathy-session-585eaae338b196a4.md\n?? .prometheus/knowledge/wiki/karpathy-session-5b8eb4bf4c1231b6.md\n?? .prometheus/knowledge/wiki/karpathy-session-5bcc4e58915dc148.md\n?? .prometheus/knowledge/wiki/karpathy-session-6172c3e46d70a250.md\n?? .prometheus/knowledge/wiki/karpathy-session-691b9d16a3059696.md\n?? .prometheus/knowledge/wiki/karpathy-session-701d211d06b0ad54.md\n?? .prometheus/knowledge/wiki/karpathy-session-7507d85c683cd5c4.md\n?? .prometheus/knowledge/wiki/karpathy-session-7dc17141a10522d3.md\n?? .prometheus/knowledge/wiki/karpathy-session-7e95b31b80743f66.md\n?? .prometheus/knowledge/wiki/karpathy-session-854042c3931f6cb3.md\n?? .prometheus/knowledge/wiki/karpathy-session-8562a17c2277e920.md\n?? .prometheus/knowledge/wiki/karpathy-session-87bbdb2a738da798.md\n?? .prometheus/knowledge/wiki/karpathy-session-937ee31f03d082b3.md\n?? .prometheus/knowledge/wiki/karpathy-session-965133ca99862c8a.md\n?? .prometheus/knowledge/wiki/karpathy-session-98efc3c677050101.md\n?? .prometheus/knowledge/wiki/karpathy-session-9b169c4eb64e70d7.md\n?? .prometheus/knowledge/wiki/karpathy-session-a2361af0a62fd9ef.md\n?? .prometheus/knowledge/wiki/karpathy-session-a4581bc55ccc4c93.md\n?? .prometheus/knowledge/wiki/karpathy-session-a7b38d4d6fc8c973.md\n?? .prometheus/knowledge/wiki/karpathy-session-a9af8f907daf546a.md\n?? .prometheus/knowledge/wiki/karpathy-session-aabf70e2c2ebc6af.md\n?? .prometheus/knowledge/wiki/karpathy-session-afc4a00414078ae5.md\n?? .prometheus/knowledge/wiki/karpathy-session-b0c38d2157869110.md\n?? .prometheus/knowledge/wiki/karpathy-session-baddab8370bcfd09.md\n?? .prometheus/knowledge/wiki/karpathy-session-bf111008ef4f2261.md\n?? .prometheus/knowledge/wiki/karpathy-session-cbc5d16e02f2bb51.md\n?? .prometheus/knowledge/wiki/karpathy-session-d0124063b8da3db5.md\n?? .prometheus/knowledge/wiki/karpathy-session-da22d025f1abab6b.md\n?? .prometheus/knowledge/wiki/karpathy-session-db7d80f2078fe176.md\n?? .prometheus/knowledge/wiki/karpathy-session-dc195d11ee752631.md\n?? .prometheus/knowledge/wiki/karpathy-session-e31032c14183b143.md\n?? .prometheus/knowledge/wiki/karpathy-session-e5c95881d4726b8f.md\n?? .prometheus/knowledge/wiki/karpathy-session-f23bdf88418aa7ad.md\n?? .prometheus/project.json\n?? history.txt\n",
+  "files": {
+    ".prometheus/knowledge/wiki/karpathy-session-01292e86f284184b.md": {
+      "sha256": "99d38036a2e04b71cb23a3108e0a21a251dd77c32350d2ec913734b009a29477",
+      "bytes": 1373
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-014e7215387c6674.md": {
+      "sha256": "d5e1cf1c66baedd86fb3f85e2f6d2b7619f46904028bc6a085d5166f2632d863",
+      "bytes": 976
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-10a9252284019f78.md": {
+      "sha256": "d4dc952edcf00a1c3302f134bf4029f4573524ec5f73fa53854a5acb3b99a2f0",
+      "bytes": 1016
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-1387d1c085152039.md": {
+      "sha256": "deed04d82678dd8650a72a473800594e3cbb98ce1417a6aa2ecad251d706a537",
+      "bytes": 2846
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-19c97f33a08e7598.md": {
+      "sha256": "2309f4b9cc422c259249c804a164ea290ddaf9d30a239c6c9ce3f489d2d2cfc7",
+      "bytes": 3349
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-34031cd6d43ba9c7.md": {
+      "sha256": "694339186e0fda0bac926657d29d9155ab2a7529cc37ca84a085ef130b7a2e96",
+      "bytes": 1063
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-3e4f8508e1c1e306.md": {
+      "sha256": "01ac2471e9ff0666af49b7feeabcd1cb84940b1156470d642625b97fdbbd1b6b",
+      "bytes": 2846
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-3fc3c7eeb7d09395.md": {
+      "sha256": "a1f39fdb07a917b57c9322f0538147b5375b138404ac22b75bf4b2e02d5c64bb",
+      "bytes": 1439
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-42f4d76829700c8f.md": {
+      "sha256": "6099133a2cff35a7fce613628867b36019c2a28345c7d32d9a661a5a03d822bb",
+      "bytes": 946
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-43bd4b6930d45ea9.md": {
+      "sha256": "773b2b5b3c3cd8a7386419df643c0f485500df9be6c9c1ddc9e4356a137ff357",
+      "bytes": 1129
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-451238e4b7ffb324.md": {
+      "sha256": "527d580dff67cd7b125e18a19ec5780e4b4090046cc39bba274098b1dc3b4d7c",
+      "bytes": 1493
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-45aa5754db648111.md": {
+      "sha256": "37a16210d8ec6326658626e0a2b51dc905c47db524ea3e6f33dedd03cc31e522",
+      "bytes": 1559
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-4c63a2f145fe4b7f.md": {
+      "sha256": "3fc1070c4a480b6b6edfed7ebb42e7229f925d942861484524e076eb95fd3c0b",
+      "bytes": 3401
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-51f9c4e235dd261b.md": {
+      "sha256": "14d421b23240d361b9e90750b8428d3cde42c8362b07af56d3ee464dc75c60bf",
+      "bytes": 1625
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-5671779b000d7dc8.md": {
+      "sha256": "4b4d3aa306046408c748071e4d69577d158712622b1eb7b1fe82d75be6c71541",
+      "bytes": 3440
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-585eaae338b196a4.md": {
+      "sha256": "6b77e5d1341c43c1549858abf4fd10efcd04c9727b144077ff603b258359957e",
+      "bytes": 1691
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-5b8eb4bf4c1231b6.md": {
+      "sha256": "4e7a1ba203d60469254fc25362311e3a4aa87cbea300edf49f8f454260ad7909",
+      "bytes": 976
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-5bcc4e58915dc148.md": {
+      "sha256": "4e1c4f0bacdc20e65efa0f8bd0aa458fefd676a79032b2cbe21286f501da10e2",
+      "bytes": 4642
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-6172c3e46d70a250.md": {
+      "sha256": "f97538b235403db956b07f2862421a25c2eb5a5c17fa63159445a69a5cf3f0ea",
+      "bytes": 2846
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-691b9d16a3059696.md": {
+      "sha256": "c4d8447fcd4ba3dbf5945b92c2431d0786ccfef000f3d177f14043c1217f339e",
+      "bytes": 867
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-701d211d06b0ad54.md": {
+      "sha256": "17a57e328a31d7856be4f9797651d5150b819dd898a4cd0f42dfa49dac2f8dd9",
+      "bytes": 1757
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-7507d85c683cd5c4.md": {
+      "sha256": "2227718b3290bc675e6b2ceb6ea33fff8874bd3acaf49abafc45917faf2ba843",
+      "bytes": 1437
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-7dc17141a10522d3.md": {
+      "sha256": "0c7a384cfa501307c7360b69c0f70337d3d6e6ebe26854bf7e1601547c2dd74b",
+      "bytes": 827
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-7e95b31b80743f66.md": {
+      "sha256": "76ac673414237aa3d8c2ae2e6ed723b93913ee81bf21ed9fc2e70e562296d818",
+      "bytes": 1823
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-854042c3931f6cb3.md": {
+      "sha256": "75a0a24a79da3b9a3985b1b6192d5d06ab1588e5e74ecef8fae662120f357257",
+      "bytes": 946
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-8562a17c2277e920.md": {
+      "sha256": "5d053193a3621e0cc4cf4e778c3dcd2c26bd931e41025c6bdd38d79b03dd7a47",
+      "bytes": 1889
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-87bbdb2a738da798.md": {
+      "sha256": "ed10c1d1140ebc942592e6e4119e077d89f8fd38563c65030dbeb7154c2050be",
+      "bytes": 1955
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-937ee31f03d082b3.md": {
+      "sha256": "febfc5729d6795295306b3428ad0837cde001c824fc2063bc27e329cee648f7c",
+      "bytes": 1270
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-965133ca99862c8a.md": {
+      "sha256": "95d549b78a4f324fdda553bf4728463bd02577a943d590c10ba11b55de2f6238",
+      "bytes": 1336
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-98efc3c677050101.md": {
+      "sha256": "b54afe623ebed8bf3da3cb99a4e6e16872ba0042124ee7ba34ab67dba2d57957",
+      "bytes": 3291
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-9b169c4eb64e70d7.md": {
+      "sha256": "b3c4a54909cadda134a2eef800349918d78b0894df6ec70d2511ccd30e831fcc",
+      "bytes": 3291
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-a2361af0a62fd9ef.md": {
+      "sha256": "21c97b1f19e62b5977ff0f142e8a80c11f9be0da036a85d8a8cee78e2b7210e2",
+      "bytes": 871
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-a4581bc55ccc4c93.md": {
+      "sha256": "6504b13175f931b7f0fc93d399327340ed451d23b38ae6cb5aadb15dc858d815",
+      "bytes": 2021
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-a7b38d4d6fc8c973.md": {
+      "sha256": "36f0fc033a636e5768a2fb05ed35be753d5bc331c71565661204b083ce53957f",
+      "bytes": 3291
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-a9af8f907daf546a.md": {
+      "sha256": "a574431070bb6f3a43899621bf1f8c057e79e7ca3bb87ab3938ceb1b52714325",
+      "bytes": 2087
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-aabf70e2c2ebc6af.md": {
+      "sha256": "2b604f0e525767c5c7e7904bad5f292d22da5197420bd15928a27522c1a12f6d",
+      "bytes": 3291
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-afc4a00414078ae5.md": {
+      "sha256": "95d23beb1658c880c946af925eb4238a8598f318a0586b69f1c26155ef0e86e7",
+      "bytes": 1054
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-b0c38d2157869110.md": {
+      "sha256": "b55b656cab95199bd0b1ae59b88f5ffae617fa28de953d31a29abb114ae4bbe8",
+      "bytes": 5178
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-baddab8370bcfd09.md": {
+      "sha256": "daff437098c9b28a00aea662f1ff31d07fb38ad50e5a88f08e5b8cabb41e7bdc",
+      "bytes": 1199
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-bf111008ef4f2261.md": {
+      "sha256": "403400ffb6bfb85a069fe74eaae50a2c850366833e613b82c91abf150bac40a9",
+      "bytes": 827
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-cbc5d16e02f2bb51.md": {
+      "sha256": "5a5cd500b6131ca4a839d4331ede74595530d6dbc66d7346a9e2fb3d8369ff94",
+      "bytes": 2153
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-d0124063b8da3db5.md": {
+      "sha256": "fc35aa280149c7f1ee9948a113315ce9b25283dbb5db618eadda7343fd676cb1",
+      "bytes": 2404
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-da22d025f1abab6b.md": {
+      "sha256": "f74af360b4d0f1598ca43c86bc4410300a5d7d86365fcb9d547f798f1635a86f",
+      "bytes": 5178
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-db7d80f2078fe176.md": {
+      "sha256": "1c25d96221c0c213b4a71f970d9ed711021d7bc8cc40dbcbaa50842f750f2f45",
+      "bytes": 2470
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-dc195d11ee752631.md": {
+      "sha256": "1df29162d31334efee62e621d0ceef8aaec8472bf98248cd8ef15988c66af5c3",
+      "bytes": 2536
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-e31032c14183b143.md": {
+      "sha256": "eae63926dadeb57448ea5b9c401d1775482137d83b5fd7b1f751b32a54d50e69",
+      "bytes": 2602
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-e5c95881d4726b8f.md": {
+      "sha256": "d85f7c6dc81d490ae7d8331b1edd3ae1819a76af29b73e648f576a378a3d4fcc",
+      "bytes": 3439
+    },
+    ".prometheus/knowledge/wiki/karpathy-session-f23bdf88418aa7ad.md": {
+      "sha256": "c9014289628f276679bbd3efb26b1b508a4d032f8f16bc5657fe283ee67f70fd",
+      "bytes": 975
+    },
+    ".prometheus/project.json": {
+      "sha256": "3638ba67afcdb59d9aaadfc8c112ddfe36a776671547bb6051d4dc016119f8c8",
+      "bytes": 184
+    },
+    "history.txt": {
+      "sha256": "53a5e9344d41aeea01adb69050c0c801f82b6eda43f1113fd9ba085359412214",
+      "bytes": 115
+    },
+    ".claude/settings.local.json": {
+      "sha256": "0b0e0199120bbedcaef22c74356d967664e0be592d3ea3462b1bd551753e0a28",
+      "bytes": 13173
+    },
+    ".prometheus/knowledge/wiki/index.md": {
+      "sha256": "80e44df2671739d3b734c31c970c5219dfbbf8e95b17f435052e3b82ba8f0820",
+      "bytes": 3650
+    },
+    ".prometheus/knowledge/wiki/log.md": {
+      "sha256": "1a0b380b3491dc21073bff985af40ae47247b0090e8cb80ff823a90cd9fc4c13",
+      "bytes": 4236
+    },
+    "AGENTS.md": {
+      "sha256": "3c4e14dfaa011ebaa4442bc227292fbb91da11c5a58d7be4e7e8a200e4ec7580",
+      "bytes": 24426
+    },
+    "CLAUDE.md": {
+      "sha256": "fdea86a5d17b42da3a6adb96d146874577da16aefcd95202674288c7bcd5d3e5",
+      "bytes": 30802
+    }
+  }
+}

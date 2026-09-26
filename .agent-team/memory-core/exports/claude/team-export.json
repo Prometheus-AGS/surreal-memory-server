@@ -1,0 +1,89 @@
+{
+  "target": "claude",
+  "verification": {
+    "level": "source-verified",
+    "source": "https://code.claude.com/docs/en/sub-agents",
+    "version": "documentation inspected 2026-09-24",
+    "live": "unverified"
+  },
+  "diagnostics": [
+    "Source-verified serialization only; installed native validation and live execution are unverified.",
+    "Only explicit model IDs are translated. Resolve tier, skill, capability and price policies with agent-team-models before native invocation.",
+    "These are native subagents; installing them does not create an experimental Claude agent team or enable that feature.",
+    "Role overrides are preserved without native schema certification. Skill IDs refer to separately installed skills; prompt mentions do not install or authorize them."
+  ],
+  "instructions": [
+    "Review staged artifacts before installation. Export grants no execution or registration authority.",
+    "Choose project .claude/agents or the staged local marketplace/plugin. Do not install both copies. Settings options are a proposed project .claude/settings.json."
+  ],
+  "files": [
+    {
+      "file": ".claude/agents/memory-lead.md",
+      "sha256": "98565c2209f085bcb8e007eb7e06468b0f6972ea7d221544318a75f6cf3999c9"
+    },
+    {
+      "file": "plugins/memory-core/agents/memory-lead.md",
+      "sha256": "98565c2209f085bcb8e007eb7e06468b0f6972ea7d221544318a75f6cf3999c9"
+    },
+    {
+      "file": ".claude/agents/memory-product.md",
+      "sha256": "b8ce7937559f7e74bd7657216d7f74bbeedc832c5fa2558a278a2b416f52c614"
+    },
+    {
+      "file": "plugins/memory-core/agents/memory-product.md",
+      "sha256": "b8ce7937559f7e74bd7657216d7f74bbeedc832c5fa2558a278a2b416f52c614"
+    },
+    {
+      "file": ".claude/agents/memory-runtime.md",
+      "sha256": "34f61af5a04af7d2b132a7afb551ab11f30361d31c18fc56664824b20e68bf24"
+    },
+    {
+      "file": "plugins/memory-core/agents/memory-runtime.md",
+      "sha256": "34f61af5a04af7d2b132a7afb551ab11f30361d31c18fc56664824b20e68bf24"
+    },
+    {
+      "file": ".claude/agents/memory-storage.md",
+      "sha256": "ae89eb916bace7a9d0eba92c0926a18688abb2c35827fd591e43416ea976ff98"
+    },
+    {
+      "file": "plugins/memory-core/agents/memory-storage.md",
+      "sha256": "ae89eb916bace7a9d0eba92c0926a18688abb2c35827fd591e43416ea976ff98"
+    },
+    {
+      "file": ".claude/agents/memory-retrieval.md",
+      "sha256": "e4555d41ebff1db8317b208bcd72d14eb4d8b9d6c7bf4bfaf77bf3dc8883f722"
+    },
+    {
+      "file": "plugins/memory-core/agents/memory-retrieval.md",
+      "sha256": "e4555d41ebff1db8317b208bcd72d14eb4d8b9d6c7bf4bfaf77bf3dc8883f722"
+    },
+    {
+      "file": ".claude/agents/memory-transports.md",
+      "sha256": "bd1ee6064cc306dfe00a7e2070ae805be96d3d86dec72d82108932cfdc5da268"
+    },
+    {
+      "file": "plugins/memory-core/agents/memory-transports.md",
+      "sha256": "bd1ee6064cc306dfe00a7e2070ae805be96d3d86dec72d82108932cfdc5da268"
+    },
+    {
+      "file": ".claude/agents/memory-verifier.md",
+      "sha256": "b62aa4604acc6bc9e1700014256f19b7b296f104c7c119ec48d56c7d2c7e98f9"
+    },
+    {
+      "file": "plugins/memory-core/agents/memory-verifier.md",
+      "sha256": "b62aa4604acc6bc9e1700014256f19b7b296f104c7c119ec48d56c7d2c7e98f9"
+    },
+    {
+      "file": "plugins/memory-core/.claude-plugin/plugin.json",
+      "sha256": "fc3302fe6c9de4628594a2712e8870e480b96aea8392c5e40c33d1f3c6dc9b23"
+    },
+    {
+      "file": ".claude-plugin/marketplace.json",
+      "sha256": "7952a40eac019e825dd3c31c63c829515899c09df660b66888b5ffcddbbfc579"
+    },
+    {
+      "file": "export-receipt.json",
+      "sha256": "ca6034630d1c3c7356cb92b49dc1233128e7944949ed6b01167635f13eaa203f"
+    }
+  ]
+}

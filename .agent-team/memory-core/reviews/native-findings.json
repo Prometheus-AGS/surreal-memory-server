@@ -1,0 +1,34 @@
+{
+  "mode": "artifact",
+  "target": "plan",
+  "verdict": "PASS",
+  "isolation_mode": "harness-native",
+  "producer_model": "GPT-6",
+  "judge_model": "GPT-6",
+  "cross_model_check": "same-family-fallback",
+  "isolation_limit": "Fresh reviewer context provides weaker isolation; different-model or different-family independence is not verified.",
+  "reviewed_packet": ".agent-team/memory-core/reviews/packet.json",
+  "findings": [],
+  "checked_classes": [
+    "Ordering errors: team.json gives specialists a lead dependency; routing.md requires concrete file ownership before concurrent work, and review-protocol.md reviews completed changes. No reversed prerequisite appears in the packet.",
+    "Missing goal coverage: the packet contains scoped Compass and MCP receipts, seven canonical roles and 35 native export receipts, project skill provenance, peer handoffs, root instruction routing, and an independent review protocol. The current review is a pending completion activity rather than evidence that the review requirement was omitted.",
+    "Ambiguous acceptance evidence: graphVerification records selected-file counts, missing/unexpected/stale/extraction-failure lists, representative source anchors, protocol and successful MCP queries. verification separately records syntax, prompt matching, export matching, skill checks and preservation. These establish the stated configuration boundary without claiming application correctness.",
+    "Scope smuggling: constraints prohibit application changes, dependency installs, service/database execution, peer writes, global MCP changes and publication. The reviewed role/routing additions address the tooling setup; the packet records no such prohibited action and explicitly separates future application tasks from this setup.",
+    "Native support overclaims: README.md and model-policy.md distinguish installed definitions from running agents, model entitlement and successful inference. OpenCode has a discovery receipt; other native formats have source/syntax evidence. The supplied correction establishes that Claude agents --json lists active sessions, so rolesFound=[] is not evidence of failed role discovery.",
+    "Graph and peer claims: tool-policy.md, handoffs.md and research/decision.md distinguish file-level extraction from runtime reachability, retain the 134 test-relation limitation, and describe peer links as source contracts rather than cross-repository graph edges. No contradictory claim of full dynamic coverage appears.",
+    "Ownership, persistence and permission conflicts: routing.md assigns uncovered/shared files through the lead, keeps retrieval edits to storage files under one storage writer, and states that ownership globs do not enforce permissions. Verification records retained original root instructions and preserved existing state files rather than replacing them.",
+    "Skill and model provenance conflicts: skills-lock provenance identifies copied packages and pins the new official SurrealQL skill to a commit; prompts and tool-policy.md explicitly give project pins and existing contracts precedence over examples. model-policy.md distinguishes native IDs from tier classifications and records unverified inference and entitlement.",
+    "Review independence and unsupported certification: review-protocol.md excludes producer reasoning and preferred verdict, restricts reviewers to findings, requires another reviewer after a reviewer-authored fix, and preserves pending status when no review completes. Same-family isolation remains explicitly weaker in this report. No live model, native role execution or application test certification follows from this verdict."
+  ],
+  "evidence_correction": {
+    "file": ".agent-team/memory-core/verification.json",
+    "field": "nativeDiscovery.claude",
+    "interpretation": "The task supplies the subsequent correction that Claude agents --json reports active sessions. Review treats Claude support as source/syntax-only, with native role discovery and execution unverified, rather than treating the empty session list as a discovery failure."
+  },
+  "limits": [
+    "Artifact review uses the supplied packet bodies and receipts; it does not independently rerun their producing commands or validate external sources.",
+    "Application behavior, databases, inference, account entitlement and live native role execution were not tested.",
+    "Native export bodies are represented by canonical prompts plus envelope and hash receipts, as declared by the packet.",
+    "PASS means no concrete CRITICAL, WARNING or SUGGESTION finding was established within this packet; it does not extend its recorded verification boundary."
+  ]
+}

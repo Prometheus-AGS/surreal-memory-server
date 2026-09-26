@@ -1,0 +1,64 @@
+{
+  "head": "dd7fdcd6d8974af4059d1d51401bd33ae29f65db",
+  "sourceRoots": [
+    "src",
+    "crates/surreal-memory/src"
+  ],
+  "expectedFiles": [
+    "crates/surreal-memory/src/embeddings/candle.rs",
+    "crates/surreal-memory/src/embeddings/cohere.rs",
+    "crates/surreal-memory/src/embeddings/mod.rs",
+    "crates/surreal-memory/src/embeddings/openai.rs",
+    "crates/surreal-memory/src/entity.rs",
+    "crates/surreal-memory/src/lib.rs",
+    "crates/surreal-memory/src/memory.rs",
+    "crates/surreal-memory/src/mindmap.rs",
+    "crates/surreal-memory/src/model_profiles.rs",
+    "crates/surreal-memory/src/palace/adapter.rs",
+    "crates/surreal-memory/src/palace/context.rs",
+    "crates/surreal-memory/src/palace/embedding.rs",
+    "crates/surreal-memory/src/palace/mod.rs",
+    "crates/surreal-memory/src/storage/migrations/mod.rs",
+    "crates/surreal-memory/src/storage/mod.rs",
+    "crates/surreal-memory/src/storage/surreal.rs",
+    "crates/surreal-memory/src/task_step.rs",
+    "crates/surreal-memory/src/task_stream.rs",
+    "src/api/a2a.rs",
+    "src/api/entities.rs",
+    "src/api/memory.rs",
+    "src/api/mindmaps.rs",
+    "src/api/mod.rs",
+    "src/api/palace.rs",
+    "src/api/search.rs",
+    "src/api/taskstreams.rs",
+    "src/coerce.rs",
+    "src/config.rs",
+    "src/contracts.rs",
+    "src/embeddings/mod.rs",
+    "src/executor.rs",
+    "src/lib.rs",
+    "src/main.rs",
+    "src/mcp/handlers.rs",
+    "src/mcp/http.rs",
+    "src/mcp/mod.rs",
+    "src/mcp/progress.rs",
+    "src/operations.rs",
+    "src/storage/migrations/mod.rs",
+    "src/storage/mod.rs",
+    "src/storage/models.rs",
+    "src/workers/mod.rs",
+    "src/workers/ttl.rs"
+  ],
+  "excludedFiles": [
+    {
+      "path": "src/bin/export_contract_specs.rs",
+      "reason": "Build-time documentation contract exporter, not service runtime"
+    }
+  ],
+  "rationale": "Cargo workspace contains service and embeddable library. Include all runtime modules and feature-gated Rust sources. Migration SQL is embedded in Rust. No neighboring repositories, website, tests, dependencies, generated output or skills.",
+  "limits": [
+    "File-level scope: inline cfg(test) modules may be extracted.",
+    "Feature-gated source graph is not one compiled feature configuration.",
+    "Macros, dyn traits, SQL and child-process boundaries may be unresolved."
+  ]
+}

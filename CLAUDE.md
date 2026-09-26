@@ -475,3 +475,19 @@ exercises the real production path and collaborators. Unit, module-local, mock-o
 and filtered function tests do not count as completion evidence. Defer broader,
 specialized, release, and feature-matrix checks until the applicable final boundary.
 Read the skill's phase-gated verification reference before the first Cargo command.
+
+<!-- memory-core project team -->
+## Project development team and code graph
+
+Use the project-local memory-core team defined in [.agent-team/memory-core/README.md](.agent-team/memory-core/README.md) and [team.json](.agent-team/memory-core/team.json). Read [routing.md](.agent-team/memory-core/routing.md) to choose roles and assign concrete files before parallel work. Start with one implementer plus independent review; maximum four concurrent agents including the lead.
+
+Route product/API usability and consumer coordination to memory-product; durable operations/executor/lifecycle to memory-runtime; library/schema/migrations to memory-storage; embeddings/retrieval/palace to memory-retrieval; REST/MCP/A2A and transport security to memory-transports; completed changes to fresh-context memory-verifier. memory-lead coordinates shared roots, tests, build ownership and integration.
+
+Native roles live under .codex/agents, .claude/agents, .kimi-code/agents, .opencode/agents and .minimax/agents. Use the Node launcher in the team README; MiniMax requires the project MINIMAX_DATA_DIR. Definitions do not start agents. Skills are in .agents/skills; read explicit SKILL.md paths when a harness does not auto-discover them. Use the listed Rust/SurrealQL/contract skills only for relevant work and preserve Cargo pins over example versions.
+
+Before source changes use compass-surreal-memory-server search_symbols, get_callers/get_callees and get_impact, checking .compass/verification.json and current source. See [tool-policy.md](.agent-team/memory-core/tool-policy.md) for the exact MCP command and CLI fallback. The graph includes inline tests and feature-gated source; macros, dyn traits, SQL and process boundaries can be incomplete. Graph confidence is not runtime evidence.
+
+Current-source clarification: storage uses ArcSwap and UAR consumes a vendored library copy; older lock-defect/direct-git-pin notes above are historical. Confirm the current source and prepare a [peer handoff](.agent-team/memory-core/handoffs.md), rather than editing neighbors without a separately authorized task. Identity filters are not authorization. Keep v1 similarity deduplication distinct from v2 operation-ID/hash replay.
+
+Read [review-protocol.md](.agent-team/memory-core/review-protocol.md) for independent adversarial review and sycophancy screening. Restore existing KBD/OpenSpec state; this team setup does not finish any existing application phase. Preserve user work and apply completed-boundary, serialized integration verification to future code changes. Configuration-only changes use graph/MCP/native checks.
+<!-- /memory-core project team -->
