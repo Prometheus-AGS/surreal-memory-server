@@ -31,6 +31,14 @@ After c1 (`de3582e`, `live_db()` returns a shared `Arc<Surreal<Any>>`):
 `signin` fell to ~24 per run and server-mode `hybrid_search × 64` p50 fell from
 2.3–3.0 s to 14 ms.
 
+Raw counts (server `--log=debug`, `Process RPC request` lines by `rpc.method`,
+one server-mode run each): before c1 — attach 2716, signin 2684, use 2641,
+query 2721, detach 2585, on 1 WebSocket. After c1 — attach 24, signin 24,
+use 23, query 11332, detach 1, on 24 WebSockets. The remaining ~24 signins
+are one per WebSocket connection (1 long-lived + 23 reconnects, see E2), not
+per-operation sessions. After c2 the server saw 1 WebSocket per run; its
+signin count was not recorded.
+
 ### E2 — Mixed load still resets the WebSocket (open, c2)
 
 | run | mixed 50/50 × 128 errors (server mode) | sample |
