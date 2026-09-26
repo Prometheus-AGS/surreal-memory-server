@@ -70,6 +70,11 @@ use std::time::Duration;
 /// the initial startup connect where a longer wait is acceptable.
 const OPERATION_RECONNECT_ATTEMPTS: u32 = 2;
 
+/// Lower bound for the HNSW search width (`EF`) in `search_memories`. The
+/// search width must be at least `K`; below this floor small `K` values lose
+/// recall.
+const KNN_MIN_EF: usize = 40;
+
 /// Default in-flight concurrency cap for embedded mode. Matches RocksDB's
 /// PointLockManager default of 16 stripes per column family — beyond this,
 /// concurrent transactions on overlapping keys serialize at the storage
@@ -667,7 +672,9 @@ impl SurrealStorage {
         let embedded_semaphore = make_embedded_semaphore(&connection_info.config);
 
         Ok(Self {
-            connection: Arc::new(ArcSwap::new(Arc::new(ConnectionCell::Connected(Arc::new(db))))),
+            connection: Arc::new(ArcSwap::new(Arc::new(ConnectionCell::Connected(Arc::new(
+                db,
+            ))))),
             connection_info,
             embedding_service,
             embedded_semaphore,
@@ -1949,10 +1956,45 @@ impl MemoryStorage for SurrealStorage {
         _categories: Option<&[String]>,
         limit: usize,
     ) -> Result<Vec<Memory>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let query_emb = self.embed_text(query).await?;
 
-        // Get candidates with embedding (filtered by scope)
-        let candidates = self.get_all_memories(user_id, agent_id, session_id).await?;
+        // Nearest neighbours come from the HNSW index with the scope conditions
+        // applied during the search, so only `limit` rows cross the wire.
+        // Fetching the whole scope and ranking here made the response grow
+        // with the table until it passed the SDK's 64 MiB WebSocket message
+        // limit, which drops the socket and fails every in-flight request.
+        let mut parts: Vec<&str> = vec![];
+        if user_id.is_some() {
+            parts.push("user_id = $user_id");
+        }
+        if agent_id.is_some() {
+            parts.push("agent_id = $agent_id");
+        }
+        if session_id.is_some() {
+            parts.push("session_id = $session_id");
+        }
+        let knn = format!(
+            "embedding <|{limit},{ef}|> $query_emb",
+            ef = limit.max(KNN_MIN_EF)
+        );
+        parts.push(&knn);
+        let sql = format!("SELECT * FROM memory WHERE {}", parts.join(" AND "));
+
+        let db = self.live_db()?;
+        let mut q = db.query(sql).bind(("query_emb", query_emb.clone()));
+        if let Some(v) = user_id {
+            q = q.bind(("user_id", v.to_string()));
+        }
+        if let Some(v) = agent_id {
+            q = q.bind(("agent_id", v.to_string()));
+        }
+        if let Some(v) = session_id {
+            q = q.bind(("session_id", v.to_string()));
+        }
+        let candidates = Self::decode_memories(q.await?.take(0)?)?;
 
         let mut scored: Vec<(f32, Memory)> = candidates
             .into_iter()
@@ -3362,7 +3404,9 @@ impl SurrealStorage {
         let embedded_semaphore = make_embedded_semaphore(&connection_info.config);
 
         Ok(Self {
-            connection: Arc::new(ArcSwap::new(Arc::new(ConnectionCell::Connected(Arc::new(db))))),
+            connection: Arc::new(ArcSwap::new(Arc::new(ConnectionCell::Connected(Arc::new(
+                db,
+            ))))),
             connection_info,
             embedding_service,
             embedded_semaphore,
