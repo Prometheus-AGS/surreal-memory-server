@@ -43,7 +43,23 @@ run, then fix the cause.
 **Gate**: mixed 50/50 × 128 in server mode shows 0 `connection` errors and one
 WebSocket per run in the server log.
 
-### c3 — retry-coverage — NEXT
+### c8 — ledger-cancellation-recovery — COMPLETE (`cb8e7e1`)
+**Cause**: every operation-ledger call cloned the SDK handle (11 sites in
+`src/operations.rs`); in SDK 3.3.0 each clone replays attach/signin/use one
+acknowledged round trip at a time before its query, so post-deadline calls
+missed their budget (`operation_query_deadline` 503/500, 3/3 before the fix).
+Diagnosis: `.agent-team/memory-core/reviews/c8-ledger-diagnosis.md`.
+**Fix A**: ledger calls borrow the connection's handle.
+**Gate**: `operation_query_deadline` 16/20 at host load ~35–70, then 80/80 at
+load ~12–16 (with response bodies printed on failure); operations unit tests
+17/17; `executor_recovery` 4/4. Residual failures under heavy load are
+consistent with the 10 ms test budget, not confirmed by a captured body.
+**Not in c8 (open decision)**: Fix B, replacing the ledger transport only on
+connection-class errors rather than on a plain deadline, which changes the
+archived `operation-ledger-connection-recovery` spec.
+
+### c3 — retry-coverage — NEXT (re-scoped: survive 3.3 transaction conflicts)
+Design: `.agent-team/memory-core/reviews/c3-conflict-retry-design.md`.
 Route all 44 direct `live_db()` operations through `retry_operation`, so every
 operation gets typed retry, the operation deadline and the embedded in-flight
 permit. Note: after c2 the embedded mixed-load timeouts are already 0, so this

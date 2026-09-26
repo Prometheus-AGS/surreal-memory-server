@@ -2,13 +2,13 @@
   "schemaVersion": "1",
   "generatedBy": "kbd-runtime",
   "projectionContractVersion": 2,
-  "sourceRevision": 46,
-  "derivedRevision": 46,
+  "sourceRevision": 51,
+  "derivedRevision": 51,
   "frontier": {
-    "fa91ef8b-263d-4bc4-8d16-13f71ac4a62b": 46
+    "fa91ef8b-263d-4bc4-8d16-13f71ac4a62b": 51
   },
   "conflictCount": 0,
-  "updatedAt": "2026-09-26T15:38:15.137027Z",
+  "updatedAt": "2026-09-26T23:06:51.866612Z",
   "cursor": [
     "surrealdb-connection-architecture",
     "surrealdb-3x-connection-model",
@@ -19,8 +19,8 @@
     "id": "7831e934-53c6-4541-828b-504a430f7d9f",
     "status": "ready",
     "progress": {
-      "done": 16,
-      "total": 25
+      "done": 18,
+      "total": 26
     },
     "children": [
       {
@@ -39,8 +39,8 @@
             "canonicalId": "surrealdb-3x-connection-model",
             "status": "PENDING",
             "progress": {
-              "done": 2,
-              "total": 7
+              "done": 4,
+              "total": 8
             },
             "children": [
               {
@@ -91,7 +91,7 @@
               {
                 "type": "change",
                 "id": "c6-docs-3x-model",
-                "status": "PENDING",
+                "status": "COMPLETE",
                 "progress": {
                   "done": 0,
                   "total": 0
@@ -101,6 +101,15 @@
                 "type": "change",
                 "id": "c7-closing-evidence",
                 "status": "PENDING",
+                "progress": {
+                  "done": 0,
+                  "total": 0
+                }
+              },
+              {
+                "type": "change",
+                "id": "c8-ledger-cancellation-recovery",
+                "status": "COMPLETE",
                 "progress": {
                   "done": 0,
                   "total": 0
