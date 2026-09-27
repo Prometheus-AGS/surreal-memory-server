@@ -17,11 +17,11 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde::{Serialize, de::DeserializeOwned};
-use std::{cmp::Ordering, sync::Arc};
+use std::{cmp::Ordering, collections::HashMap, sync::Arc};
 use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
 use surrealdb::types::{Datetime, RecordId, RecordIdKey};
-use surrealdb_types::{SurrealValue, Value};
+use surrealdb_types::{QueryError, SurrealValue, Value};
 use uuid::Uuid;
 
 /// Token budget constants per model family. Extend via config in Phase 3.
@@ -36,9 +36,11 @@ const MINDMAP_UPDATE_TIMEOUT: &str = "30s";
 
 /// SurrealDB-backed memory storage.
 ///
-/// `Surreal<Any>` is internally `Arc`-wrapped and `Clone`-safe; the SDK
-/// multiplexes concurrent queries over a single physical connection
-/// (WebSocket in server mode, in-process for embedded). The connection
+/// One `Surreal<Any>` handle, and so one server-side session, is shared by
+/// every operation: the SDK multiplexes concurrent queries over a single
+/// physical connection (WebSocket in server mode, in-process for embedded).
+/// It is held as `Arc<Surreal<Any>>` because in SDK 3.x `Surreal::clone()`
+/// opens a new session (attach, replayed signin, `use`). The connection
 /// lifecycle (Connected/Reconnecting/Failed) is published via an atomic
 /// `ArcSwap` cell: hot-path readers do a single atomic load (no lock),
 /// reconnects do a single atomic store. This replaces the previous
@@ -70,6 +72,11 @@ use std::time::Duration;
 /// the initial startup connect where a longer wait is acceptable.
 const OPERATION_RECONNECT_ATTEMPTS: u32 = 2;
 
+/// Lower bound for the HNSW search width (`EF`) in `search_memories`. The
+/// search width must be at least `K`; below this floor small `K` values lose
+/// recall.
+const KNN_MIN_EF: usize = 40;
+
 /// Default in-flight concurrency cap for embedded mode. Matches RocksDB's
 /// PointLockManager default of 16 stripes per column family — beyond this,
 /// concurrent transactions on overlapping keys serialize at the storage
@@ -89,6 +96,62 @@ const MAX_TRANSACTION_CONFLICT_RETRIES: u32 = 16;
 fn transaction_conflict_backoff(attempt: u32) -> Duration {
     let millis = 1u64 << attempt.min(6);
     Duration::from_millis(millis.min(100))
+}
+
+/// A write the database rejected with `QueryError::TransactionConflict`
+/// ("This transaction can be retried"). SurrealDB 3.3 raises this on tables
+/// with an HNSW index when a write collides with the index's background
+/// maintenance, even without a concurrent writer.
+pub(crate) fn is_retryable_conflict(err: &surrealdb::Error) -> bool {
+    err.query_details() == Some(&QueryError::TransactionConflict)
+}
+
+fn is_not_executed(err: &surrealdb::Error) -> bool {
+    err.query_details() == Some(&QueryError::NotExecuted)
+}
+
+/// Pick the error that represents a failed multi-statement response.
+///
+/// When a `BEGIN…COMMIT` loses a conflict, SurrealDB 3.3 marks every statement
+/// `NotExecuted` and reports `TransactionConflict` on a separate COMMIT row;
+/// `IndexedResults::check()` returns the lowest-index error, which is the
+/// placeholder, not the cause. A response is a definite abort (nothing was
+/// applied, safe to resubmit) only when every error is a conflict or a
+/// placeholder and at least one is a conflict; then the conflict is returned.
+/// Otherwise the first real error wins, and if every error is a placeholder
+/// the highest index (the COMMIT row, which carries the cause) is returned.
+fn select_statement_error(errors: HashMap<usize, surrealdb::Error>) -> Option<surrealdb::Error> {
+    let mut errors: Vec<(usize, surrealdb::Error)> = errors.into_iter().collect();
+    errors.sort_by_key(|(index, _)| *index);
+    let definite_abort = errors.iter().any(|(_, e)| is_retryable_conflict(e))
+        && errors
+            .iter()
+            .all(|(_, e)| is_retryable_conflict(e) || is_not_executed(e));
+    if definite_abort {
+        return errors
+            .into_iter()
+            .map(|(_, e)| e)
+            .find(is_retryable_conflict);
+    }
+    if let Some(position) = errors
+        .iter()
+        .position(|(_, e)| !is_not_executed(e) && !is_retryable_conflict(e))
+    {
+        return Some(errors.swap_remove(position).1);
+    }
+    errors.pop().map(|(_, e)| e)
+}
+
+/// Drop-in replacement for `IndexedResults::check()` that inspects every
+/// statement error, so a transaction conflict is not hidden behind the
+/// `NotExecuted` placeholders of the statements it aborted.
+pub(crate) fn check_statements(
+    mut response: surrealdb::IndexedResults,
+) -> Result<surrealdb::IndexedResults, surrealdb::Error> {
+    match select_statement_error(response.take_errors()) {
+        Some(error) => Err(error),
+        None => Ok(response),
+    }
 }
 
 /// Build the embedded-mode in-flight semaphore from the active config. Returns
@@ -129,6 +192,9 @@ enum RetryAction {
 /// Discriminate a typed `surrealdb::Error` into a `RetryAction`. Kept as a
 /// free function so it can be unit-tested without a live storage handle.
 fn classify_surreal_error(err: &surrealdb::Error) -> RetryAction {
+    if is_retryable_conflict(err) {
+        return RetryAction::Retry;
+    }
     // The exact variant set is SDK-version-specific; match on the
     // stringified Display form scoped to the typed error (much narrower
     // than matching on a fully-wrapped anyhow chain).
@@ -667,7 +733,9 @@ impl SurrealStorage {
         let embedded_semaphore = make_embedded_semaphore(&connection_info.config);
 
         Ok(Self {
-            connection: Arc::new(ArcSwap::new(Arc::new(ConnectionCell::Connected(Arc::new(db))))),
+            connection: Arc::new(ArcSwap::new(Arc::new(ConnectionCell::Connected(Arc::new(
+                db,
+            ))))),
             connection_info,
             embedding_service,
             embedded_semaphore,
@@ -967,25 +1035,29 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
         memory.version = 1;
         let payload = DbMemory::from(memory);
         let db = self.live_db()?;
-        let response = db
-            .query(
-                "BEGIN TRANSACTION;\n\
-                 CREATE type::record('memory', $key) CONTENT $memory;\n\
-                 CREATE type::record('memory_history', $history_key) CONTENT { memory_id: type::record('memory', $key), version: 1, old_content: NONE, new_content: $content, changed_at: $now, change_type: 'created' };\n\
-                 COMMIT TRANSACTION;",
-            )
-            .bind(("key", record_key.to_owned()))
-            .bind(("memory", payload.clone()))
-            .bind(("history_key", format!("operation-{record_key}")))
-            .bind(("content", payload.content.clone()))
-            .bind(("now", now))
-            .await
-            .context("store_indexed_memory transaction failed")?;
-        if let Err(error) = response.check() {
+        let committed = self
+            .write_retrying_conflicts("store_indexed_memory", || async {
+                check_statements(
+                    db.query(
+                        "BEGIN TRANSACTION;\n\
+                         CREATE type::record('memory', $key) CONTENT $memory;\n\
+                         CREATE type::record('memory_history', $history_key) CONTENT { memory_id: type::record('memory', $key), version: 1, old_content: NONE, new_content: $content, changed_at: $now, change_type: 'created' };\n\
+                         COMMIT TRANSACTION;",
+                    )
+                    .bind(("key", record_key.to_owned()))
+                    .bind(("memory", payload.clone()))
+                    .bind(("history_key", format!("operation-{record_key}")))
+                    .bind(("content", payload.content.clone()))
+                    .bind(("now", now))
+                    .await?,
+                )
+            })
+            .await;
+        if let Err(error) = committed {
             if let Some(existing) = self.get_memory(record_key).await? {
                 return Ok(existing);
             }
-            return Err(error.into());
+            return Err(error);
         }
         self.get_memory(record_key)
             .await?
@@ -1087,6 +1159,48 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
                     .store(Arc::new(ConnectionCell::Failed(error_msg.clone())));
                 tracing::error!(error = %err, "Reconnection failed after exhausting retries");
                 Err(anyhow::anyhow!("Reconnection failed: {}", error_msg))
+            }
+        }
+    }
+
+    /// Resubmit one write request while the database reports a definite
+    /// transaction-conflict abort (nothing applied, so resubmitting the same
+    /// request is safe even for non-idempotent statements).
+    ///
+    /// `attempt` must send exactly one request: a single statement, one
+    /// `BEGIN…COMMIT`, or several statements that are each idempotent. It must
+    /// not embed or call other storage methods. Attempts are bounded by
+    /// `MAX_TRANSACTION_CONFLICT_RETRIES` and by `operation_deadline_ms`,
+    /// checked between attempts so an in-flight write is never cancelled.
+    async fn write_retrying_conflicts<T, F, Fut>(&self, op: &str, mut attempt: F) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, surrealdb::Error>>,
+    {
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_millis(self.connection_info.config.retry.operation_deadline_ms);
+        let mut conflicts: u32 = 0;
+        loop {
+            match attempt().await {
+                Ok(value) => return Ok(value),
+                Err(error) if is_retryable_conflict(&error) => {
+                    conflicts += 1;
+                    let backoff = transaction_conflict_backoff(conflicts);
+                    if conflicts >= MAX_TRANSACTION_CONFLICT_RETRIES
+                        || tokio::time::Instant::now() + backoff > deadline
+                    {
+                        return Err(anyhow::Error::new(error)).with_context(|| {
+                            format!("{op}: still conflicting after {conflicts} attempts")
+                        });
+                    }
+                    tracing::debug!(
+                        operation = op,
+                        attempt = conflicts,
+                        "retrying write after transaction conflict"
+                    );
+                    tokio::time::sleep(backoff).await;
+                }
+                Err(error) => return Err(anyhow::Error::new(error).context(op.to_owned())),
             }
         }
     }
@@ -1555,11 +1669,11 @@ impl MemoryStorage for SurrealStorage {
         entity.updated_at = now;
         entity.embedding = Some(self.embed_entity(&entity).await?);
 
-        let created: Option<Entity> = db
-            .create("entity")
-            .content(entity)
-            .await
-            .context("Failed to create entity")?;
+        let created: Option<Entity> = self
+            .write_retrying_conflicts("create_entity", || async {
+                db.create("entity").content(entity.clone()).await
+            })
+            .await?;
 
         created.ok_or_else(|| anyhow::anyhow!("No entity returned after creation"))
     }
@@ -1587,13 +1701,18 @@ impl MemoryStorage for SurrealStorage {
         entity.updated_at = Datetime::default();
         entity.embedding = Some(self.embed_entity(&entity).await?);
 
-        let mut res = db
-            .query("UPDATE entity SET entity_type = $type, observations = $obs, embedding = $embedding, updated_at = $updated WHERE name = $name RETURN AFTER")
-            .bind(("name", entity.name.clone()))
-            .bind(("type", entity.entity_type.clone()))
-            .bind(("obs", entity.observations.clone()))
-            .bind(("embedding", entity.embedding.clone()))
-            .bind(("updated", entity.updated_at))
+        let mut res = self
+            .write_retrying_conflicts("update_entity", || async {
+                check_statements(
+                    db.query("UPDATE entity SET entity_type = $type, observations = $obs, embedding = $embedding, updated_at = $updated WHERE name = $name RETURN AFTER")
+                        .bind(("name", entity.name.clone()))
+                        .bind(("type", entity.entity_type.clone()))
+                        .bind(("obs", entity.observations.clone()))
+                        .bind(("embedding", entity.embedding.clone()))
+                        .bind(("updated", entity.updated_at))
+                        .await?,
+                )
+            })
             .await?;
         let updated: Option<Entity> = res.take(0)?;
         updated.context("Failed to update entity")
@@ -1601,9 +1720,16 @@ impl MemoryStorage for SurrealStorage {
 
     async fn delete_entity(&self, name: &str) -> Result<()> {
         let db = self.live_db()?;
-        db.query("DELETE FROM entity WHERE name = $name; DELETE FROM relation WHERE from = $name OR to = $name")
-            .bind(("name", name.to_string()))
-            .await?;
+        // One transaction, so the entity and its relations are removed together
+        // and a conflict aborts both.
+        self.write_retrying_conflicts("delete_entity", || async {
+            check_statements(
+                db.query("BEGIN TRANSACTION; DELETE FROM entity WHERE name = $name; DELETE FROM relation WHERE from = $name OR to = $name; COMMIT TRANSACTION;")
+                    .bind(("name", name.to_string()))
+                    .await?,
+            )
+        })
+        .await?;
         Ok(())
     }
 
@@ -1648,11 +1774,18 @@ impl MemoryStorage for SurrealStorage {
 
     async fn delete_relation(&self, from: &str, to: &str, relation_type: &str) -> Result<()> {
         let db = self.live_db()?;
-        db.query("DELETE FROM relation WHERE from = $from AND to = $to AND relation_type = $rt")
-            .bind(("from", from.to_string()))
-            .bind(("to", to.to_string()))
-            .bind(("rt", relation_type.to_string()))
-            .await?;
+        self.write_retrying_conflicts("delete_relation", || async {
+            check_statements(
+                db.query(
+                    "DELETE FROM relation WHERE from = $from AND to = $to AND relation_type = $rt",
+                )
+                .bind(("from", from.to_string()))
+                .bind(("to", to.to_string()))
+                .bind(("rt", relation_type.to_string()))
+                .await?,
+            )
+        })
+        .await?;
         Ok(())
     }
 
@@ -1756,27 +1889,35 @@ impl MemoryStorage for SurrealStorage {
         memory.updated_at = now;
         memory.version = 1;
 
-        let created: Option<DbMemory> = db
-            .create("memory")
-            .content(DbMemory::from(memory))
-            .await
-            .context("Failed to create memory")?;
-
-        let stored = created.ok_or_else(|| anyhow::anyhow!("No memory returned after creation"))?;
-        let stored = Self::decode_memory(stored)?;
-
-        // Record history
-        if let Some(id) = &stored.id {
-            db.query(
-                "INSERT INTO memory_history { memory_id: $mid, version: 1, old_content: NONE, new_content: $content, changed_at: $now, change_type: 'created' }"
+        // The memory and its 'created' history row are one transaction, so a
+        // conflict retry resubmits both and neither can land without the other.
+        // The key is generated client-side so both statements name the record.
+        let memory_key = Uuid::new_v4().to_string();
+        let payload = DbMemory::from(memory);
+        self.write_retrying_conflicts("add_memory", || async {
+            check_statements(
+                db.query(
+                    "BEGIN TRANSACTION;\n\
+                     CREATE type::record('memory', $key) CONTENT $memory;\n\
+                     INSERT INTO memory_history { memory_id: type::record('memory', $key), version: 1, old_content: NONE, new_content: $content, changed_at: $now, change_type: 'created' };\n\
+                     COMMIT TRANSACTION;",
+                )
+                .bind(("key", memory_key.clone()))
+                .bind(("memory", payload.clone()))
+                .bind(("content", payload.content.clone()))
+                .bind(("now", now))
+                .await?,
             )
-            .bind(("mid", id.clone()))
-            .bind(("content", stored.content.clone()))
-            .bind(("now", Datetime::default()))
-            .await?;
-        }
+        })
+        .await?;
 
-        Ok(stored)
+        let stored: Option<DbMemory> = db
+            .query("SELECT * FROM type::record('memory', $key)")
+            .bind(("key", memory_key))
+            .await?
+            .take(0)?;
+        let stored = stored.context("add_memory: no memory returned after commit")?;
+        Self::decode_memory(stored)
     }
 
     async fn get_memory(&self, id: &str) -> Result<Option<Memory>> {
@@ -1797,49 +1938,46 @@ impl MemoryStorage for SurrealStorage {
 
     async fn update_memory(&self, id: &str, content: String) -> Result<Memory> {
         let db = self.live_db()?;
-        let old = self
-            .get_memory(id)
+        self.get_memory(id)
             .await?
             .with_context(|| format!("Memory '{}' not found", id))?;
         let new_emb = self.embed_text(&content).await?;
-        let new_version = old.version + 1;
         let token_count = Self::estimate_tokens(&content);
         let now = Datetime::default();
         let (table, key) = Self::parse_record_id_str(id, "memory")?;
 
-        let mut res = db
-            .query(
-                "UPDATE type::record($table, $key) \
-                 SET content = $content, embedding = $emb, token_count = $tc, version = $v, updated_at = $now \
-                 RETURN AFTER",
+        // The update and its 'updated' history row are one transaction, so a
+        // conflict retry resubmits both and neither can land without the other.
+        // The prior content and version are read inside the transaction: a
+        // conflict usually means another update of this memory won, and a
+        // resubmitted request must build on that update, not on a stale read.
+        // A memory deleted after the check above aborts the whole transaction
+        // (THROW is not a conflict, so it surfaces instead of retrying).
+        self.write_retrying_conflicts("update_memory", || async {
+            check_statements(
+                db.query(
+                    "BEGIN TRANSACTION;\n\
+                     LET $before = (SELECT content, version FROM ONLY type::record($table, $key));\n\
+                     IF $before = NONE { THROW 'memory not found' };\n\
+                     UPDATE type::record($table, $key) \
+                     SET content = $content, embedding = $emb, token_count = $tc, version = $before.version + 1, updated_at = $now;\n\
+                     INSERT INTO memory_history { memory_id: type::record($table, $key), version: $before.version + 1, old_content: $before.content, new_content: $content, changed_at: $now, change_type: 'updated' };\n\
+                     COMMIT TRANSACTION;",
+                )
+                .bind(("table", table.clone()))
+                .bind(("key", key.clone()))
+                .bind(("content", content.clone()))
+                .bind(("emb", new_emb.clone()))
+                .bind(("tc", token_count))
+                .bind(("now", now))
+                .await?,
             )
-            .bind(("table", table))
-            .bind(("key", key))
-            .bind(("content", content.clone()))
-            .bind(("emb", new_emb))
-            .bind(("tc", token_count))
-            .bind(("v", new_version))
-            .bind(("now", now))
-            .await?;
+        })
+        .await?;
 
-        let updated: Option<DbMemory> = res.take(0)?;
-        let updated = updated.context("Failed to update memory")?;
-        let updated = Self::decode_memory(updated)?;
-
-        // History
-        if let Some(mem_id) = &updated.id {
-            db.query(
-                "INSERT INTO memory_history { memory_id: $mid, version: $v, old_content: $old, new_content: $new, changed_at: $now, change_type: 'updated' }"
-            )
-            .bind(("mid", mem_id.clone()))
-            .bind(("v", new_version))
-            .bind(("old", old.content))
-            .bind(("new", content))
-            .bind(("now", now))
-            .await?;
-        }
-
-        Ok(updated)
+        self.get_memory(id)
+            .await?
+            .context("Failed to update memory")
     }
 
     async fn delete_memory(&self, id: &str) -> Result<()> {
@@ -1854,28 +1992,37 @@ impl MemoryStorage for SurrealStorage {
         if let Some(mem) = self.get_memory(id).await?
             && let Some(mem_id) = &mem.id
         {
-            db.query(
-                "BEGIN TRANSACTION;\n\
-                 INSERT INTO memory_history { memory_id: $mid, version: $v, old_content: $old, new_content: $old, changed_at: $now, change_type: 'deleted' };\n\
-                 DELETE type::record($table, $key);\n\
-                 COMMIT TRANSACTION;",
-            )
-            .bind(("mid", mem_id.clone()))
-            .bind(("v", mem.version + 1))
-            .bind(("old", mem.content))
-            .bind(("now", Datetime::default()))
-            .bind(("table", table))
-            .bind(("key", key))
-            .await?
-            .check()
-            .context("delete_memory transaction failed")?;
+            let now = Datetime::default();
+            self.write_retrying_conflicts("delete_memory", || async {
+                check_statements(
+                    db.query(
+                        "BEGIN TRANSACTION;\n\
+                         INSERT INTO memory_history { memory_id: $mid, version: $v, old_content: $old, new_content: $old, changed_at: $now, change_type: 'deleted' };\n\
+                         DELETE type::record($table, $key);\n\
+                         COMMIT TRANSACTION;",
+                    )
+                    .bind(("mid", mem_id.clone()))
+                    .bind(("v", mem.version + 1))
+                    .bind(("old", mem.content.clone()))
+                    .bind(("now", now))
+                    .bind(("table", table.clone()))
+                    .bind(("key", key.clone()))
+                    .await?,
+                )
+            })
+            .await?;
             return Ok(());
         }
 
-        db.query("DELETE type::record($table, $key)")
-            .bind(("table", table))
-            .bind(("key", key))
-            .await?;
+        self.write_retrying_conflicts("delete_memory", || async {
+            check_statements(
+                db.query("DELETE type::record($table, $key)")
+                    .bind(("table", table.clone()))
+                    .bind(("key", key.clone()))
+                    .await?,
+            )
+        })
+        .await?;
         Ok(())
     }
 
@@ -1949,10 +2096,45 @@ impl MemoryStorage for SurrealStorage {
         _categories: Option<&[String]>,
         limit: usize,
     ) -> Result<Vec<Memory>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let query_emb = self.embed_text(query).await?;
 
-        // Get candidates with embedding (filtered by scope)
-        let candidates = self.get_all_memories(user_id, agent_id, session_id).await?;
+        // Nearest neighbours come from the HNSW index with the scope conditions
+        // applied during the search, so only `limit` rows cross the wire.
+        // Fetching the whole scope and ranking here made the response grow
+        // with the table until it passed the SDK's 64 MiB WebSocket message
+        // limit, which drops the socket and fails every in-flight request.
+        let mut parts: Vec<&str> = vec![];
+        if user_id.is_some() {
+            parts.push("user_id = $user_id");
+        }
+        if agent_id.is_some() {
+            parts.push("agent_id = $agent_id");
+        }
+        if session_id.is_some() {
+            parts.push("session_id = $session_id");
+        }
+        let knn = format!(
+            "embedding <|{limit},{ef}|> $query_emb",
+            ef = limit.max(KNN_MIN_EF)
+        );
+        parts.push(&knn);
+        let sql = format!("SELECT * FROM memory WHERE {}", parts.join(" AND "));
+
+        let db = self.live_db()?;
+        let mut q = db.query(sql).bind(("query_emb", query_emb.clone()));
+        if let Some(v) = user_id {
+            q = q.bind(("user_id", v.to_string()));
+        }
+        if let Some(v) = agent_id {
+            q = q.bind(("agent_id", v.to_string()));
+        }
+        if let Some(v) = session_id {
+            q = q.bind(("session_id", v.to_string()));
+        }
+        let candidates = Self::decode_memories(q.await?.take(0)?)?;
 
         let mut scored: Vec<(f32, Memory)> = candidates
             .into_iter()
@@ -2128,8 +2310,10 @@ impl MemoryStorage for SurrealStorage {
         }
         txn_sql.push_str(";\nCOMMIT TRANSACTION;");
 
-        let mut conflict_attempts: u32 = 0;
-        loop {
+        // The whole transaction is resubmitted after a conflict: the database
+        // rejected all of it, so the stable memory key is absent and the same
+        // write is safe to send again.
+        self.write_retrying_conflicts("add_to_task_stream", || async {
             let mut txn_q = db
                 .query(txn_sql.clone())
                 .bind(("mkey", memory_key.clone()))
@@ -2144,58 +2328,9 @@ impl MemoryStorage for SurrealStorage {
             if let Some(v) = agent_id {
                 txn_q = txn_q.bind(("aid", v.to_string()));
             }
-            let mut response = txn_q
-                .await
-                .context("add_to_task_stream transaction failed")?;
-            let errors = response.take_errors();
-            if errors.is_empty() {
-                break;
-            }
-            let transaction_conflict = errors.values().any(|error| {
-                matches!(
-                    error.query_details(),
-                    Some(surrealdb_types::QueryError::TransactionConflict)
-                ) || error.to_string().contains("Transaction conflict")
-            });
-            let transaction_abort_only = errors.values().all(|error| {
-                matches!(
-                    error.query_details(),
-                    Some(
-                        surrealdb_types::QueryError::TransactionConflict
-                            | surrealdb_types::QueryError::NotExecuted
-                    )
-                ) || error.to_string().contains("Transaction conflict")
-                    || error.to_string().contains("failed transaction")
-            });
-            if !transaction_conflict || !transaction_abort_only {
-                let error = errors
-                    .into_values()
-                    .next()
-                    .context("transaction response reported an error without details")?;
-                return Err(error).context("add_to_task_stream transaction was rejected");
-            }
-
-            // The database authoritatively rejected the entire transaction,
-            // so the stable memory key is absent and the same write can be
-            // resubmitted safely. A bare `yield_now` re-submits immediately,
-            // which under sustained contention spins hot against the very
-            // conflict it is waiting on. Back off, and bound the attempts so a
-            // conflict that never clears surfaces as an error instead of
-            // hanging the caller forever.
-            conflict_attempts += 1;
-            if conflict_attempts >= MAX_TRANSACTION_CONFLICT_RETRIES {
-                let error = errors
-                    .into_values()
-                    .next()
-                    .context("transaction response reported an error without details")?;
-                return Err(error).with_context(|| {
-                    format!(
-                        "add_to_task_stream still conflicting after {MAX_TRANSACTION_CONFLICT_RETRIES} attempts"
-                    )
-                });
-            }
-            tokio::time::sleep(transaction_conflict_backoff(conflict_attempts)).await;
-        }
+            check_statements(txn_q.await?)
+        })
+        .await?;
 
         // Index-stability: whether BEGIN/COMMIT occupy result-set slots is
         // driver-dependent, so we do NOT rely on a hardcoded statement index
@@ -2341,9 +2476,14 @@ impl MemoryStorage for SurrealStorage {
         }
 
         let db = self.live_db()?;
-        db.query("UPDATE mindmap SET task_stream_id = NONE WHERE task_stream_id = $sid")
-            .bind(("sid", stream_id.clone()))
-            .await?;
+        self.write_retrying_conflicts("delete_task_stream", || async {
+            check_statements(
+                db.query("UPDATE mindmap SET task_stream_id = NONE WHERE task_stream_id = $sid")
+                    .bind(("sid", stream_id.clone()))
+                    .await?,
+            )
+        })
+        .await?;
 
         let (table, key) = Self::record_id_parts(&stream_id);
         let deleted: Option<DbTaskStream> = db
@@ -2388,8 +2528,6 @@ impl MemoryStorage for SurrealStorage {
         vector_weight: f32,
         bm25_weight: f32,
     ) -> Result<Vec<Memory>> {
-        use std::collections::HashMap;
-
         // Vector branch (uses HNSW index)
         let vec_results = self
             .search_memories(query, user_id, agent_id, session_id, None, limit * 2)
@@ -3040,7 +3178,11 @@ impl MemoryStorage for SurrealStorage {
             if let Some(id) = &m.id {
                 let s = Self::record_id_to_string(id);
                 let key = s.split(':').nth(1).unwrap_or(&s).to_string();
-                let _: Option<DbMemory> = db.delete(("memory", key)).await?;
+                let _: Option<DbMemory> = self
+                    .write_retrying_conflicts("auto_summarize_task_stream", || async {
+                        db.delete(("memory", key.clone())).await
+                    })
+                    .await?;
             }
         }
 
@@ -3068,17 +3210,24 @@ impl MemoryStorage for SurrealStorage {
 
         // M-2(a): decrement `total_tokens` by the compacted total, add the new
         // summary memory's tokens back, and bump `summary_count`.
-        let _: Option<serde_json::Value> = db
-            .query(
-                "UPDATE type::table($t) \
-                 SET total_tokens = math::max([0, total_tokens - $compacted]) + $summary, \
-                     summary_count += 1, last_active = time::now() \
-                 WHERE name = $n",
-            )
-            .bind(("t", "task_stream"))
-            .bind(("compacted", compacted_tokens))
-            .bind(("summary", summary_tokens))
-            .bind(("n", stream_name.to_string()))
+        // A definite conflict abort applied nothing, so resubmitting the `+=`
+        // update cannot double-count.
+        let _: Option<serde_json::Value> = self
+            .write_retrying_conflicts("auto_summarize_task_stream", || async {
+                check_statements(
+                    db.query(
+                        "UPDATE type::table($t) \
+                         SET total_tokens = math::max([0, total_tokens - $compacted]) + $summary, \
+                             summary_count += 1, last_active = time::now() \
+                         WHERE name = $n",
+                    )
+                    .bind(("t", "task_stream"))
+                    .bind(("compacted", compacted_tokens))
+                    .bind(("summary", summary_tokens))
+                    .bind(("n", stream_name.to_string()))
+                    .await?,
+                )
+            })
             .await?
             .take(0)?;
 
@@ -3362,7 +3511,9 @@ impl SurrealStorage {
         let embedded_semaphore = make_embedded_semaphore(&connection_info.config);
 
         Ok(Self {
-            connection: Arc::new(ArcSwap::new(Arc::new(ConnectionCell::Connected(Arc::new(db))))),
+            connection: Arc::new(ArcSwap::new(Arc::new(ConnectionCell::Connected(Arc::new(
+                db,
+            ))))),
             connection_info,
             embedding_service,
             embedded_semaphore,
@@ -3677,6 +3828,108 @@ mod retry_tests {
                 "{raw} should be Retry (not Reconnect)"
             );
         }
+    }
+
+    fn conflict() -> surrealdb::Error {
+        surrealdb::Error::query(
+            "Transaction conflict: Resource busy. This transaction can be retried".to_string(),
+            QueryError::TransactionConflict,
+        )
+    }
+
+    fn not_executed() -> surrealdb::Error {
+        surrealdb::Error::query(
+            "The query was not executed due to a failed transaction".to_string(),
+            QueryError::NotExecuted,
+        )
+    }
+
+    #[test]
+    fn retryable_conflict_is_only_the_typed_transaction_conflict() {
+        assert!(is_retryable_conflict(&conflict()));
+        assert!(!is_retryable_conflict(&not_executed()));
+        assert!(!is_retryable_conflict(&surrealdb::Error::query(
+            "cancelled".to_string(),
+            QueryError::Cancelled
+        )));
+        // An indeterminate commit outcome carries no kind and must never be
+        // resubmitted.
+        assert!(!is_retryable_conflict(&surrealdb::Error::query(
+            "commit outcome is unknown".to_string(),
+            None
+        )));
+        assert!(!is_retryable_conflict(&surrealdb::Error::internal(
+            "Transaction conflict: this text alone does not count".to_string()
+        )));
+        assert!(!is_retryable_conflict(&surrealdb::Error::already_exists(
+            "exists".to_string(),
+            None
+        )));
+    }
+
+    #[test]
+    fn transaction_conflict_classifies_as_retry_through_context() {
+        assert_eq!(classify_surreal_error(&conflict()), RetryAction::Retry);
+        let storage = mock_storage();
+        let wrapped = anyhow::Error::new(conflict())
+            .context("inner")
+            .context("outer");
+        assert_eq!(storage.classify_error(&wrapped), RetryAction::Retry);
+    }
+
+    #[test]
+    fn statement_error_selection_finds_the_conflict_behind_placeholders() {
+        // The shape SurrealDB 3.3 returns when BEGIN…COMMIT loses a conflict.
+        let aborted = HashMap::from([(0, not_executed()), (1, not_executed()), (2, conflict())]);
+        let selected = select_statement_error(aborted).expect("an error");
+        assert!(is_retryable_conflict(&selected));
+
+        let single = HashMap::from([(0, conflict())]);
+        assert!(is_retryable_conflict(
+            &select_statement_error(single).expect("an error")
+        ));
+    }
+
+    #[test]
+    fn statement_error_selection_surfaces_real_errors_over_conflicts() {
+        // A real error alongside a conflict is not a definite abort.
+        let mixed = HashMap::from([
+            (0, not_executed()),
+            (1, conflict()),
+            (
+                2,
+                surrealdb::Error::already_exists("exists".to_string(), None),
+            ),
+        ]);
+        let selected = select_statement_error(mixed).expect("an error");
+        assert!(!is_retryable_conflict(&selected));
+        assert_eq!(selected.to_string(), "exists");
+
+        // All placeholders: the COMMIT row (highest index) carries the cause.
+        let placeholders = HashMap::from([
+            (0, not_executed()),
+            (
+                1,
+                surrealdb::Error::query(
+                    "Cannot COMMIT: disk full".to_string(),
+                    QueryError::NotExecuted,
+                ),
+            ),
+        ]);
+        assert_eq!(
+            select_statement_error(placeholders)
+                .expect("an error")
+                .to_string(),
+            "Cannot COMMIT: disk full"
+        );
+
+        let indeterminate =
+            HashMap::from([(0, surrealdb::Error::query("unknown".to_string(), None))]);
+        assert!(!is_retryable_conflict(
+            &select_statement_error(indeterminate).expect("an error")
+        ));
+
+        assert!(select_statement_error(HashMap::new()).is_none());
     }
 
     #[test]

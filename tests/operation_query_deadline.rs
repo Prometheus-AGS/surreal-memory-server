@@ -218,7 +218,14 @@ async fn concurrent_receipt_timeouts_leave_the_same_coordinator_able_to_commit_l
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let submit_status = response.status();
+    let submit_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        submit_status,
+        StatusCode::ACCEPTED,
+        "submit response body: {}",
+        String::from_utf8_lossy(&submit_body)
+    );
 
     let receipt = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
@@ -232,10 +239,15 @@ async fn concurrent_receipt_timeouts_leave_the_same_coordinator_able_to_commit_l
                 )
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let body: Value =
-                serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
-                    .unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "receipt response body: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
             if body["state"] == "committed" {
                 break body;
             }

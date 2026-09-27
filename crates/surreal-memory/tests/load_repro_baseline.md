@@ -123,3 +123,69 @@ If either fails, Change 2 is not done.
 
 Change 1 is closed on these measurements. Findings 1 and 2 are follow-up
 work; this change does not modify production code.
+
+## Context for the child phase `surrealdb-3x-connection-model`, c1 runs
+
+- **Code**: `de3582e` (`live_db()` shares one `Arc<Surreal<Any>>` instead of
+  opening an SDK session per call). Scratch 3.3.0 server at `--log=debug`.
+- **Host load** at start: 18.8 (run 1), 90.3 (run 2). Run 2 embedded mode was
+  stopped early; it would not change the conclusions.
+- **Result**: `signin` per run ~2,700 → ~24; server `hybrid_search × 64` p50
+  2.3–3.0 s → 14 ms. Mixed-load `Connection reset` count is unchanged, and the
+  server saw 24 WebSocket connections per run (1 long-lived, 23 short). See
+  `.kbd-orchestrator/phases/surrealdb-3x-connection-model/assessment.md`.
+
+## server-mode (3.3.0, shared session, run 1) — 2026-09-26T13:55:12.546719+00:00
+
+| workload | n | p50_ms | p95_ms | p99_ms | err_total | err_breakdown |
+|---|---|---|---|---|---|---|
+| hybrid_search × 64 | 1600 | 14 | 25 | 34 | 0 | — |
+| add_memory × 64 | 1600 | 5128 | 13286 | 17100 | 0 | — |
+| mixed 50/50 × 128 | 3200 | 1120 | 45749 | 96606 | 2324 | connection:2324 |
+
+- mixed 50/50 × 128 `connection` sample: Connection reset
+
+## embedded mode (3.3.0, shared session, run 1) — 2026-09-26T13:58:46.470320+00:00
+
+| workload | n | p50_ms | p95_ms | p99_ms | err_total | err_breakdown |
+|---|---|---|---|---|---|---|
+| hybrid_search × 64 | 1600 | 3 | 7 | 13 | 0 | — |
+| add_memory × 64 | 1600 | 571 | 2126 | 3139 | 0 | — |
+| mixed 50/50 × 128 | 3200 | 5278 | 15896 | 22667 | 390 | timeout:390 |
+
+- mixed 50/50 × 128 `timeout` sample: The query was not executed because it exceeded the timeout: 10s
+
+## server-mode (3.3.0, shared session, run 2) — 2026-09-26T14:07:03.315030+00:00
+
+| workload | n | p50_ms | p95_ms | p99_ms | err_total | err_breakdown |
+|---|---|---|---|---|---|---|
+| hybrid_search × 64 | 1600 | 14 | 18 | 24 | 0 | — |
+| add_memory × 64 | 1600 | 4860 | 13702 | 17357 | 0 | — |
+| mixed 50/50 × 128 | 3200 | 5683 | 45762 | 86118 | 2182 | connection:2182 |
+
+- mixed 50/50 × 128 `connection` sample: Connection reset
+
+## Context for c2 gate run (search through the HNSW index)
+
+- **Code**: `d0caa4c` (`search_memories` runs one scoped KNN query on
+  `memory_embedding_hnsw` instead of fetching the whole scope). Fresh 3.3.0
+  scratch server at `--log=debug`; host 1-min load 9.2 at start.
+- **Gate met**: server mode mixed 50/50 × 128 has 0 errors (was 2165–2324 of
+  3200) and the server saw exactly 1 WebSocket connection (was 20–24).
+  Embedded mixed 50/50 × 128 also has 0 timeouts (was 170–610).
+
+## server-mode (3.3.0, c2 HNSW search) — 2026-09-26T15:35:18.515442+00:00
+
+| workload | n | p50_ms | p95_ms | p99_ms | err_total | err_breakdown |
+|---|---|---|---|---|---|---|
+| hybrid_search × 64 | 1600 | 32 | 48 | 63 | 0 | — |
+| add_memory × 64 | 1600 | 5075 | 8518 | 9431 | 0 | — |
+| mixed 50/50 × 128 | 3200 | 3296 | 28470 | 35599 | 0 | — |
+
+## embedded mode (3.3.0, c2 HNSW search) — 2026-09-26T15:37:40.349212+00:00
+
+| workload | n | p50_ms | p95_ms | p99_ms | err_total | err_breakdown |
+|---|---|---|---|---|---|---|
+| hybrid_search × 64 | 1600 | 4 | 10 | 12 | 0 | — |
+| add_memory × 64 | 1600 | 1028 | 2281 | 4566 | 0 | — |
+| mixed 50/50 × 128 | 3200 | 2926 | 12861 | 22953 | 0 | — |

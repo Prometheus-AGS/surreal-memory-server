@@ -2,24 +2,25 @@
   "schemaVersion": "1",
   "generatedBy": "kbd-runtime",
   "projectionContractVersion": 2,
-  "sourceRevision": 31,
-  "derivedRevision": 31,
+  "sourceRevision": 53,
+  "derivedRevision": 53,
   "frontier": {
-    "fa91ef8b-263d-4bc4-8d16-13f71ac4a62b": 31
+    "fa91ef8b-263d-4bc4-8d16-13f71ac4a62b": 53
   },
   "conflictCount": 0,
-  "updatedAt": "2026-09-26T13:36:08.873202Z",
+  "updatedAt": "2026-09-27T02:13:21.890888Z",
   "cursor": [
     "surrealdb-connection-architecture",
-    "change-8"
+    "surrealdb-3x-connection-model",
+    "c4-palace-session"
   ],
   "root": {
     "type": "phase",
     "id": "7831e934-53c6-4541-828b-504a430f7d9f",
     "status": "ready",
     "progress": {
-      "done": 14,
-      "total": 18
+      "done": 19,
+      "total": 26
     },
     "children": [
       {
@@ -32,6 +33,91 @@
           "total": 8
         },
         "children": [
+          {
+            "type": "phase",
+            "id": "surrealdb-3x-connection-model",
+            "canonicalId": "surrealdb-3x-connection-model",
+            "status": "PENDING",
+            "progress": {
+              "done": 5,
+              "total": 8
+            },
+            "children": [
+              {
+                "type": "change",
+                "id": "c1-shared-session",
+                "status": "COMPLETE",
+                "progress": {
+                  "done": 0,
+                  "total": 0
+                }
+              },
+              {
+                "type": "change",
+                "id": "c2-connection-reset-cause",
+                "status": "COMPLETE",
+                "progress": {
+                  "done": 0,
+                  "total": 0
+                }
+              },
+              {
+                "type": "change",
+                "id": "c3-retry-coverage",
+                "status": "COMPLETE",
+                "progress": {
+                  "done": 0,
+                  "total": 0
+                }
+              },
+              {
+                "type": "change",
+                "id": "c4-palace-session",
+                "status": "PENDING",
+                "progress": {
+                  "done": 0,
+                  "total": 0
+                }
+              },
+              {
+                "type": "change",
+                "id": "c5-session-pool-decision",
+                "status": "PENDING",
+                "progress": {
+                  "done": 0,
+                  "total": 0
+                }
+              },
+              {
+                "type": "change",
+                "id": "c6-docs-3x-model",
+                "status": "COMPLETE",
+                "progress": {
+                  "done": 0,
+                  "total": 0
+                }
+              },
+              {
+                "type": "change",
+                "id": "c7-closing-evidence",
+                "status": "PENDING",
+                "progress": {
+                  "done": 0,
+                  "total": 0
+                }
+              },
+              {
+                "type": "change",
+                "id": "c8-ledger-cancellation-recovery",
+                "status": "COMPLETE",
+                "progress": {
+                  "done": 0,
+                  "total": 0
+                }
+              }
+            ],
+            "annotations": []
+          },
           {
             "type": "change",
             "id": "change-1",
@@ -71,7 +157,7 @@
           {
             "type": "change",
             "id": "change-5",
-            "status": "PENDING",
+            "status": "SKIPPED",
             "progress": {
               "done": 0,
               "total": 0
@@ -98,7 +184,7 @@
           {
             "type": "change",
             "id": "change-8",
-            "status": "IN_PROGRESS",
+            "status": "SKIPPED",
             "progress": {
               "done": 0,
               "total": 0
