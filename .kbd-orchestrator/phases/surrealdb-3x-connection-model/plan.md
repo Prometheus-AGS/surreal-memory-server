@@ -58,7 +58,21 @@ consistent with the 10 ms test budget, not confirmed by a captured body.
 connection-class errors rather than on a plain deadline, which changes the
 archived `operation-ledger-connection-recovery` spec.
 
-### c3 — retry-coverage — NEXT (re-scoped: survive 3.3 transaction conflicts)
+### c3 — retry-coverage — COMPLETE (`c3a1e72`, `b371ce8`; re-scoped: survive 3.3 transaction conflicts)
+**Cause**: SurrealDB 3.3 rejects writes to HNSW-indexed tables with a typed,
+retryable `TransactionConflict`; most writes did not retry and several never
+inspected statement errors (silent write loss).
+**Fix**: typed detection (`is_retryable_conflict`, `check_statements`),
+`write_retrying_conflicts` helper (16 attempts, 2–64 ms, capped by
+`operation_deadline_ms`), ~14 write sites; `add_memory`/`update_memory` as
+single transactions (`update_memory` derives version inside the transaction
+after review W1/W2); `delete_entity` in one transaction.
+**Gate met**: `conflict_retry` embedded failed 3/3 before, passes after with
+8/24/7 retries and exact counts and consecutive versions; server stress
+before: `delete_memory` conflicts ~every 30 pairs, after: 0 errors (79 and 8
+retries in two runs); full workspace quality run clean at `b371ce8`.
+Review: `.agent-team/memory-core/reviews/c3-c8-findings.md` (PASS-WITH-WARNINGS,
+W1/W2/S1 fixed; S2–S6 noted).
 Design: `.agent-team/memory-core/reviews/c3-conflict-retry-design.md`.
 Route all 44 direct `live_db()` operations through `retry_operation`, so every
 operation gets typed retry, the operation deadline and the embedded in-flight

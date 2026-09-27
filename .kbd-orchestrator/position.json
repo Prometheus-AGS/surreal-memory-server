@@ -2,24 +2,24 @@
   "schemaVersion": "1",
   "generatedBy": "kbd-runtime",
   "projectionContractVersion": 2,
-  "sourceRevision": 51,
-  "derivedRevision": 51,
+  "sourceRevision": 53,
+  "derivedRevision": 53,
   "frontier": {
-    "fa91ef8b-263d-4bc4-8d16-13f71ac4a62b": 51
+    "fa91ef8b-263d-4bc4-8d16-13f71ac4a62b": 53
   },
   "conflictCount": 0,
-  "updatedAt": "2026-09-26T23:06:51.866612Z",
+  "updatedAt": "2026-09-27T02:13:21.890888Z",
   "cursor": [
     "surrealdb-connection-architecture",
     "surrealdb-3x-connection-model",
-    "c3-retry-coverage"
+    "c4-palace-session"
   ],
   "root": {
     "type": "phase",
     "id": "7831e934-53c6-4541-828b-504a430f7d9f",
     "status": "ready",
     "progress": {
-      "done": 18,
+      "done": 19,
       "total": 26
     },
     "children": [
@@ -39,7 +39,7 @@
             "canonicalId": "surrealdb-3x-connection-model",
             "status": "PENDING",
             "progress": {
-              "done": 4,
+              "done": 5,
               "total": 8
             },
             "children": [
@@ -64,7 +64,7 @@
               {
                 "type": "change",
                 "id": "c3-retry-coverage",
-                "status": "PENDING",
+                "status": "COMPLETE",
                 "progress": {
                   "done": 0,
                   "total": 0
