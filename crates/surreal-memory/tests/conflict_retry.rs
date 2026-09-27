@@ -221,6 +221,29 @@ async fn concurrent_embedded_writes_survive_conflicts_without_loss_or_duplicates
         "every update_memory must record exactly one 'updated' history row"
     );
 
+    // Each concurrent update must build on the one before it: history versions
+    // 2..=TASKS+1 with no duplicates, and the final memory at version TASKS+1.
+    let versions: Vec<serde_json::Value> = storage
+        .db()
+        .expect("db handle")
+        .query("SELECT VALUE version FROM memory_history WHERE change_type = 'updated' ORDER BY version")
+        .await
+        .expect("history versions")
+        .take(0)
+        .expect("history version rows");
+    let versions: Vec<u64> = versions.iter().filter_map(|v| v.as_u64()).collect();
+    assert_eq!(
+        versions,
+        (2..=(TASKS as u64 + 1)).collect::<Vec<_>>(),
+        "concurrent updates must produce consecutive, unique versions"
+    );
+    let final_memory = storage
+        .get_memory(&target_id)
+        .await
+        .expect("read target")
+        .expect("target exists");
+    assert_eq!(final_memory.version as u64, TASKS as u64 + 1);
+
     eprintln!(
         "conflict retries observed: {}",
         RETRIES.load(Ordering::SeqCst) - retries_before

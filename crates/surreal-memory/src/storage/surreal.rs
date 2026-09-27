@@ -1720,11 +1720,11 @@ impl MemoryStorage for SurrealStorage {
 
     async fn delete_entity(&self, name: &str) -> Result<()> {
         let db = self.live_db()?;
-        // Both statements are idempotent deletes, so the request is safe to
-        // resubmit after a conflict.
+        // One transaction, so the entity and its relations are removed together
+        // and a conflict aborts both.
         self.write_retrying_conflicts("delete_entity", || async {
             check_statements(
-                db.query("DELETE FROM entity WHERE name = $name; DELETE FROM relation WHERE from = $name OR to = $name")
+                db.query("BEGIN TRANSACTION; DELETE FROM entity WHERE name = $name; DELETE FROM relation WHERE from = $name OR to = $name; COMMIT TRANSACTION;")
                     .bind(("name", name.to_string()))
                     .await?,
             )
@@ -1938,25 +1938,30 @@ impl MemoryStorage for SurrealStorage {
 
     async fn update_memory(&self, id: &str, content: String) -> Result<Memory> {
         let db = self.live_db()?;
-        let old = self
-            .get_memory(id)
+        self.get_memory(id)
             .await?
             .with_context(|| format!("Memory '{}' not found", id))?;
         let new_emb = self.embed_text(&content).await?;
-        let new_version = old.version + 1;
         let token_count = Self::estimate_tokens(&content);
         let now = Datetime::default();
         let (table, key) = Self::parse_record_id_str(id, "memory")?;
 
         // The update and its 'updated' history row are one transaction, so a
         // conflict retry resubmits both and neither can land without the other.
+        // The prior content and version are read inside the transaction: a
+        // conflict usually means another update of this memory won, and a
+        // resubmitted request must build on that update, not on a stale read.
+        // A memory deleted after the check above aborts the whole transaction
+        // (THROW is not a conflict, so it surfaces instead of retrying).
         self.write_retrying_conflicts("update_memory", || async {
             check_statements(
                 db.query(
                     "BEGIN TRANSACTION;\n\
+                     LET $before = (SELECT content, version FROM ONLY type::record($table, $key));\n\
+                     IF $before = NONE { THROW 'memory not found' };\n\
                      UPDATE type::record($table, $key) \
-                     SET content = $content, embedding = $emb, token_count = $tc, version = $v, updated_at = $now;\n\
-                     INSERT INTO memory_history { memory_id: type::record($table, $key), version: $v, old_content: $old, new_content: $content, changed_at: $now, change_type: 'updated' };\n\
+                     SET content = $content, embedding = $emb, token_count = $tc, version = $before.version + 1, updated_at = $now;\n\
+                     INSERT INTO memory_history { memory_id: type::record($table, $key), version: $before.version + 1, old_content: $before.content, new_content: $content, changed_at: $now, change_type: 'updated' };\n\
                      COMMIT TRANSACTION;",
                 )
                 .bind(("table", table.clone()))
@@ -1964,8 +1969,6 @@ impl MemoryStorage for SurrealStorage {
                 .bind(("content", content.clone()))
                 .bind(("emb", new_emb.clone()))
                 .bind(("tc", token_count))
-                .bind(("v", new_version))
-                .bind(("old", old.content.clone()))
                 .bind(("now", now))
                 .await?,
             )
