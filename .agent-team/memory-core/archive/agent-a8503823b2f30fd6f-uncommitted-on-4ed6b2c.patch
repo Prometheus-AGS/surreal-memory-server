@@ -1,0 +1,939 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 5bfe251..6676272 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -419,6 +419,12 @@ version = "0.22.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+ 
++[[package]]
++name = "base64"
++version = "0.23.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
++
+ [[package]]
+ name = "base64ct"
+ version = "1.8.3"
+@@ -1289,12 +1295,12 @@ dependencies = [
+ 
+ [[package]]
+ name = "darling"
+-version = "0.23.0"
++version = "0.24.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "25ae13da2f202d56bd7f91c25fba009e7717a1e4a1cc98a76d844b65ae912e9d"
++checksum = "ed17f5901b6630b993ca003def43f2f8ef4014fc13b047b57aad617ff32bc2ec"
+ dependencies = [
+- "darling_core 0.23.0",
+- "darling_macro 0.23.0",
++ "darling_core 0.24.1",
++ "darling_macro 0.24.1",
+ ]
+ 
+ [[package]]
+@@ -1313,15 +1319,15 @@ dependencies = [
+ 
+ [[package]]
+ name = "darling_core"
+-version = "0.23.0"
++version = "0.24.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "9865a50f7c335f53564bb694ef660825eb8610e0a53d3e11bf1b0d3df31e03b0"
++checksum = "6837e2cf7485aaae18f86181d2f0e9a7ed297a025e220aeabf63fdebd3a2ddff"
+ dependencies = [
+  "ident_case",
+  "proc-macro2",
+  "quote",
+  "strsim",
+- "syn 2.0.117",
++ "syn 3.0.6",
+ ]
+ 
+ [[package]]
+@@ -1337,13 +1343,13 @@ dependencies = [
+ 
+ [[package]]
+ name = "darling_macro"
+-version = "0.23.0"
++version = "0.24.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "ac3984ec7bd6cfa798e62b4a642426a5be0e68f9401cfc2a01e3fa9ea2fcdb8d"
++checksum = "2ac7135c3ef02b2f7833bbeb1be5ba7f966dcde8a87c6b87f65a778d71a02785"
+ dependencies = [
+- "darling_core 0.23.0",
++ "darling_core 0.24.1",
+  "quote",
+- "syn 2.0.117",
++ "syn 3.0.6",
+ ]
+ 
+ [[package]]
+@@ -1504,7 +1510,7 @@ dependencies = [
+  "libc",
+  "option-ext",
+  "redox_users 0.5.2",
+- "windows-sys 0.59.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -1789,7 +1795,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
+ dependencies = [
+  "libc",
+- "windows-sys 0.59.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -3898,7 +3904,7 @@ version = "0.50.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
+ dependencies = [
+- "windows-sys 0.59.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -4626,7 +4632,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
+ dependencies = [
+  "anyhow",
+- "itertools 0.13.0",
++ "itertools 0.14.0",
+  "proc-macro2",
+  "quote",
+  "syn 2.0.117",
+@@ -4790,7 +4796,7 @@ dependencies = [
+  "once_cell",
+  "socket2",
+  "tracing",
+- "windows-sys 0.59.0",
++ "windows-sys 0.60.2",
+ ]
+ 
+ [[package]]
+@@ -5287,17 +5293,19 @@ dependencies = [
+ 
+ [[package]]
+ name = "rmcp"
+-version = "1.4.0"
+-source = "git+https://github.com/modelcontextprotocol/rust-sdk?rev=a64be231527f923e9f84d4dd7bf3c3bd695ee53e#a64be231527f923e9f84d4dd7bf3c3bd695ee53e"
++version = "3.4.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b23c62fe489ac1d401ab32688cfacac3737a8978dc3343e5361464c7724fd3cb"
+ dependencies = [
+  "async-trait",
+- "base64 0.22.1",
++ "base64 0.23.1",
+  "bytes",
+  "chrono",
+  "futures",
+  "http",
+  "http-body",
+  "http-body-util",
++ "indexmap",
+  "pastey 0.2.1",
+  "pin-project-lite",
+  "rand 0.10.1",
+@@ -5317,14 +5325,15 @@ dependencies = [
+ 
+ [[package]]
+ name = "rmcp-macros"
+-version = "1.4.0"
+-source = "git+https://github.com/modelcontextprotocol/rust-sdk?rev=a64be231527f923e9f84d4dd7bf3c3bd695ee53e#a64be231527f923e9f84d4dd7bf3c3bd695ee53e"
++version = "3.4.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d2ee366004e5f87c103be91c6c09337811517ae8d2f919ece9da7c21444b85c5"
+ dependencies = [
+- "darling 0.23.0",
++ "darling 0.24.1",
+  "proc-macro2",
+  "quote",
+  "serde_json",
+- "syn 2.0.117",
++ "syn 3.0.6",
+ ]
+ 
+ [[package]]
+@@ -5502,7 +5511,7 @@ dependencies = [
+  "errno",
+  "libc",
+  "linux-raw-sys",
+- "windows-sys 0.59.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -5561,7 +5570,7 @@ dependencies = [
+  "security-framework",
+  "security-framework-sys",
+  "webpki-root-certs",
+- "windows-sys 0.59.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -5736,7 +5745,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
+ dependencies = [
+  "libc",
+- "windows-sys 0.59.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -6032,9 +6041,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "sse-stream"
+-version = "0.2.2"
++version = "0.2.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "2c5e6deb40826033bd7b11c7ef25ef71193fabd71f680f40dd16538a2704d2f4"
++checksum = "c25ac7aff0abd1dbc474536e40416e1102c7dd9bfba0b9861c6d357f835dcfb4"
+ dependencies = [
+  "bytes",
+  "futures-util",
+@@ -6448,6 +6457,17 @@ dependencies = [
+  "unicode-ident",
+ ]
+ 
++[[package]]
++name = "syn"
++version = "3.0.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8593e8e72159ed2257d083c7a454a85cbf854f37a0966d8d483aff8c8a3ebcee"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "unicode-ident",
++]
++
+ [[package]]
+ name = "sync_wrapper"
+ version = "1.0.2"
+@@ -6544,7 +6564,7 @@ dependencies = [
+  "getrandom 0.4.2",
+  "once_cell",
+  "rustix",
+- "windows-sys 0.59.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -7618,7 +7638,7 @@ version = "0.1.11"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
+ dependencies = [
+- "windows-sys 0.48.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+diff --git a/Cargo.toml b/Cargo.toml
+index 5c9551d..6dc939b 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -40,17 +40,20 @@ edition = "2024"
+ surreal-memory = { path = "crates/surreal-memory", default-features = false }
+ 
+ # MCP SDK
+-# `rev` is REQUIRED, not decorative. Without it this dependency floats to the
+-# default branch HEAD, and `cargo update` re-resolves straight past the
+-# committed Cargo.lock — picking an rmcp whose `model::Content` no longer
+-# exists (it is `ContentBlock` in 2.x). Reproduced 2026-07-31:
+-# `rm Cargo.lock && cargo check` fails with E0432 + E0639, while a plain
+-# `cargo check` succeeds on the stale lock. A lockfile records a resolution; it
+-# does not constrain the next one.
+-#
+-# a64be231 is what the committed lockfile already resolves to, so pinning it
+-# changes nothing today — it only stops the drift.
+-rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "a64be231527f923e9f84d4dd7bf3c3bd695ee53e", features = [
++# Pinned to an EXACT registry version (`=3.4.0`), not a caret range. This
++# replaces a prior git `rev` pin (a64be231, rmcp 1.4.0) that existed to stop
++# `cargo update` from floating past the committed Cargo.lock onto a semver-
++# incompatible rmcp release. A registry version requirement has the same
++# floating risk with a caret (`^3.4.0` would happily take 3.5.0's breakage),
++# so the exact-version form (`=3.4.0`) is load-bearing here for the identical
++# reason the `rev` was: `model::Content` was renamed to `model::ContentBlock`,
++# `ServerInfo`/`ClientInfo` are now deprecated aliases for `ServerConfig`/
++# `ClientConfig`, and `ProgressNotificationParam` gained a required `meta`
++# field behind `#[non_exhaustive]` — each a compile break, not a warning.
++# Bumping this pin requires re-reading rmcp's CHANGELOG.md for the versions in
++# between and re-verifying the MCP protocol-version support matrix in
++# `tests/mcp_protocol_versions.rs`.
++rmcp = { version = "=3.4.0", features = [
+     "server",
+     "transport-io",
+     "macros",
+diff --git a/README.md b/README.md
+index dcf8d15..d1c678c 100644
+--- a/README.md
++++ b/README.md
+@@ -36,6 +36,10 @@ SurrealDB storage, graph, vectors, events, task state
+ 
+ The `crates/surreal-memory` library owns storage and embedding abstractions. The root binary supplies Axum REST/MCP routing, durable operation coordination, supervised execution, and background workers. Optional features include Memory Palace and CUDA/Metal acceleration.
+ 
++## MCP transports
++
++The MCP server (`src/mcp/`) is built on [rmcp](https://github.com/modelcontextprotocol/rust-sdk) `=3.4.0`, exposed over stdio (`MCP_STDIO=true`, the default) and streamable HTTP (mounted at `/mcp/http`, with legacy SSE compatibility routes at `/mcp/sse` and `/mcp/messages`). Both transports negotiate every MCP protocol revision the SDK knows: `2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25`, and `2026-07-28` (the last replaced the `initialize` handshake with `server/discover` plus per-request `_meta`, per SEP-2575). See `tests/mcp_protocol_versions.rs` for the version × transport coverage matrix.
++
+ ## Build and test
+ 
+ ```bash
+diff --git a/docs/lessons.md b/docs/lessons.md
+index b42e74e..7432e36 100644
+--- a/docs/lessons.md
++++ b/docs/lessons.md
+@@ -58,3 +58,11 @@ Format: `YYYY-MM-DD — Rule — *(context: what went wrong)*`
+ - 2026-03-17 — One `cargo check` per change set. Do not re-run "to be sure."
+ - 2026-03-17 — Test changes against the real consumer (UAR), not a toy test.
+ - 2026-03-17 — For CLI/agent consumers, `user_id = "anonymous"` so scope filtering uses `agent_id`.
++
++## MCP / rmcp
++
++- 2026-09-25 — An MCP protocol-version support gap is a version-pin problem, not a code-logic problem: rmcp 1.4.0 predates 2025-11-25 support (added 1.5.0) and predates the 2026-07-28 discover/per-request-meta lifecycle (added 3.0.0-beta.1, SEP-2575). `ServerHandler::supported_protocol_versions` already defaults to `ProtocolVersion::KNOWN_VERSIONS` (every version the linked SDK knows) — the fix for "some clients can't initialize" was upgrading the dependency, not touching negotiation logic.
++- 2026-09-25 — `rmcp::model::Content` was renamed to `ContentBlock` and `ServerInfo`/`ClientInfo` became `#[deprecated]` aliases for `ServerConfig`/`ClientConfig` (same underlying `InitializeResult`/`InitializeRequestParams` type) between 1.4.0 and 3.4.0. `cargo clippy -D warnings` fails on the deprecated alias even though it still compiles — grep for the old names after any rmcp bump, don't rely on `cargo check` alone.
++- 2026-09-25 — `rmcp::model::ProgressNotificationParam` is `#[non_exhaustive]` and gained a required `meta` field in the same range; struct-literal construction from outside the crate stops compiling. Use the `::new(token, progress).with_message(..)` builder instead of assuming a plain struct literal survives a minor-looking SDK bump.
++- 2026-09-25 — When testing an MCP server's transport layer, drive it with hand-rolled raw JSON-RPC (newline-delimited over an in-process `tokio::io::duplex` for stdio; SSE-framed HTTP POSTs for streamable HTTP), not the SDK's own client. The real client population (Claude Desktop, Cursor, etc.) does not link `rmcp`; a server that only satisfies its own SDK's client proves nothing about interop.
++- 2026-09-25 — The production `StreamableHttpServerConfig::default()` (`legacy_session_mode: true`, `json_response: false`) means even 2026-07-28's per-request-negotiated calls come back as `text/event-stream` SSE bodies on success, not plain JSON — a single SSE-aware response parser must be shared across every protocol version's HTTP test, not just the legacy ones.
+diff --git a/src/mcp/handlers.rs b/src/mcp/handlers.rs
+index a25d306..7ec50c4 100644
+--- a/src/mcp/handlers.rs
++++ b/src/mcp/handlers.rs
+@@ -7,7 +7,7 @@ use crate::{
+ };
+ use rmcp::{
+     ErrorData as McpError,
+-    model::{CallToolResult, Content, ErrorCode},
++    model::{CallToolResult, ContentBlock, ErrorCode},
+     schemars,
+ };
+ use serde::{Deserialize, Serialize};
+@@ -383,7 +383,7 @@ impl MemoryHandler {
+             .await
+             .map_err(Self::internal_error)?;
+ 
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&created).unwrap_or_else(|_| "Entity created".to_string()),
+         )]))
+     }
+@@ -400,7 +400,7 @@ impl MemoryHandler {
+             .await
+             .map_err(Self::internal_error)?;
+ 
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&updated)
+                 .unwrap_or_else(|_| "Observations added".to_string()),
+         )]))
+@@ -420,7 +420,7 @@ impl MemoryHandler {
+             .await
+             .map_err(Self::internal_error)?;
+ 
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&created)
+                 .unwrap_or_else(|_| "Relation created".to_string()),
+         )]))
+@@ -433,7 +433,7 @@ impl MemoryHandler {
+             .get_entity(&params.name)
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&entity).unwrap_or_else(|_| "null".to_string()),
+         )]))
+     }
+@@ -450,7 +450,7 @@ impl MemoryHandler {
+             .update_entity(params.into_entity())
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&updated).unwrap_or_else(|_| "Entity updated".to_string()),
+         )]))
+     }
+@@ -465,7 +465,7 @@ impl MemoryHandler {
+             .get_relations(&params.name)
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&relations).unwrap_or_else(|_| "[]".to_string()),
+         )]))
+     }
+@@ -480,7 +480,7 @@ impl MemoryHandler {
+             .get_entity_history(&params.name)
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&history).unwrap_or_else(|_| "[]".to_string()),
+         )]))
+     }
+@@ -492,7 +492,7 @@ impl MemoryHandler {
+             .get_graph_at_time(&params.before_rfc3339)
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&graph).unwrap_or_else(|_| "{}".to_string()),
+         )]))
+     }
+@@ -506,7 +506,7 @@ impl MemoryHandler {
+             .await
+             .map_err(Self::internal_error)?;
+ 
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&results).unwrap_or_else(|_| "[]".to_string()),
+         )]))
+     }
+@@ -518,7 +518,7 @@ impl MemoryHandler {
+             .await
+             .map_err(Self::internal_error)?;
+ 
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&graph).unwrap_or_else(|_| "{}".to_string()),
+         )]))
+     }
+@@ -535,7 +535,7 @@ impl MemoryHandler {
+             .await
+             .map_err(Self::internal_error)?;
+ 
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&results).unwrap_or_else(|_| "[]".to_string()),
+         )]))
+     }
+@@ -575,7 +575,7 @@ impl MemoryHandler {
+             .await
+             .map_err(Self::internal_error)?;
+ 
+-        Ok(CallToolResult::success(vec![Content::text(format!(
++        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+             "Deleted entity '{}' and removed {} relation(s)",
+             name,
+             relations.len()
+@@ -593,7 +593,7 @@ impl MemoryHandler {
+             .await
+             .map_err(Self::internal_error)?;
+ 
+-        Ok(CallToolResult::success(vec![Content::text(format!(
++        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+             "Deleted relation {} --[{}]--> {}",
+             params.from, params.relation_type, params.to
+         ))]))
+@@ -623,7 +623,7 @@ impl MemoryHandler {
+             .create_entities(entities)
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&created).unwrap_or_default(),
+         )]))
+     }
+@@ -650,7 +650,7 @@ impl MemoryHandler {
+             .create_relations(relations)
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&created).unwrap_or_default(),
+         )]))
+     }
+@@ -666,7 +666,7 @@ impl MemoryHandler {
+             .add_memory(params.into_memory())
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&stored).unwrap_or_default(),
+         )]))
+     }
+@@ -677,7 +677,7 @@ impl MemoryHandler {
+             .get_memory(&params.id)
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&mem).unwrap_or_else(|_| "null".to_string()),
+         )]))
+     }
+@@ -695,7 +695,7 @@ impl MemoryHandler {
+             .update_memory(&params.id, params.update.content)
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&updated).unwrap_or_default(),
+         )]))
+     }
+@@ -705,7 +705,7 @@ impl MemoryHandler {
+             .delete_memory(&params.id)
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(format!(
++        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+             "Memory '{}' deleted",
+             params.id
+         ))]))
+@@ -724,7 +724,7 @@ impl MemoryHandler {
+             )
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(format!(
++        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+             "Deleted {} memor{}",
+             count,
+             if count == 1 { "y" } else { "ies" }
+@@ -744,7 +744,7 @@ impl MemoryHandler {
+             )
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&memories).unwrap_or_default(),
+         )]))
+     }
+@@ -768,7 +768,7 @@ impl MemoryHandler {
+             )
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&results).unwrap_or_default(),
+         )]))
+     }
+@@ -782,7 +782,7 @@ impl MemoryHandler {
+             .get_memory_history(&params.id)
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&history).unwrap_or_default(),
+         )]))
+     }
+@@ -812,7 +812,7 @@ impl MemoryHandler {
+             .create_task_stream(stream)
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&created).unwrap_or_default(),
+         )]))
+     }
+@@ -830,7 +830,7 @@ impl MemoryHandler {
+             )
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&stream).unwrap_or_else(|_| "null".to_string()),
+         )]))
+     }
+@@ -859,7 +859,7 @@ impl MemoryHandler {
+             )
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&stored).unwrap_or_default(),
+         )]))
+     }
+@@ -879,7 +879,7 @@ impl MemoryHandler {
+             )
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&ctx).unwrap_or_default(),
+         )]))
+     }
+@@ -893,7 +893,7 @@ impl MemoryHandler {
+             .list_task_streams(params.agent_id.as_deref(), params.user_id.as_deref())
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&streams).unwrap_or_default(),
+         )]))
+     }
+@@ -911,7 +911,7 @@ impl MemoryHandler {
+             )
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&archived).unwrap_or_default(),
+         )]))
+     }
+@@ -929,7 +929,7 @@ impl MemoryHandler {
+             )
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&paused).unwrap_or_default(),
+         )]))
+     }
+@@ -963,7 +963,7 @@ impl MemoryHandler {
+             )
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&added).unwrap_or_default(),
+         )]))
+     }
+@@ -980,7 +980,7 @@ impl MemoryHandler {
+             .update_task_step_status(&params.idempotency_key, status, params.result, params.error)
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&updated).unwrap_or_default(),
+         )]))
+     }
+@@ -998,7 +998,7 @@ impl MemoryHandler {
+             )
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&steps).unwrap_or_default(),
+         )]))
+     }
+@@ -1016,7 +1016,7 @@ impl MemoryHandler {
+             )
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&step).unwrap_or_else(|_| "null".to_string()),
+         )]))
+     }
+@@ -1030,7 +1030,7 @@ impl MemoryHandler {
+             .complete_step(&params.idempotency_key, params.result)
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&completed).unwrap_or_default(),
+         )]))
+     }
+@@ -1260,7 +1260,7 @@ impl MemoryHandler {
+             .into_mindmap()
+             .map_err(|error| Self::invalid_params(error.to_string()))?;
+         match self.storage.create_mindmap(mm).await {
+-            Ok(created) => Ok(CallToolResult::success(vec![Content::text(
++            Ok(created) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                 serde_json::to_string_pretty(&created).unwrap_or_default(),
+             )])),
+             Err(e) => Err(Self::internal_error(e)),
+@@ -1277,10 +1277,10 @@ impl MemoryHandler {
+             )
+             .await
+         {
+-            Ok(Some(mm)) => Ok(CallToolResult::success(vec![Content::text(
++            Ok(Some(mm)) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                 serde_json::to_string_pretty(&mm).unwrap_or_default(),
+             )])),
+-            Ok(None) => Ok(CallToolResult::success(vec![Content::text("null")])),
++            Ok(None) => Ok(CallToolResult::success(vec![ContentBlock::text("null")])),
+             Err(e) => Err(Self::internal_error(e)),
+         }
+     }
+@@ -1294,7 +1294,7 @@ impl MemoryHandler {
+             .list_mindmaps(params.user_id.as_deref(), params.agent_id.as_deref())
+             .await
+         {
+-            Ok(maps) => Ok(CallToolResult::success(vec![Content::text(
++            Ok(maps) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                 serde_json::to_string_pretty(&maps).unwrap_or_default(),
+             )])),
+             Err(e) => Err(Self::internal_error(e)),
+@@ -1326,7 +1326,7 @@ impl MemoryHandler {
+             )
+             .await
+         {
+-            Ok(mm) => Ok(CallToolResult::success(vec![Content::text(
++            Ok(mm) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                 serde_json::to_string_pretty(&mm).unwrap_or_default(),
+             )])),
+             Err(e) => Err(Self::internal_error(e)),
+@@ -1356,7 +1356,7 @@ impl MemoryHandler {
+             )
+             .await
+         {
+-            Ok(mm) => Ok(CallToolResult::success(vec![Content::text(
++            Ok(mm) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                 serde_json::to_string_pretty(&mm).unwrap_or_default(),
+             )])),
+             Err(e) => Err(Self::internal_error(e)),
+@@ -1377,7 +1377,7 @@ impl MemoryHandler {
+             )
+             .await
+         {
+-            Ok(mm) => Ok(CallToolResult::success(vec![Content::text(
++            Ok(mm) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                 serde_json::to_string_pretty(&mm).unwrap_or_default(),
+             )])),
+             Err(e) => Err(Self::internal_error(e)),
+@@ -1397,7 +1397,7 @@ impl MemoryHandler {
+             )
+             .await
+         {
+-            Ok(()) => Ok(CallToolResult::success(vec![Content::text(
++            Ok(()) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                 "Mindmap deleted",
+             )])),
+             Err(e) => Err(Self::internal_error(e)),
+@@ -1423,7 +1423,7 @@ impl MemoryHandler {
+             )
+             .await
+         {
+-            Ok(Some(mm)) => Ok(CallToolResult::success(vec![Content::text(
++            Ok(Some(mm)) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                 mm.export(&fmt),
+             )])),
+             Ok(None) => Err(Self::invalid_params(format!(
+@@ -1496,7 +1496,7 @@ impl MemoryHandler {
+         }
+ 
+         match self.storage.create_mindmap(mm).await {
+-            Ok(created) => Ok(CallToolResult::success(vec![Content::text(
++            Ok(created) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                 serde_json::to_string_pretty(&created).unwrap_or_default(),
+             )])),
+             Err(e) => Err(Self::internal_error(e)),
+@@ -1524,7 +1524,7 @@ impl MemoryHandler {
+             params.user_id,
+         );
+         match self.storage.create_mindmap(mm).await {
+-            Ok(created) => Ok(CallToolResult::success(vec![Content::text(
++            Ok(created) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                 serde_json::to_string_pretty(&created).unwrap_or_default(),
+             )])),
+             Err(e) => Err(Self::internal_error(e)),
+@@ -1550,7 +1550,7 @@ impl MemoryHandler {
+             )
+             .await
+         {
+-            Ok(mems) => Ok(CallToolResult::success(vec![Content::text(
++            Ok(mems) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                 serde_json::to_string_pretty(&mems).unwrap_or_default(),
+             )])),
+             Err(e) => Err(Self::internal_error(e)),
+@@ -1571,10 +1571,10 @@ impl MemoryHandler {
+             )
+             .await
+         {
+-            Ok(Some(summary)) => Ok(CallToolResult::success(vec![Content::text(
++            Ok(Some(summary)) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                 serde_json::to_string_pretty(&summary).unwrap_or_default(),
+             )])),
+-            Ok(None) => Ok(CallToolResult::success(vec![Content::text(
++            Ok(None) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                 "No memories to compress",
+             )])),
+             Err(e) => Err(Self::internal_error(e)),
+@@ -1599,7 +1599,7 @@ impl MemoryHandler {
+             )
+             .await
+         {
+-            Ok(mems) => Ok(CallToolResult::success(vec![Content::text(format!(
++            Ok(mems) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+                 "Stored {} memories from conversation",
+                 mems.len()
+             ))])),
+@@ -1623,11 +1623,11 @@ impl MemoryHandler {
+             )
+             .await
+         {
+-            Ok(Some(m)) => Ok(CallToolResult::success(vec![Content::text(format!(
++            Ok(Some(m)) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+                 "Auto-summarized task stream '{}'. Summary: {}",
+                 params.stream_name, m.content
+             ))])),
+-            Ok(None) => Ok(CallToolResult::success(vec![Content::text(format!(
++            Ok(None) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+                 "Task stream '{}' does not need summarization yet.",
+                 params.stream_name
+             ))])),
+@@ -1641,10 +1641,10 @@ impl MemoryHandler {
+             .find_path(&params.from, &params.to, params.max_depth.unwrap_or(4))
+             .await
+         {
+-            Ok(paths) if paths.is_empty() => Ok(CallToolResult::success(vec![Content::text(
++            Ok(paths) if paths.is_empty() => Ok(CallToolResult::success(vec![ContentBlock::text(
+                 format!("No path found from '{}' to '{}'", params.from, params.to),
+             )])),
+-            Ok(paths) => Ok(CallToolResult::success(vec![Content::text(
++            Ok(paths) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                 serde_json::to_string_pretty(&paths).unwrap_or_default(),
+             )])),
+             Err(e) => Err(Self::internal_error(e)),
+@@ -1664,7 +1664,7 @@ impl MemoryHandler {
+             )
+             .await
+         {
+-            Ok(graph) => Ok(CallToolResult::success(vec![Content::text(
++            Ok(graph) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                 serde_json::to_string_pretty(&graph).unwrap_or_default(),
+             )])),
+             Err(e) => Err(Self::internal_error(e)),
+@@ -1682,7 +1682,7 @@ impl MemoryHandler {
+             )
+             .await
+         {
+-            Ok(entities) => Ok(CallToolResult::success(vec![Content::text(
++            Ok(entities) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                 serde_json::to_string_pretty(&entities).unwrap_or_default(),
+             )])),
+             Err(e) => Err(Self::internal_error(e)),
+@@ -1849,7 +1849,7 @@ impl MemoryHandler {
+         } else {
+             result
+         };
+-        Ok(CallToolResult::success(vec![Content::text(output)]))
++        Ok(CallToolResult::success(vec![ContentBlock::text(output)]))
+     }
+ 
+     pub async fn palace_recall(
+@@ -1868,7 +1868,7 @@ impl MemoryHandler {
+         } else {
+             result
+         };
+-        Ok(CallToolResult::success(vec![Content::text(output)]))
++        Ok(CallToolResult::success(vec![ContentBlock::text(output)]))
+     }
+ 
+     pub async fn palace_search(
+@@ -1895,7 +1895,7 @@ impl MemoryHandler {
+         } else {
+             result
+         };
+-        Ok(CallToolResult::success(vec![Content::text(output)]))
++        Ok(CallToolResult::success(vec![ContentBlock::text(output)]))
+     }
+ 
+     pub async fn palace_ingest(
+@@ -1925,7 +1925,7 @@ impl MemoryHandler {
+             )
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::json!({ "drawer_id": drawer_id }).to_string(),
+         )]))
+     }
+@@ -1943,7 +1943,7 @@ impl MemoryHandler {
+             .palace_delete(&params.id)
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::json!({ "deleted": true, "id": params.id }).to_string(),
+         )]))
+     }
+@@ -1955,7 +1955,7 @@ impl MemoryHandler {
+             .palace_status()
+             .await
+             .map_err(Self::internal_error)?;
+-        Ok(CallToolResult::success(vec![Content::text(
++        Ok(CallToolResult::success(vec![ContentBlock::text(
+             serde_json::to_string_pretty(&status).unwrap_or_default(),
+         )]))
+     }
+@@ -1987,7 +1987,7 @@ impl MemoryHandler {
+         } else {
+             serde_json::to_string_pretty(&hits).unwrap_or_default()
+         };
+-        Ok(CallToolResult::success(vec![Content::text(output)]))
++        Ok(CallToolResult::success(vec![ContentBlock::text(output)]))
+     }
+ }
+ 
+diff --git a/src/mcp/http.rs b/src/mcp/http.rs
+index 373785d..a730cab 100644
+--- a/src/mcp/http.rs
++++ b/src/mcp/http.rs
+@@ -43,7 +43,8 @@ pub fn mcp_http_router(storage: Arc<dyn MemoryStorage>, prefix: &str) -> Router
+ 
+     // --- Streamable HTTP Endpoint (New Standard) ---
+     //
+-    // rmcp 1.4.0's `SessionConfig::DEFAULT_KEEP_ALIVE` is 5 minutes. Idle MCP
++    // rmcp's `SessionConfig::DEFAULT_KEEP_ALIVE` is 5 minutes (still true as
++    // of rmcp 3.4.0). Idle MCP
+     // clients (the common case: a coding agent that calls a tool, thinks for a
+     // while, then calls another tool) get culled mid-conversation and the next
+     // request returns 404 with `mcp-session-id` set. That manifests upstream as
+diff --git a/src/mcp/mod.rs b/src/mcp/mod.rs
+index d3c7d32..2fc1a06 100644
+--- a/src/mcp/mod.rs
++++ b/src/mcp/mod.rs
+@@ -2,11 +2,12 @@ use anyhow::Result;
+ use rmcp::{
+     ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
+     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+-    model::{CallToolResult, ServerCapabilities, ServerInfo},
++    model::{CallToolResult, ProtocolVersion, ServerCapabilities, ServerConfig},
+     service::RequestContext,
+     tool, tool_handler, tool_router,
+     transport::stdio,
+ };
++use std::borrow::Cow;
+ use std::sync::Arc;
+ 
+ use crate::storage::MemoryStorage;
+@@ -641,8 +642,8 @@ impl MemoryMcpServer {
+ 
+ #[tool_handler]
+ impl ServerHandler for MemoryMcpServer {
+-    fn get_info(&self) -> ServerInfo {
+-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
++    fn get_info(&self) -> ServerConfig {
++        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+             .with_instructions(
+                 "Knowledge graph memory server with scoped memory, TaskStreams, Mindmaps, and Graph-RAG. \
+                 Knowledge graph: create_entity/create_entities, add_observations, create_relation/create_relations, \
+@@ -661,4 +662,14 @@ impl ServerHandler for MemoryMcpServer {
+                 generate_persona_mindmap, generate_ideation_mindmap.",
+             )
+     }
++
++    // Explicit rather than relying on the SDK default (which also returns
++    // `ProtocolVersion::KNOWN_VERSIONS`): this is the list validated on
++    // `initialize`/`discover`/per-request `_meta` negotiation, and pinning it
++    // here means a future rmcp upgrade that narrows its own default cannot
++    // silently drop protocol-version support out from under this server.
++    // Covers 2024-11-05, 2025-03-26, 2025-06-18, 2025-11-25, and 2026-07-28.
++    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
++        Cow::Borrowed(ProtocolVersion::KNOWN_VERSIONS)
++    }
+ }
+diff --git a/src/mcp/progress.rs b/src/mcp/progress.rs
+index 149a629..7476416 100644
+--- a/src/mcp/progress.rs
++++ b/src/mcp/progress.rs
+@@ -53,12 +53,8 @@ where
+         loop {
+             interval.tick().await;
+             step += 1.0;
+-            let param = ProgressNotificationParam {
+-                progress_token: token.clone(),
+-                progress: step,
+-                total: None,
+-                message: Some(format!("{label} in progress")),
+-            };
++            let param = ProgressNotificationParam::new(token.clone(), step)
++                .with_message(format!("{label} in progress"));
+             if peer.notify_progress(param).await.is_err() {
+                 // Client disconnected or transport closed — stop heartbeating.
+                 break;

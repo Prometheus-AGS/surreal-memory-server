@@ -1,0 +1,4443 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 5f98cf5..9eee822 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -214,7 +214,7 @@ EMBEDDING_PROVIDER=openai OPENAI_API_KEY=sk-... ./target/release/surreal-memory-
+ | `crates/surreal-memory/src/lib.rs` | Library public API — all re-exports |
+ | `crates/surreal-memory/src/storage/mod.rs` | `MemoryStorage` trait (35+ methods) |
+ | `crates/surreal-memory/src/storage/surreal.rs` | `SurrealStorage` implementation |
+-| `crates/surreal-memory/src/storage/migrations/mod.rs` | Schema migrations (v1–v8) |
++| `crates/surreal-memory/src/storage/migrations/mod.rs` | Schema migrations (v1–v21) |
+ | `crates/surreal-memory/src/memory.rs` | `Memory`, `MemoryScope`, `MemoryType` structs |
+ | `crates/surreal-memory/src/entity.rs` | `Entity`, `Relation`, `KnowledgeGraph` |
+ | `crates/surreal-memory/src/task_stream.rs` | `TaskStream`, `ContextWindow` |
+@@ -226,6 +226,8 @@ EMBEDDING_PROVIDER=openai OPENAI_API_KEY=sk-... ./target/release/surreal-memory-
+ ## Configuration
+ 
+ **Database**: `SURREAL_MODE=embedded|server`, `SURREAL_PATH`, `SURREAL_ENDPOINT`
++**Connection behavior**: `SURREAL_QUERY_TIMEOUT_MS` (SDK per-query timeout, default 10000; enforced by the embedded engine — the 3.3.0 SDK ignores it on `ws://`, where server-side `TIMEOUT` clauses derived from it bound long writes), `SURREAL_OPERATION_DEADLINE_MS` (retry/admission backstop, default 30000), `SURREAL_EMBEDDED_MAX_INFLIGHT` (embedded admission permits, default 16; the permit wait counts against the operation deadline), `SURREAL_SERVER_LANES` (server mode: `2` = interactive + independently connected heavy-write connection, the default; `1` = single connection)
++**SurrealDB pin**: SDK `surrealdb`/`surrealdb-types` `=3.3.0`; compose image `surrealdb/surrealdb:v3.3.0` (kept in lockstep)
+ **Embeddings**: `EMBEDDING_PROVIDER=local|openai|cohere`, `LOCAL_EMBEDDING_MODEL`, `MODEL_CACHE_DIR`
+ **Features**: `embedded` (default), `server-only`, `cuda`, `metal`, `local-embeddings`
+ 
+@@ -252,6 +254,11 @@ Migrations live in `crates/surreal-memory/src/storage/migrations/mod.rs`.
+ - v14: Legacy enum string normalization (repair migration)
+ - v15: Enum fields as strings for portability
+ - v16: Palace `drawers` table with 384d HNSW, BM25, wing/room/hall taxonomy indexes (palace feature)
++- v17: Embedding index metadata (`schema_metadata`; HNSW dimension follows the active provider)
++- v18: TaskStream composite UNIQUE scope index (`task_stream_scope_name`)
++- v19: `task_step` table (idempotent, ordered task steps)
++- v20: Durable operation ledger (`memory_operation`, `memory_operation_event`, `memory_operation_part`)
++- v21: Embedding executor journal (`memory_executor_event`)
+ 
+ Always check `crates/surreal-memory/src/storage/migrations/mod.rs` for the
+ canonical list — this section can lag.
+@@ -309,7 +316,7 @@ The `palace` feature flag opts into a separate vector store (`drawers` table,
+ 3. **HNSW index dimensions must match embeddings** — The v5 migration hardcodes `DIMENSION 1536` (memory/entity). The v16 palace migration uses `DIMENSION 384` (drawers). These are independent vector spaces — do not mix them.
+ 4. **`IF NOT EXISTS` is idempotent** — All DDL uses this, so migrations are safe to re-run.
+ 5. **Embedded mode creates RocksDB files** — Multiple processes CANNOT share the same embedded DB path simultaneously. For multi-process access, use server mode (`SURREAL_MODE=server`).
+-6. **`Surreal<Any>` is already `Arc`-wrapped and clone-safe** — Do NOT wrap it in `std::sync::RwLock` / `Mutex`. Clone the handle per task; the SDK multiplexes queries internally. The current `Arc<std::sync::RwLock<ConnectionState>>` in `crates/surreal-memory/src/storage/surreal.rs:44` is a known defect being remediated (see `openspec/changes/fix-surrealdb-connection-architecture/`). Consult the `surrealdb-expert` skill before touching it.
++6. **`Surreal<Any>` is already `Arc`-wrapped and clone-safe** — Do NOT wrap it in `std::sync::RwLock` / `Mutex`. Clone the handle per task; the SDK multiplexes queries internally. The historical `Arc<std::sync::RwLock<ConnectionState>>` was replaced by an `ArcSwap<ConnectionCell>` per connection lane (`storage/surreal.rs`, `storage/sessions.rs`; see `openspec/changes/fix-surrealdb-connection-architecture/`). Clones share one WebSocket — workload isolation needs an independently connected transport (the heavy-write lane), not a clone. Consult the `surrealdb-expert` skill before touching it.
+ 7. **Embedded mode is a first-class production target** — but RocksDB's stripe-locking (default 16 stripes/CF) means concurrent transactions on overlapping keys serialize at the storage engine. Any application-layer lock layered on top compounds this. The fix is (a) no application lock around `Surreal<Any>` (see Gotcha #6) and (b) bound in-flight ops with a semaphore sized to the stripe count (`SURREAL_EMBEDDED_MAX_INFLIGHT`, default 16). Do NOT frame embedded mode as "dev-only."
+ 
+ ## Performance Considerations
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 9fa7f42..47b0245 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -50,7 +50,7 @@ does not exist yet, create it the first time you would have appended.
+ 
+ | Principle | When it bites in this repo |
+ |---|---|
+-| Think before coding | Don't reach for `cargo edit` before reading `surreal.rs:38-42` — the answer to "should I wrap this in a lock?" is in the existing doc comment. |
++| Think before coding | Don't reach for `cargo edit` before reading the `SurrealStorage` doc comment in `surreal.rs` — the answer to "should I wrap this in a lock?" is in the existing doc comment. |
+ | Simplicity first | Don't add `arc-swap` + a supervisor task + a session pool in one PR. Sequence the changes per the plan. |
+ | Surgical changes | The ArcSwap refactor touches 47 sites. Do not also reformat the file or rename anything else. |
+ | Goal-driven | "Fix the timeouts" is not a goal. "Load harness shows ≥3× p99 improvement on concurrent hybrid_search" is. |
+@@ -247,7 +247,7 @@ EMBEDDING_PROVIDER=openai OPENAI_API_KEY=sk-... ./target/release/surreal-memory-
+ | `crates/surreal-memory/src/lib.rs` | Library public API — all re-exports |
+ | `crates/surreal-memory/src/storage/mod.rs` | `MemoryStorage` trait (35+ methods) |
+ | `crates/surreal-memory/src/storage/surreal.rs` | `SurrealStorage` implementation |
+-| `crates/surreal-memory/src/storage/migrations/mod.rs` | Schema migrations (v1–v16) |
++| `crates/surreal-memory/src/storage/migrations/mod.rs` | Schema migrations (v1–v21) |
+ | `crates/surreal-memory/src/memory.rs` | `Memory`, `MemoryScope`, `MemoryType` structs |
+ | `crates/surreal-memory/src/entity.rs` | `Entity`, `Relation`, `KnowledgeGraph` |
+ | `crates/surreal-memory/src/task_stream.rs` | `TaskStream`, `ContextWindow` |
+@@ -265,6 +265,8 @@ EMBEDDING_PROVIDER=openai OPENAI_API_KEY=sk-... ./target/release/surreal-memory-
+ ## Configuration
+ 
+ **Database**: `SURREAL_MODE=embedded|server`, `SURREAL_PATH`, `SURREAL_ENDPOINT`
++**Connection behavior**: `SURREAL_QUERY_TIMEOUT_MS` (SDK per-query timeout, default 10000; enforced by the embedded engine — the 3.3.0 SDK ignores it on `ws://`, where server-side `TIMEOUT` clauses derived from it bound long writes), `SURREAL_OPERATION_DEADLINE_MS` (retry/admission backstop, default 30000), `SURREAL_EMBEDDED_MAX_INFLIGHT` (embedded admission permits, default 16; the permit wait counts against the operation deadline), `SURREAL_SERVER_LANES` (server mode: `2` = interactive + independently connected heavy-write connection, the default; `1` = single connection)
++**SurrealDB pin**: SDK `surrealdb`/`surrealdb-types` `=3.3.0`; compose image `surrealdb/surrealdb:v3.3.0` (kept in lockstep)
+ **Embeddings**: `EMBEDDING_PROVIDER=local|openai|cohere|fast`, `LOCAL_EMBEDDING_MODEL`, `MODEL_CACHE_DIR`
+ **Features**: `embedded` (default), `server-only`, `palace`, `cuda`, `metal`, `local-embeddings`
+ 
+@@ -291,6 +293,11 @@ Migrations live in `crates/surreal-memory/src/storage/migrations/mod.rs`.
+ - v14: Legacy enum string normalization (repair migration)
+ - v15: Enum fields as strings for portability
+ - v16: Palace `drawers` table with 384d HNSW, BM25, wing/room/hall taxonomy indexes
++- v17: Embedding index metadata (`schema_metadata`; HNSW dimension follows the active provider)
++- v18: TaskStream composite UNIQUE scope index (`task_stream_scope_name`)
++- v19: `task_step` table (idempotent, ordered task steps)
++- v20: Durable operation ledger (`memory_operation`, `memory_operation_event`, `memory_operation_part`)
++- v21: Embedding executor journal (`memory_executor_event`)
+ 
+ ## Common Patterns
+ 
+@@ -350,7 +357,7 @@ a skill.
+ 3. **HNSW index dimensions must match embeddings** — The v5 migration hardcodes `DIMENSION 1536` for memory/entity tables. The v16 palace migration uses `DIMENSION 384` for drawers. These are independent vector spaces — do not mix them.
+ 4. **`IF NOT EXISTS` is idempotent** — All DDL uses this, so migrations are safe to re-run.
+ 5. **Embedded mode creates RocksDB files** — Multiple processes CANNOT share the same embedded DB path simultaneously. For multi-process access, use server mode (`SURREAL_MODE=server`).
+-6. **`Surreal<Any>` is already `Arc`-wrapped and clone-safe** — Do NOT wrap it in `std::sync::RwLock`, `tokio::sync::RwLock`, or `Mutex`. Clone the handle per task; the SDK multiplexes queries internally. The current `Arc<std::sync::RwLock<ConnectionState>>` in `crates/surreal-memory/src/storage/surreal.rs:44` is a known architectural defect being remediated (see `openspec/changes/fix-surrealdb-connection-architecture/`). Consult the `surrealdb-expert` skill before touching this code path.
++6. **`Surreal<Any>` is already `Arc`-wrapped and clone-safe** — Do NOT wrap it in `std::sync::RwLock`, `tokio::sync::RwLock`, or `Mutex`. Clone the handle per task; the SDK multiplexes queries internally. The historical `Arc<std::sync::RwLock<ConnectionState>>` was replaced by an `ArcSwap<ConnectionCell>` per connection lane (`storage/surreal.rs`, `storage/sessions.rs`; see `openspec/changes/fix-surrealdb-connection-architecture/`). Clones share one WebSocket — workload isolation needs an independently connected transport (the heavy-write lane), not a clone. Consult the `surrealdb-expert` skill before touching this code path.
+ 7. **Embedded mode is a first-class production target** — but its concurrency primitives are different from server mode. RocksDB's stripe-locking (default 16 stripes per column family) means concurrent transactions on overlapping keys serialize at the storage engine. Any application-layer lock layered on top compounds this into "lock timeout" / "serialization failure" errors. The fix is (a) remove application-layer locks (see Gotcha #6) and (b) bound in-flight ops with a semaphore sized to the stripe count (`SURREAL_EMBEDDED_MAX_INFLIGHT`, default 16). The connection-architecture phase produces benchmarks proving the embedded path scales to production workloads under that discipline; do NOT regress to "embedded is dev-only" framing.
+ 
+ ## Performance Considerations
+@@ -369,9 +376,10 @@ a skill.
+ **Root Cause**: SurrealDB has a known performance bottleneck with `UPDATE CONTENT` on large JSON objects (see [SurrealDB #1810](https://github.com/surrealdb/surrealdb/issues/1810)). Mindmaps are stored as single records with nested node/edge arrays, so every node addition rewrites the entire mindmap.
+ 
+ **Mitigation Applied**:
+-- 30-second `TIMEOUT` clause on every mindmap `UPDATE` statement
++- `TIMEOUT` clause on every mindmap `UPDATE` statement, equal to
++  `SURREAL_QUERY_TIMEOUT_MS` (default 10s)
+   (`update_mindmap_graph`, `append_mindmap_node`, `append_mindmap_edge` in
+-  `storage/surreal.rs`, via the `MINDMAP_UPDATE_TIMEOUT` const) so an oversized
++  `storage/surreal.rs`, via `statement_timeout()`) so an oversized
+   update fails fast with a clear error instead of stalling the write path
+   (added 2026-05-18; prior to that the `TIMEOUT` was documented but not
+   actually enforced — only a `tracing::warn!` existed).
+diff --git a/Cargo.lock b/Cargo.lock
+index 5bfe251..ed9480f 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -19,19 +19,17 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
+ 
+ [[package]]
+ name = "affinitypool"
+-version = "0.7.0"
++version = "0.8.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "c4a46f56d354df11b6bcd8ca4f84fa03ac816cc41c72568a1b337d8f7e5af90e"
++checksum = "a487a26c23775316bc010e9425fd7cf046c384ab37efbb2cfd4ba87a58f68c6d"
+ dependencies = [
+  "arc-swap",
+  "async-task",
+  "crossbeam-deque",
+  "crossbeam-utils",
+- "libc",
+  "num_cpus",
+  "parking_lot",
+- "thiserror 2.0.18",
+- "winapi",
++ "thiserror 2.0.21",
+ ]
+ 
+ [[package]]
+@@ -115,9 +113,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "anyhow"
+-version = "1.0.103"
++version = "1.0.104"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
++checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+ 
+ [[package]]
+ name = "approx"
+@@ -286,7 +284,7 @@ dependencies = [
+  "num-traits",
+  "pastey 0.1.1",
+  "rayon",
+- "thiserror 2.0.18",
++ "thiserror 2.0.21",
+  "v_frame",
+  "y4m",
+ ]
+@@ -667,8 +665,20 @@ version = "0.6.12"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "23cdc57ce23ac53c931e88a43d06d070a6fd142f2617be5855eb75efc9beb1c2"
+ dependencies = [
+- "bytecheck_derive",
+- "ptr_meta",
++ "bytecheck_derive 0.6.12",
++ "ptr_meta 0.1.4",
++ "simdutf8",
++]
++
++[[package]]
++name = "bytecheck"
++version = "0.8.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "26333eeac754f0ad8a6bcd0eb0ac012156302e4e16b852b72ee399aea4f12c29"
++dependencies = [
++ "bytecheck_derive 0.8.3",
++ "ptr_meta 0.3.2",
++ "rancor",
+  "simdutf8",
+ ]
+ 
+@@ -683,6 +693,17 @@ dependencies = [
+  "syn 1.0.109",
+ ]
+ 
++[[package]]
++name = "bytecheck_derive"
++version = "0.8.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "46d07918caa9eeaaf06b7873925c53a61daac173539b4f7715090745e44e4e69"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 3.0.6",
++]
++
+ [[package]]
+ name = "bytemuck"
+ version = "1.25.0"
+@@ -758,7 +779,7 @@ dependencies = [
+  "rand_distr",
+  "rayon",
+  "safetensors 0.7.0",
+- "thiserror 2.0.18",
++ "thiserror 2.0.21",
+  "yoke 0.8.2",
+  "zip",
+ ]
+@@ -783,7 +804,7 @@ dependencies = [
+  "objc2-foundation",
+  "objc2-metal",
+  "once_cell",
+- "thiserror 2.0.18",
++ "thiserror 2.0.21",
+  "tracing",
+ ]
+ 
+@@ -802,7 +823,7 @@ dependencies = [
+  "rayon",
+  "safetensors 0.7.0",
+  "serde",
+- "thiserror 2.0.18",
++ "thiserror 2.0.21",
+ ]
+ 
+ [[package]]
+@@ -1141,6 +1162,12 @@ dependencies = [
+  "libc",
+ ]
+ 
++[[package]]
++name = "crawdad"
++version = "0.4.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "abed0ad19907fc8472dae05f0418dfa82fdf0eaef18427c7c7cc4e42db41534b"
++
+ [[package]]
+ name = "crc32fast"
+ version = "1.5.0"
+@@ -1229,6 +1256,27 @@ dependencies = [
+  "smallvec",
+ ]
+ 
++[[package]]
++name = "csv"
++version = "1.4.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "52cd9d68cf7efc6ddfaaee42e7288d3a99d613d4b50f76ce9827ae0c6e14f938"
++dependencies = [
++ "csv-core",
++ "itoa",
++ "ryu",
++ "serde_core",
++]
++
++[[package]]
++name = "csv-core"
++version = "0.1.13"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "704a3c26996a80471189265814dbc2c257598b96b8a7feae2d31ace646bb9782"
++dependencies = [
++ "memchr",
++]
++
+ [[package]]
+ name = "cudarc"
+ version = "0.17.8"
+@@ -1277,6 +1325,12 @@ dependencies = [
+  "syn 2.0.117",
+ ]
+ 
++[[package]]
++name = "daachorse"
++version = "5.0.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cd10668980c9e7ba8aa2e616207d9ec52f7db66ebb47db857ed1f3c342530dad"
++
+ [[package]]
+ name = "darling"
+ version = "0.20.11"
+@@ -1504,14 +1558,14 @@ dependencies = [
+  "libc",
+  "option-ext",
+  "redox_users 0.5.2",
+- "windows-sys 0.59.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+ name = "diskann"
+-version = "0.54.0"
++version = "0.56.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "421c6cf955c6cb1451d36c8a3740ab2a22880265d0fa93d8ea22cbc425c90479"
++checksum = "3ead115d8a4f3917c1ae9c3db0aa4dd56251841864ef8637329969f8e5145dd3"
+ dependencies = [
+  "anyhow",
+  "bytemuck",
+@@ -1523,15 +1577,15 @@ dependencies = [
+  "hashbrown 0.16.1",
+  "num-traits",
+  "rand 0.9.4",
+- "thiserror 2.0.18",
++ "thiserror 2.0.21",
+  "tokio",
+ ]
+ 
+ [[package]]
+ name = "diskann-utils"
+-version = "0.54.0"
++version = "0.56.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "7cdf7d491910fbff13338e07460c9197a3c172268cfd4d8f8e69e5cec5a256d9"
++checksum = "ac627181d402b5dd63318e434fc2e7107843be0a10cf0a6a99a24666453239bc"
+ dependencies = [
+  "bytemuck",
+  "cfg-if",
+@@ -1541,14 +1595,14 @@ dependencies = [
+  "rand 0.9.4",
+  "rand_distr",
+  "rayon",
+- "thiserror 2.0.18",
++ "thiserror 2.0.21",
+ ]
+ 
+ [[package]]
+ name = "diskann-vector"
+-version = "0.54.0"
++version = "0.56.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "de1643bbece645f03527ef120bc7dd5e4e40557980dbe52ee51129adfb58a851"
++checksum = "0ee9ba401eba2a12cea01aba7ee2ba7c755019f2b73c2417fecc49a2da26dd4c"
+ dependencies = [
+  "cfg-if",
+  "diskann-wide",
+@@ -1557,9 +1611,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "diskann-wide"
+-version = "0.54.0"
++version = "0.56.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "421f02c42e57a2153dc65b66b4b95fe2be56e14bf9f95253b663abcac8521166"
++checksum = "343f4ea154bad7f8a9c6936746379faa880899165740a20092775bec97c9a141"
+ dependencies = [
+  "cfg-if",
+  "half",
+@@ -1654,16 +1708,6 @@ version = "0.1.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "e1d926b4d407d372f141f93bb444696142c29d32962ccbd3531117cf3aa0bfa9"
+ 
+-[[package]]
+-name = "earcutr"
+-version = "0.4.3"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "79127ed59a85d7687c409e9978547cffb7dc79675355ed22da6b66fd5f6ead01"
+-dependencies = [
+- "itertools 0.11.0",
+- "num-traits",
+-]
+-
+ [[package]]
+ name = "ecdsa"
+ version = "0.16.9"
+@@ -1744,6 +1788,15 @@ dependencies = [
+  "cfg-if",
+ ]
+ 
++[[package]]
++name = "encoding_rs_io"
++version = "0.1.8"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "fba3fe847045ecff794b9c138293a80db914678c453ad63fbf0c6a9eb6e00b22"
++dependencies = [
++ "encoding_rs",
++]
++
+ [[package]]
+ name = "enum-as-inner"
+ version = "0.6.1"
+@@ -1789,7 +1842,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
+ dependencies = [
+  "libc",
+- "windows-sys 0.59.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -2473,7 +2526,6 @@ version = "0.32.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "3f3901269ec6d4f6068d3f09e5f02f995bd076398dcd1dfec407cd230b02d11b"
+ dependencies = [
+- "earcutr",
+  "float_next_after",
+  "geo-types",
+  "geographiclib-rs",
+@@ -2485,7 +2537,6 @@ dependencies = [
+  "rstar 0.12.2",
+  "serde",
+  "sif-itree",
+- "spade",
+ ]
+ 
+ [[package]]
+@@ -2496,7 +2547,6 @@ checksum = "94776032c45f950d30a13af6113c2ad5625316c9abfbccee4dd5a6695f8fe0f5"
+ dependencies = [
+  "approx",
+  "num-traits",
+- "rayon",
+  "rstar 0.10.0",
+  "rstar 0.11.0",
+  "rstar 0.12.2",
+@@ -2567,9 +2617,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "glob"
+-version = "0.3.3"
++version = "0.3.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
++checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+ 
+ [[package]]
+ name = "group"
+@@ -2785,7 +2835,7 @@ dependencies = [
+  "reqwest 0.12.28",
+  "serde",
+  "serde_json",
+- "thiserror 2.0.18",
++ "thiserror 2.0.21",
+  "ureq 2.12.1",
+  "windows-sys 0.60.2",
+ ]
+@@ -2808,7 +2858,7 @@ dependencies = [
+  "reqwest 0.12.28",
+  "serde",
+  "serde_json",
+- "thiserror 2.0.18",
++ "thiserror 2.0.21",
+  "tokio",
+  "ureq 3.3.0",
+  "windows-sys 0.61.2",
+@@ -2934,10 +2984,12 @@ dependencies = [
+  "hyper",
+  "hyper-util",
+  "rustls",
++ "rustls-native-certs",
+  "rustls-pki-types",
+  "tokio",
+  "tokio-rustls",
+  "tower-service",
++ "webpki-roots 1.0.6",
+ ]
+ 
+ [[package]]
+@@ -3019,7 +3071,6 @@ dependencies = [
+  "i_key_sort",
+  "i_shape",
+  "i_tree",
+- "rayon",
+ ]
+ 
+ [[package]]
+@@ -3290,15 +3341,6 @@ dependencies = [
+  "serde",
+ ]
+ 
+-[[package]]
+-name = "itertools"
+-version = "0.11.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "b1c173a5686ce8bfa551b3563d0c2170bf24ca44da99c7ca4bfdab5418c3fe57"
+-dependencies = [
+- "either",
+-]
+-
+ [[package]]
+ name = "itertools"
+ version = "0.13.0"
+@@ -3508,6 +3550,50 @@ dependencies = [
+  "vcpkg",
+ ]
+ 
++[[package]]
++name = "lindera"
++version = "6.1.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "870fc70f665817ed538b82def2b3c4a2b4919450f47e862d6c257c102e289f3e"
++dependencies = [
++ "anyhow",
++ "lindera-dictionary",
++ "log",
++ "percent-encoding",
++ "serde",
++ "serde_json",
++ "strum",
++ "strum_macros",
++ "url",
++]
++
++[[package]]
++name = "lindera-dictionary"
++version = "6.1.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f4a4433665c76a30464031b585f07195d77588b897c147ff99df42123a282f05"
++dependencies = [
++ "anyhow",
++ "byteorder",
++ "crawdad",
++ "csv",
++ "daachorse",
++ "encoding_rs",
++ "encoding_rs_io",
++ "glob",
++ "log",
++ "memchr",
++ "memmap2",
++ "once_cell",
++ "rayon",
++ "rkyv 0.8.18",
++ "serde",
++ "serde_json",
++ "strum",
++ "strum_macros",
++ "thiserror 2.0.21",
++]
++
+ [[package]]
+ name = "linux-raw-sys"
+ version = "0.12.1"
+@@ -3537,9 +3623,41 @@ dependencies = [
+ 
+ [[package]]
+ name = "log"
+-version = "0.4.29"
++version = "0.4.34"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
++
++[[package]]
++name = "logos"
++version = "0.16.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "eb2c55a318a87600ea870ff8c2012148b44bf18b74fad48d0f835c38c7d07c5f"
++dependencies = [
++ "logos-derive",
++]
++
++[[package]]
++name = "logos-codegen"
++version = "0.16.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "58b3ffaa284e1350d017a57d04ada118c4583cf260c8fb01e0fe28a2e9cf8970"
++dependencies = [
++ "fnv",
++ "proc-macro2",
++ "quote",
++ "regex-automata",
++ "regex-syntax",
++ "syn 2.0.117",
++]
++
++[[package]]
++name = "logos-derive"
++version = "0.16.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
++checksum = "52d3a9855747c17eaf4383823f135220716ab49bea5fbea7dd42cc9a92f8aa31"
++dependencies = [
++ "logos-codegen",
++]
+ 
+ [[package]]
+ name = "loop9"
+@@ -3655,9 +3773,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "memchr"
+-version = "2.8.0"
++version = "2.8.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
++checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+ 
+ [[package]]
+ name = "memmap2"
+@@ -3684,7 +3802,7 @@ dependencies = [
+  "serde",
+  "serde_json",
+  "sha2 0.10.9",
+- "thiserror 2.0.18",
++ "thiserror 2.0.21",
+  "tokio",
+  "tracing",
+  "uuid",
+@@ -3781,6 +3899,26 @@ dependencies = [
+  "pxfm",
+ ]
+ 
++[[package]]
++name = "munge"
++version = "0.4.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "5e17401f259eba956ca16491461b6e8f72913a0a114e39736ce404410f915a0c"
++dependencies = [
++ "munge_macro",
++]
++
++[[package]]
++name = "munge_macro"
++version = "0.4.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "4568f25ccbd45ab5d5603dc34318c1ec56b117531781260002151b8530a9f931"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 2.0.117",
++]
++
+ [[package]]
+ name = "native-tls"
+ version = "0.2.18"
+@@ -3898,7 +4036,7 @@ version = "0.50.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
+ dependencies = [
+- "windows-sys 0.59.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -4104,17 +4242,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "622acbc9100d3c10e2ee15804b0caa40e55c933d5aa53814cd520805b7958a49"
+ dependencies = [
+  "async-trait",
++ "base64 0.22.1",
+  "bytes",
+  "chrono",
++ "form_urlencoded",
+  "futures-channel",
+  "futures-core",
+  "futures-util",
+  "http",
++ "http-body-util",
++ "httparse",
+  "humantime",
++ "hyper",
+  "itertools 0.14.0",
++ "md-5",
+  "parking_lot",
+  "percent-encoding",
+- "thiserror 2.0.18",
++ "quick-xml",
++ "rand 0.10.1",
++ "reqwest 0.12.28",
++ "ring",
++ "rustls-pki-types",
++ "serde",
++ "serde_json",
++ "serde_urlencoded",
++ "thiserror 2.0.21",
+  "tokio",
+  "tracing",
+  "url",
+@@ -4610,61 +4762,49 @@ dependencies = [
+ ]
+ 
+ [[package]]
+-name = "prost"
+-version = "0.14.3"
++name = "psl-types"
++version = "2.0.11"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "d2ea70524a2f82d518bce41317d0fae74151505651af45faf1ffbd6fd33f0568"
+-dependencies = [
+- "bytes",
+- "prost-derive",
+-]
++checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
+ 
+ [[package]]
+-name = "prost-derive"
+-version = "0.14.3"
++name = "ptr_meta"
++version = "0.1.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
++checksum = "0738ccf7ea06b608c10564b31debd4f5bc5e197fc8bfe088f68ae5ce81e7a4f1"
+ dependencies = [
+- "anyhow",
+- "itertools 0.13.0",
+- "proc-macro2",
+- "quote",
+- "syn 2.0.117",
++ "ptr_meta_derive 0.1.4",
+ ]
+ 
+ [[package]]
+-name = "prost-types"
+-version = "0.14.3"
++name = "ptr_meta"
++version = "0.3.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "8991c4cbdb8bc5b11f0b074ffe286c30e523de90fee5ba8132f1399f23cb3dd7"
++checksum = "743da816b98c921cdbe8628ef7381b76f25ecf4da599fc80aca90eae7ef70cc0"
+ dependencies = [
+- "prost",
++ "ptr_meta_derive 0.3.2",
+ ]
+ 
+ [[package]]
+-name = "psl-types"
+-version = "2.0.11"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
+-
+-[[package]]
+-name = "ptr_meta"
++name = "ptr_meta_derive"
+ version = "0.1.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "0738ccf7ea06b608c10564b31debd4f5bc5e197fc8bfe088f68ae5ce81e7a4f1"
++checksum = "16b845dbfca988fa33db069c0e230574d15a3088f147a87b64c7589eb662c9ac"
+ dependencies = [
+- "ptr_meta_derive",
++ "proc-macro2",
++ "quote",
++ "syn 1.0.109",
+ ]
+ 
+ [[package]]
+ name = "ptr_meta_derive"
+-version = "0.1.4"
++version = "0.3.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "16b845dbfca988fa33db069c0e230574d15a3088f147a87b64c7589eb662c9ac"
++checksum = "1c8d9ca532f185d5d4db7a7c9d51420b452168ea1c2b913953281bd6fe1fcbd0"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn 1.0.109",
++ "syn 3.0.6",
+ ]
+ 
+ [[package]]
+@@ -4725,6 +4865,16 @@ version = "2.0.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
+ 
++[[package]]
++name = "quick-xml"
++version = "0.39.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cdcc8dd4e2f670d309a5f0e83fe36dfdc05af317008fea29144da1a2ac858e5e"
++dependencies = [
++ "memchr",
++ "serde",
++]
++
+ [[package]]
+ name = "quick_cache"
+ version = "0.6.21"
+@@ -4751,7 +4901,7 @@ dependencies = [
+  "rustc-hash 2.1.2",
+  "rustls",
+  "socket2",
+- "thiserror 2.0.18",
++ "thiserror 2.0.21",
+  "tokio",
+  "tracing",
+  "web-time",
+@@ -4773,7 +4923,7 @@ dependencies = [
+  "rustls",
+  "rustls-pki-types",
+  "slab",
+- "thiserror 2.0.18",
++ "thiserror 2.0.21",
+  "tinyvec",
+  "tracing",
+  "web-time",
+@@ -4790,7 +4940,7 @@ dependencies = [
+  "once_cell",
+  "socket2",
+  "tracing",
+- "windows-sys 0.59.0",
++ "windows-sys 0.60.2",
+ ]
+ 
+ [[package]]
+@@ -4820,6 +4970,15 @@ version = "0.7.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
+ 
++[[package]]
++name = "rancor"
++version = "0.1.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9b534442d0fcdb55d66f373d9cac6d33b6293a2335bc2136dbd06ce0e87d2572"
++dependencies = [
++ "ptr_meta 0.3.2",
++]
++
+ [[package]]
+ name = "rand"
+ version = "0.8.6"
+@@ -4936,7 +5095,7 @@ dependencies = [
+  "rand 0.9.4",
+  "rand_chacha 0.9.0",
+  "simd_helpers",
+- "thiserror 2.0.18",
++ "thiserror 2.0.21",
+  "v_frame",
+  "wasm-bindgen",
+ ]
+@@ -5051,7 +5210,7 @@ checksum = "a4e608c6638b9c18977b00b475ac1f28d14e84b27d8d42f70e0bf1e3dec127ac"
+ dependencies = [
+  "getrandom 0.2.17",
+  "libredox",
+- "thiserror 2.0.18",
++ "thiserror 2.0.21",
+ ]
+ 
+ [[package]]
+@@ -5109,7 +5268,16 @@ version = "0.4.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "71fe3824f5629716b1589be05dacd749f6aa084c87e00e016714a8cdfccc997c"
+ dependencies = [
+- "bytecheck",
++ "bytecheck 0.6.12",
++]
++
++[[package]]
++name = "rend"
++version = "0.5.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "663ba70707f96e871406fe10d68128412e619b06d1d47cb91c3a4c6501176240"
++dependencies = [
++ "bytecheck 0.8.3",
+ ]
+ 
+ [[package]]
+@@ -5137,6 +5305,9 @@ dependencies = [
+  "native-tls",
+  "percent-encoding",
+  "pin-project-lite",
++ "quinn",
++ "rustls",
++ "rustls-native-certs",
+  "rustls-pki-types",
+  "serde",
+  "serde_json",
+@@ -5144,6 +5315,7 @@ dependencies = [
+  "sync_wrapper",
+  "tokio",
+  "tokio-native-tls",
++ "tokio-rustls",
+  "tokio-util",
+  "tower",
+  "tower-http",
+@@ -5153,6 +5325,7 @@ dependencies = [
+  "wasm-bindgen-futures",
+  "wasm-streams 0.4.2",
+  "web-sys",
++ "webpki-roots 1.0.6",
+ ]
+ 
+ [[package]]
+@@ -5263,17 +5436,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "2297bf9c81a3f0dc96bc9521370b88f054168c29826a75e89c55ff196e7ed6a1"
+ dependencies = [
+  "bitvec",
+- "bytecheck",
++ "bytecheck 0.6.12",
+  "bytes",
+  "hashbrown 0.12.3",
+- "ptr_meta",
+- "rend",
+- "rkyv_derive",
++ "ptr_meta 0.1.4",
++ "rend 0.4.2",
++ "rkyv_derive 0.7.46",
+  "seahash",
+  "tinyvec",
+  "uuid",
+ ]
+ 
++[[package]]
++name = "rkyv"
++version = "0.8.18"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d9776093b7ca170454ab1406954f7b7d97a57c51dc6c0642957fb2ef25c2d399"
++dependencies = [
++ "bytecheck 0.8.3",
++ "bytes",
++ "hashbrown 0.17.0",
++ "indexmap",
++ "munge",
++ "ptr_meta 0.3.2",
++ "rancor",
++ "rend 0.5.4",
++ "rkyv_derive 0.8.18",
++ "tinyvec",
++ "uuid",
++]
++
+ [[package]]
+ name = "rkyv_derive"
+ version = "0.7.46"
+@@ -5285,6 +5477,17 @@ dependencies = [
+  "syn 1.0.109",
+ ]
+ 
++[[package]]
++name = "rkyv_derive"
++version = "0.8.18"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1c25ef604ac7dd839d44d64648952ea23c97866f124ff671b0ed2cf3ad9bb06e"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 3.0.6",
++]
++
+ [[package]]
+ name = "rmcp"
+ version = "1.4.0"
+@@ -5306,7 +5509,7 @@ dependencies = [
+  "serde",
+  "serde_json",
+  "sse-stream",
+- "thiserror 2.0.18",
++ "thiserror 2.0.21",
+  "tokio",
+  "tokio-stream",
+  "tokio-util",
+@@ -5465,7 +5668,7 @@ dependencies = [
+  "bytes",
+  "num-traits",
+  "rand 0.8.6",
+- "rkyv",
++ "rkyv 0.7.46",
+  "serde",
+  "serde_json",
+  "wasm-bindgen",
+@@ -5502,7 +5705,7 @@ dependencies = [
+  "errno",
+  "libc",
+  "linux-raw-sys",
+- "windows-sys 0.59.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -5561,7 +5764,7 @@ dependencies = [
+  "security-framework",
+  "security-framework-sys",
+  "webpki-root-certs",
+- "windows-sys 0.59.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -5736,7 +5939,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
+ dependencies = [
+  "libc",
+- "windows-sys 0.59.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -5757,9 +5960,9 @@ checksum = "1bc711410fbe7399f390ca1c3b60ad0f53f80e95c5eb935e52268a0e2cd49acc"
+ 
+ [[package]]
+ name = "serde"
+-version = "1.0.228"
++version = "1.0.229"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
++checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
+ dependencies = [
+  "serde_core",
+  "serde_derive",
+@@ -5767,22 +5970,22 @@ dependencies = [
+ 
+ [[package]]
+ name = "serde_core"
+-version = "1.0.228"
++version = "1.0.229"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad"
++checksum = "67dca2c9c51e58a4791a4b1ed58308b39c64224d349a935ab5039aa360942a48"
+ dependencies = [
+  "serde_derive",
+ ]
+ 
+ [[package]]
+ name = "serde_derive"
+-version = "1.0.228"
++version = "1.0.229"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
++checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn 2.0.117",
++ "syn 3.0.6",
+ ]
+ 
+ [[package]]
+@@ -5798,9 +6001,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "serde_json"
+-version = "1.0.149"
++version = "1.0.151"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86"
++checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+ dependencies = [
+  "itoa",
+  "memchr",
+@@ -5944,7 +6147,7 @@ checksum = "0d585997b0ac10be3c5ee635f1bab02d512760d14b7c468801ac8a01d9ae5f1d"
+ dependencies = [
+  "num-bigint",
+  "num-traits",
+- "thiserror 2.0.18",
++ "thiserror 2.0.21",
+  "time",
+ ]
+ 
+@@ -5987,18 +6190,6 @@ dependencies = [
+  "winapi",
+ ]
+ 
+-[[package]]
+-name = "spade"
+-version = "2.15.1"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "9699399fd9349b00b184f5635b074f9ec93afffef30c853f8c875b32c0f8c7fa"
+-dependencies = [
+- "hashbrown 0.16.1",
+- "num-traits",
+- "robust",
+- "smallvec",
+-]
+-
+ [[package]]
+ name = "spin"
+ version = "0.9.8"
+@@ -6102,11 +6293,43 @@ dependencies = [
+ ]
+ 
+ [[package]]
+-name = "strsim"
+-version = "0.11.1"
++name = "stringprep"
++version = "0.1.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "7b4df3d392d81bd458a8a621b8bffbd2302a12ffe288a9d931670948749463b1"
++dependencies = [
++ "unicode-bidi",
++ "unicode-normalization",
++ "unicode-properties",
++]
++
++[[package]]
++name = "strsim"
++version = "0.11.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
+ 
++[[package]]
++name = "strum"
++version = "0.28.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9628de9b8791db39ceda2b119bbe13134770b56c138ec1d3af810d045c04f9bd"
++dependencies = [
++ "strum_macros",
++]
++
++[[package]]
++name = "strum_macros"
++version = "0.28.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ab85eea0270ee17587ed4156089e10b9e6880ee688791d45a905f5b1ca36f664"
++dependencies = [
++ "heck 0.5.0",
++ "proc-macro2",
++ "quote",
++ "syn 2.0.117",
++]
++
+ [[package]]
+ name = "subtle"
+ version = "2.6.1"
+@@ -6134,7 +6357,7 @@ dependencies = [
+  "sha2 0.11.0",
+  "surrealdb",
+  "surrealdb-types",
+- "thiserror 2.0.18",
++ "thiserror 2.0.21",
+  "tiktoken-rs",
+  "tokenizers 0.22.2",
+  "tokio",
+@@ -6169,7 +6392,7 @@ dependencies = [
+  "surreal-memory",
+  "surrealdb",
+  "surrealdb-types",
+- "thiserror 2.0.18",
++ "thiserror 2.0.21",
+  "tokenizers 0.22.2",
+  "tokio",
+  "tokio-stream",
+@@ -6182,9 +6405,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "surrealdb"
+-version = "3.2.4"
++version = "3.3.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "01fef5cc04dd6cb042391d48c0f78a586c56042e999f8cb17f0b97b0a147e2c0"
++checksum = "f04b42991e6a01e2d01f1ea6183714cf364d3c40fa2197bd8993ec7834e0b4c4"
+ dependencies = [
+  "anyhow",
+  "async-channel",
+@@ -6202,13 +6425,19 @@ dependencies = [
+  "semver",
+  "serde",
+  "serde_json",
+- "surrealdb-core",
++ "surrealdb-engine-api",
++ "surrealdb-engine-local",
++ "surrealdb-iam",
++ "surrealdb-kvs",
++ "surrealdb-rpc",
++ "surrealdb-syn",
+  "surrealdb-types",
+  "surrealdb-types-derive",
+  "tokio",
+  "tokio-tungstenite",
+  "tokio-tungstenite-wasm",
+  "tokio-util",
++ "tonic",
+  "tracing",
+  "url",
+  "uuid",
+@@ -6218,70 +6447,112 @@ dependencies = [
+  "web-sys",
+ ]
+ 
++[[package]]
++name = "surrealdb-catalog"
++version = "3.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "467526a3b49854f7ea1fb1d5948eee35973700791018a093b62ae366de87df4e"
++dependencies = [
++ "ahash 0.8.12",
++ "anyhow",
++ "chrono",
++ "md-5",
++ "revision",
++ "serde",
++ "sha2 0.10.9",
++ "storekey",
++ "surrealdb-collections",
++ "surrealdb-common",
++ "surrealdb-expr",
++ "surrealdb-iam",
++ "surrealdb-kvs",
++ "surrealdb-sql",
++ "surrealdb-strand",
++ "surrealdb-syn",
++ "surrealdb-types",
++ "thiserror 2.0.21",
++ "tracing",
++ "uuid",
++]
++
++[[package]]
++name = "surrealdb-cnf"
++version = "3.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cfcdec4b7e7287d812c48b58e3495f7204524a2b31d51c20dbca6eff2d32d36e"
++dependencies = [
++ "num-traits",
++ "path-clean",
++ "surrealdb-common",
++ "surrealdb-parse-common",
++ "tracing",
++]
++
+ [[package]]
+ name = "surrealdb-collections"
+-version = "3.2.4"
++version = "3.3.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "ca3472955f9692427583e78476d5b03c6f750bf11dc8a04383e0d365d7bd5d99"
++checksum = "90aed29a6512c5974634412cb3ad07c91a5b99353ec9bc7d96f4ae7491f243cf"
+ dependencies = [
+  "revision",
+  "storekey",
+ ]
+ 
++[[package]]
++name = "surrealdb-common"
++version = "3.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "5a1273ef6215f5b40c78a3e43a4ada9c0cb7199d839f25745b71fee57dae0ca0"
++dependencies = [
++ "chrono",
++ "futures",
++ "hashbrown 0.16.1",
++ "parking_lot",
++ "phf",
++ "rust_decimal",
++ "surrealdb-types",
++ "sysinfo",
++ "thiserror 2.0.21",
++ "tokio",
++ "unicase",
++ "wasmtimer",
++]
++
+ [[package]]
+ name = "surrealdb-core"
+-version = "3.2.4"
++version = "3.3.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "8cd76c36f8b545a9371eec050bb2ae83750a6f60bae8c6d92d06956943348f4c"
++checksum = "1490b831b5090b9bdbdacec5e8060d9dbc1944574809d157fabb4de25e53b1aa"
+ dependencies = [
+- "addr",
+- "affinitypool",
+  "ahash 0.8.12",
+- "ammonia",
+  "anyhow",
++ "arc-swap",
+  "argon2",
+  "async-channel",
+- "async-stream",
+  "base64 0.22.1",
+  "bcrypt",
+- "blake3",
+  "bytes",
+  "chrono",
+  "ciborium",
+  "dashmap",
+- "deunicode",
+- "diskann",
+- "diskann-utils",
+- "diskann-vector",
+- "dmp",
+  "ext-sort",
+- "fastnum",
+- "fst",
+  "futures",
+- "fuzzy-matcher",
+  "geo",
+  "geo-types",
+  "getrandom 0.3.4",
+- "half",
+  "headers",
+  "hex",
+  "http",
+- "humantime",
+  "ipnet",
+  "jsonwebtoken",
+- "lexicmp",
+  "md-5",
+  "memchr",
+  "mime",
+- "ndarray 0.17.2",
+- "ndarray-stats",
+- "num-traits",
+  "num_cpus",
+  "object_store",
+  "parking_lot",
+  "path-clean",
+  "pbkdf2",
+- "phf",
+  "pin-project-lite",
+  "quick_cache",
+  "rand 0.9.4",
+@@ -6292,7 +6563,6 @@ dependencies = [
+  "revision",
+  "ring",
+  "roaring",
+- "rust-stemmers",
+  "rust_decimal",
+  "scrypt",
+  "semver",
+@@ -6301,29 +6571,282 @@ dependencies = [
+  "sha1",
+  "sha2 0.10.9",
+  "storekey",
+- "strsim",
+  "subtle",
++ "surrealdb-catalog",
++ "surrealdb-cnf",
+  "surrealdb-collections",
+- "surrealdb-protocol",
+- "surrealdb-rocksdb",
++ "surrealdb-common",
++ "surrealdb-datastore",
++ "surrealdb-expr",
++ "surrealdb-iam",
++ "surrealdb-idx",
++ "surrealdb-kvs",
++ "surrealdb-kvs-any",
++ "surrealdb-observe",
++ "surrealdb-rpc",
++ "surrealdb-runtime",
++ "surrealdb-sql",
+  "surrealdb-strand",
++ "surrealdb-syn",
+  "surrealdb-types",
+  "sysinfo",
+  "tempfile",
+- "thiserror 2.0.18",
++ "thiserror 2.0.21",
+  "tokio",
+  "tokio-util",
+  "tracing",
+- "ulid",
+- "unicase",
+  "url",
+  "uuid",
+- "vart",
+  "wasm-bindgen-futures",
+  "wasmtimer",
+  "web-time",
+ ]
+ 
++[[package]]
++name = "surrealdb-datastore"
++version = "3.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c36f4accb0bf3f90f4072dc4e3ada965c2fe2a5adbde1b18be55ddbd62703f7c"
++dependencies = [
++ "anyhow",
++ "blake3",
++ "bytes",
++ "chrono",
++ "parking_lot",
++ "quick_cache",
++ "rand 0.9.4",
++ "revision",
++ "roaring",
++ "semver",
++ "serde",
++ "storekey",
++ "surrealdb-catalog",
++ "surrealdb-cnf",
++ "surrealdb-collections",
++ "surrealdb-common",
++ "surrealdb-expr",
++ "surrealdb-iam",
++ "surrealdb-keyspace-macro",
++ "surrealdb-kvs",
++ "surrealdb-observe",
++ "surrealdb-rpc",
++ "surrealdb-strand",
++ "surrealdb-types",
++ "thiserror 2.0.21",
++ "tokio",
++ "tokio-util",
++ "tracing",
++ "uuid",
++ "web-time",
++]
++
++[[package]]
++name = "surrealdb-engine-api"
++version = "3.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "dff233f2d7c1b5b0eac9f54abb01aaaa42dc466c381095d6b16588ae95482383"
++dependencies = [
++ "async-channel",
++ "surrealdb-rpc",
++ "surrealdb-types",
++ "tokio",
++ "uuid",
++]
++
++[[package]]
++name = "surrealdb-engine-local"
++version = "3.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a354808ead8cdaead6ba4bc00318405739d869cf249911e16013f35cd927cbfd"
++dependencies = [
++ "anyhow",
++ "async-channel",
++ "futures",
++ "surrealdb-cnf",
++ "surrealdb-core",
++ "surrealdb-datastore",
++ "surrealdb-engine-api",
++ "surrealdb-iam",
++ "surrealdb-kvs",
++ "surrealdb-rpc",
++ "surrealdb-types",
++ "tokio",
++ "tokio-util",
++ "tracing",
++ "uuid",
++ "wasm-bindgen-futures",
++ "wasmtimer",
++]
++
++[[package]]
++name = "surrealdb-expr"
++version = "3.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2e494e4696ac372ead8c0a8b38f830db056a34c8f4192be4cfadeea3089c8687"
++dependencies = [
++ "anyhow",
++ "bytes",
++ "chrono",
++ "dmp",
++ "fastnum",
++ "geo",
++ "geo-types",
++ "half",
++ "hex",
++ "http",
++ "jsonwebtoken",
++ "lexicmp",
++ "quick_cache",
++ "rand 0.9.4",
++ "reblessive",
++ "regex",
++ "revision",
++ "rust_decimal",
++ "serde",
++ "serde_json",
++ "storekey",
++ "surrealdb-cnf",
++ "surrealdb-collections",
++ "surrealdb-common",
++ "surrealdb-iam",
++ "surrealdb-kvs",
++ "surrealdb-sql",
++ "surrealdb-strand",
++ "surrealdb-syn",
++ "surrealdb-types",
++ "thiserror 2.0.21",
++ "tracing",
++ "ulid",
++ "uuid",
++]
++
++[[package]]
++name = "surrealdb-iam"
++version = "3.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "77ebf02070f99ebcdeb672b8ca8ca1ebe6b7f287c399ff868c1ac15a9e9702bc"
++dependencies = [
++ "anyhow",
++ "argon2",
++ "base64 0.22.1",
++ "hmac",
++ "pbkdf2",
++ "rand_core 0.6.4",
++ "revision",
++ "serde",
++ "sha2 0.10.9",
++ "stringprep",
++ "subtle",
++ "thiserror 2.0.21",
++ "tracing",
++]
++
++[[package]]
++name = "surrealdb-idx"
++version = "3.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1871d2912896d5ae39d04e3989a20f3a69b8286b95a86a9c8ba2831fbb938e49"
++dependencies = [
++ "ahash 0.8.12",
++ "anyhow",
++ "bytes",
++ "dashmap",
++ "deunicode",
++ "diskann",
++ "diskann-utils",
++ "diskann-vector",
++ "fst",
++ "half",
++ "lindera",
++ "ndarray 0.17.2",
++ "ndarray-stats",
++ "parking_lot",
++ "quick_cache",
++ "rand 0.9.4",
++ "reblessive",
++ "roaring",
++ "rust-stemmers",
++ "storekey",
++ "surrealdb-catalog",
++ "surrealdb-cnf",
++ "surrealdb-common",
++ "surrealdb-datastore",
++ "surrealdb-expr",
++ "surrealdb-kvs",
++ "surrealdb-runtime",
++ "surrealdb-strand",
++ "surrealdb-types",
++ "thiserror 2.0.21",
++ "tokio",
++ "tracing",
++ "uuid",
++ "vart",
++ "web-time",
++]
++
++[[package]]
++name = "surrealdb-keyspace-macro"
++version = "3.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "911cd40a40f9ed6372c6b462157a4249a1fde0a0648b713805a5884018afdda2"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 2.0.117",
++]
++
++[[package]]
++name = "surrealdb-kvs"
++version = "3.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e0b95075a800cc6c566506440ec2febde31e0ee21f48bc5fc1f2bc7c3bb6ea6e"
++dependencies = [
++ "affinitypool",
++ "anyhow",
++ "chrono",
++ "num_cpus",
++ "revision",
++ "roaring",
++ "surrealdb-cnf",
++ "surrealdb-common",
++ "surrealdb-types",
++ "thiserror 2.0.21",
++ "tracing",
++ "web-time",
++]
++
++[[package]]
++name = "surrealdb-kvs-any"
++version = "3.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "11d40f18b879bce7ce4c1017dfdbd84feba9fc4a46a15e68084239ba498cb24b"
++dependencies = [
++ "surrealdb-cnf",
++ "surrealdb-kvs",
++ "surrealdb-kvs-rocksdb",
++ "tokio-util",
++ "tracing",
++]
++
++[[package]]
++name = "surrealdb-kvs-rocksdb"
++version = "3.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "4eb038db9bb586cc8ae2441ee5423ea78fe8e1941737086374262c67b772c002"
++dependencies = [
++ "affinitypool",
++ "futures",
++ "num_cpus",
++ "parking_lot",
++ "surrealdb-cnf",
++ "surrealdb-common",
++ "surrealdb-kvs",
++ "surrealdb-rocksdb",
++ "tokio",
++ "tracing",
++ "web-time",
++]
++
+ [[package]]
+ name = "surrealdb-librocksdb-sys"
+ version = "0.18.3+11.0.0-4"
+@@ -6339,27 +6862,45 @@ dependencies = [
+  "zstd-sys",
+ ]
+ 
++[[package]]
++name = "surrealdb-observe"
++version = "3.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "09954bd399347da4ac4edaa9462f5074838648eac032c9b815edb1a2dee91815"
++dependencies = [
++ "surrealdb-iam",
++ "surrealdb-rpc",
++ "surrealdb-types",
++ "uuid",
++]
++
++[[package]]
++name = "surrealdb-parse-common"
++version = "3.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "01b6b07e5e179c8993ddcf3bcddd34d8c781846df0b37157a4f37cfddf7c9257"
++dependencies = [
++ "chrono",
++ "logos",
++ "uuid",
++]
++
+ [[package]]
+ name = "surrealdb-protocol"
+-version = "0.10.2"
++version = "0.13.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "3f4e06f586c9179a02349b88b0c18e3a0850c55431aa513e0cd66529c00da1af"
++checksum = "d53501c853fe88d5ead8e50612d310b43389f3c66fda7ef323a1af6c393809c6"
+ dependencies = [
+  "anyhow",
+  "async-trait",
+  "bytes",
+  "chrono",
+  "flatbuffers",
+- "futures",
+  "geo",
+- "prost",
+- "prost-types",
+  "rust_decimal",
+  "semver",
+  "serde",
+  "serde_json",
+- "tonic",
+- "tonic-prost",
+  "uuid",
+ ]
+ 
+@@ -6373,22 +6914,132 @@ dependencies = [
+  "surrealdb-librocksdb-sys",
+ ]
+ 
++[[package]]
++name = "surrealdb-rpc"
++version = "3.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "7e6d64c1a7783562566122795d56da73f83647fc7229f944b0558817bbe897b0"
++dependencies = [
++ "anyhow",
++ "humantime",
++ "ipnet",
++ "revision",
++ "serde",
++ "surrealdb-cnf",
++ "surrealdb-common",
++ "surrealdb-iam",
++ "surrealdb-types",
++ "thiserror 2.0.21",
++ "tracing",
++ "url",
++ "uuid",
++ "web-time",
++]
++
++[[package]]
++name = "surrealdb-runtime"
++version = "3.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2e9d6ee0def941387d16dbf3730e1fc8faa38d477102035e6d8ba7f3f112676c"
++dependencies = [
++ "addr",
++ "ammonia",
++ "anyhow",
++ "argon2",
++ "bcrypt",
++ "blake3",
++ "chrono",
++ "deunicode",
++ "fuzzy-matcher",
++ "geo",
++ "md-5",
++ "pbkdf2",
++ "rand 0.9.4",
++ "rand_core 0.6.4",
++ "reblessive",
++ "regex",
++ "rust_decimal",
++ "scrypt",
++ "semver",
++ "sha1",
++ "sha2 0.10.9",
++ "strsim",
++ "surrealdb-cnf",
++ "surrealdb-common",
++ "surrealdb-expr",
++ "surrealdb-strand",
++ "surrealdb-syn",
++ "surrealdb-types",
++ "ulid",
++ "url",
++ "uuid",
++]
++
++[[package]]
++name = "surrealdb-sql"
++version = "3.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6397f3b9141dbceca638116045b525c9f31bea3a6b374ab3546fa052bfb07e33"
++dependencies = [
++ "bytes",
++ "chrono",
++ "geo",
++ "getrandom 0.3.4",
++ "hex",
++ "phf",
++ "rand 0.9.4",
++ "regex",
++ "rust_decimal",
++ "serde",
++ "surrealdb-common",
++ "surrealdb-iam",
++ "surrealdb-strand",
++ "surrealdb-types",
++ "unicase",
++ "uuid",
++]
++
+ [[package]]
+ name = "surrealdb-strand"
+-version = "3.2.4"
++version = "3.3.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "a86f53e307b6b8275b15eaff2b718add63605cb804395d156589770c3bf38e56"
++checksum = "adc99fc8f56f55b3bcadd4ee4fe6ec4811dc04a3e686099fd0c69af7ee4edde0"
+ dependencies = [
+  "revision",
+  "serde",
+  "storekey",
+ ]
+ 
++[[package]]
++name = "surrealdb-syn"
++version = "3.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "bab01f470fa61bc45a4c46286f7ba94297d6ec7c46708845d9e164311fb8e443"
++dependencies = [
++ "bytes",
++ "chrono",
++ "geo",
++ "phf",
++ "reblessive",
++ "regex",
++ "rust_decimal",
++ "surrealdb-cnf",
++ "surrealdb-common",
++ "surrealdb-iam",
++ "surrealdb-sql",
++ "surrealdb-strand",
++ "surrealdb-types",
++ "thiserror 2.0.21",
++ "tracing",
++ "unicase",
++ "uuid",
++]
++
+ [[package]]
+ name = "surrealdb-types"
+-version = "3.2.4"
++version = "3.3.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "e0d70c7f4dbf1198521282a171a03f2f77f38a1225a149f7c0175e758f773b8a"
++checksum = "18cd057ad378914c5c32701d8e2298fc0b717dd07b087d895627832d7c834051"
+ dependencies = [
+  "anyhow",
+  "async-channel",
+@@ -6397,6 +7048,8 @@ dependencies = [
+  "chrono",
+  "flatbuffers",
+  "geo",
++ "getrandom 0.2.17",
++ "getrandom 0.3.4",
+  "hex",
+  "http",
+  "papaya",
+@@ -6406,6 +7059,7 @@ dependencies = [
+  "semver",
+  "serde",
+  "serde_json",
++ "surrealdb-parse-common",
+  "surrealdb-protocol",
+  "surrealdb-types-derive",
+  "tracing",
+@@ -6416,9 +7070,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "surrealdb-types-derive"
+-version = "3.2.4"
++version = "3.3.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "dc11310bfc0ae3e546cd14788f8d36e7616dbe41fa68b4b265b29fea34a7d7e1"
++checksum = "f53d89700a64a5c249a23a3436e4b2091099d9074ace28effa757421ea37f0b9"
+ dependencies = [
+  "heck 0.4.1",
+  "proc-macro2",
+@@ -6448,6 +7102,17 @@ dependencies = [
+  "unicode-ident",
+ ]
+ 
++[[package]]
++name = "syn"
++version = "3.0.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8593e8e72159ed2257d083c7a454a85cbf854f37a0966d8d483aff8c8a3ebcee"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "unicode-ident",
++]
++
+ [[package]]
+ name = "sync_wrapper"
+ version = "1.0.2"
+@@ -6544,7 +7209,7 @@ dependencies = [
+  "getrandom 0.4.2",
+  "once_cell",
+  "rustix",
+- "windows-sys 0.59.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -6567,11 +7232,11 @@ dependencies = [
+ 
+ [[package]]
+ name = "thiserror"
+-version = "2.0.18"
++version = "2.0.21"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
++checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
+ dependencies = [
+- "thiserror-impl 2.0.18",
++ "thiserror-impl 2.0.21",
+ ]
+ 
+ [[package]]
+@@ -6587,13 +7252,13 @@ dependencies = [
+ 
+ [[package]]
+ name = "thiserror-impl"
+-version = "2.0.18"
++version = "2.0.21"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5"
++checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn 2.0.117",
++ "syn 3.0.6",
+ ]
+ 
+ [[package]]
+@@ -6717,7 +7382,7 @@ dependencies = [
+  "serde",
+  "serde_json",
+  "spm_precompiled",
+- "thiserror 2.0.18",
++ "thiserror 2.0.21",
+  "unicode-normalization-alignments",
+  "unicode-segmentation",
+  "unicode_categories",
+@@ -6751,7 +7416,7 @@ dependencies = [
+  "serde",
+  "serde_json",
+  "spm_precompiled",
+- "thiserror 2.0.18",
++ "thiserror 2.0.21",
+  "unicode-normalization-alignments",
+  "unicode-segmentation",
+  "unicode_categories",
+@@ -6845,7 +7510,7 @@ dependencies = [
+  "http",
+  "httparse",
+  "js-sys",
+- "thiserror 2.0.18",
++ "thiserror 2.0.21",
+  "tokio",
+  "tokio-tungstenite",
+  "wasm-bindgen",
+@@ -6918,22 +7583,13 @@ dependencies = [
+  "socket2",
+  "sync_wrapper",
+  "tokio",
++ "tokio-rustls",
+  "tokio-stream",
+  "tower",
+  "tower-layer",
+  "tower-service",
+  "tracing",
+-]
+-
+-[[package]]
+-name = "tonic-prost"
+-version = "0.14.5"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "a55376a0bbaa4975a3f10d009ad763d8f4108f067c7c2e74f3001fb49778d309"
+-dependencies = [
+- "bytes",
+- "prost",
+- "tonic",
++ "webpki-roots 1.0.6",
+ ]
+ 
+ [[package]]
+@@ -7080,7 +7736,7 @@ dependencies = [
+  "rustls",
+  "rustls-pki-types",
+  "sha1",
+- "thiserror 2.0.18",
++ "thiserror 2.0.21",
+  "url",
+  "utf-8",
+ ]
+@@ -7162,12 +7818,27 @@ version = "2.9.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "dbc4bc3a9f746d862c45cb89d705aa10f187bb96c76001afab07a0d35ce60142"
+ 
++[[package]]
++name = "unicode-bidi"
++version = "0.3.18"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "5c1cb5db39152898a79168971543b1cb5020dff7fe43c8dc468b0885f5e29df5"
++
+ [[package]]
+ name = "unicode-ident"
+ version = "1.0.24"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+ 
++[[package]]
++name = "unicode-normalization"
++version = "0.1.25"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
++dependencies = [
++ "tinyvec",
++]
++
+ [[package]]
+ name = "unicode-normalization-alignments"
+ version = "0.1.12"
+@@ -7177,6 +7848,12 @@ dependencies = [
+  "smallvec",
+ ]
+ 
++[[package]]
++name = "unicode-properties"
++version = "0.1.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "7df058c713841ad818f1dc5d3fd88063241cc61f49f5fbea4b951e8cf5a8d71d"
++
+ [[package]]
+ name = "unicode-segmentation"
+ version = "1.13.2"
+@@ -7618,7 +8295,7 @@ version = "0.1.11"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
+ dependencies = [
+- "windows-sys 0.48.0",
++ "windows-sys 0.61.2",
+ ]
+ 
+ [[package]]
+diff --git a/Cargo.toml b/Cargo.toml
+index 5c9551d..7716e35 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -11,8 +11,8 @@ tokio = { version = "1.50.0", features = ["full"] }
+ serde = { version = "1.0", features = ["derive"] }
+ serde_json = "1.0"
+ # Keep the SDK and schema types aligned with the deployed SurrealDB server.
+-surrealdb = { version = "=3.2.4" }
+-surrealdb_types = { package = "surrealdb-types", version = "=3.2.4" }
++surrealdb = { version = "=3.3.0" }
++surrealdb_types = { package = "surrealdb-types", version = "=3.3.0" }
+ anyhow = "1.0.102"
+ thiserror = "2.0.18"
+ sha2 = "0.11.0"
+@@ -144,3 +144,7 @@ codegen-units = 256
+ [profile.test.build-override]
+ debug = 0
+ codegen-units = 256
++
++[lints.clippy]
++# The connection-architecture defect was a blocking lock held across `.await`.
++await_holding_lock = "deny"
+diff --git a/crates/surreal-memory/Cargo.toml b/crates/surreal-memory/Cargo.toml
+index 1496cb3..a0ad920 100644
+--- a/crates/surreal-memory/Cargo.toml
++++ b/crates/surreal-memory/Cargo.toml
+@@ -69,3 +69,7 @@ hf-hub = { version = "=0.5.0", features = ["tokio"], optional = true }
+ dirs = "6"
+ rand = { workspace = true }
+ arc-swap = { workspace = true }
++
++[lints.clippy]
++# The connection-architecture defect was a blocking lock held across `.await`.
++await_holding_lock = "deny"
+diff --git a/crates/surreal-memory/src/palace/adapter.rs b/crates/surreal-memory/src/palace/adapter.rs
+index 02c909a..d8cab6a 100644
+--- a/crates/surreal-memory/src/palace/adapter.rs
++++ b/crates/surreal-memory/src/palace/adapter.rs
+@@ -14,6 +14,7 @@ use mempalace_core::storage::{
+ use serde::{Deserialize, Serialize};
+ use sha2::{Digest, Sha256};
+ use std::sync::Arc;
++use crate::storage::sessions::{ConnectionView, DbLease};
+ use surrealdb::Surreal;
+ use surrealdb::engine::any::Any;
+ use surrealdb::types::{RecordId, RecordIdKey};
+@@ -23,9 +24,17 @@ use uuid::Uuid;
+ /// Closure type that yields a live DB handle (resilient to reconnection).
+ type DbFn = Arc<dyn Fn() -> Result<Surreal<Any>> + Send + Sync>;
+ 
++/// Where the adapter obtains its database handle.
++enum DbSource {
++    /// Caller-supplied closure (public constructor); no admission accounting.
++    Closure(DbFn),
++    /// The owning `SurrealStorage`'s connections, with lanes and admission.
++    View(ConnectionView),
++}
++
+ /// Implements `StorageBackend` by forwarding to SurrealDB via a shared `Surreal<Any>`.
+ pub struct PalaceAdapter {
+-    db_fn: DbFn,
++    source: DbSource,
+ }
+ 
+ impl PalaceAdapter {
+@@ -35,12 +44,22 @@ impl PalaceAdapter {
+     /// a reconnected handle when the underlying connection recovers.
+     pub fn new(db_fn: impl Fn() -> Result<Surreal<Any>> + Send + Sync + 'static) -> Self {
+         Self {
+-            db_fn: Arc::new(db_fn),
++            source: DbSource::Closure(Arc::new(db_fn)),
+         }
+     }
+ 
+-    fn db(&self) -> Result<Surreal<Any>> {
+-        (self.db_fn)()
++    /// Adapter over a storage instance's read-only connection view.
++    pub(crate) fn from_view(view: ConnectionView) -> Self {
++        Self {
++            source: DbSource::View(view),
++        }
++    }
++
++    async fn db(&self) -> Result<DbLease> {
++        match &self.source {
++            DbSource::Closure(db_fn) => db_fn().map(DbLease::unmetered),
++            DbSource::View(view) => view.lease().await,
++        }
+     }
+ }
+ 
+@@ -124,7 +143,7 @@ impl StorageBackend for PalaceAdapter {
+     // ── Write ────────────────────────────────────────────────────────────────
+ 
+     async fn add_drawer(&self, drawer: Drawer) -> Result<String> {
+-        let db = self.db()?;
++        let db = self.db().await?;
+         let id = if drawer.id.is_empty() {
+             Uuid::new_v4().to_string()
+         } else {
+@@ -162,7 +181,7 @@ impl StorageBackend for PalaceAdapter {
+     }
+ 
+     async fn delete_drawer(&self, id: &str) -> Result<()> {
+-        let db = self.db()?;
++        let db = self.db().await?;
+         let id_owned = id.to_string();
+         db.query("DELETE type::thing('drawers', $id)")
+             .bind(("id", id_owned))
+@@ -174,7 +193,7 @@ impl StorageBackend for PalaceAdapter {
+     // ── Read ─────────────────────────────────────────────────────────────────
+ 
+     async fn get_drawer(&self, id: &str) -> Result<Option<Drawer>> {
+-        let db = self.db()?;
++        let db = self.db().await?;
+         let id_owned = id.to_string();
+         let mut resp = db
+             .query("SELECT * FROM type::thing('drawers', $id)")
+@@ -186,7 +205,7 @@ impl StorageBackend for PalaceAdapter {
+     }
+ 
+     async fn list_drawers(&self, filter: DrawerFilter, limit: usize) -> Result<Vec<Drawer>> {
+-        let db = self.db()?;
++        let db = self.db().await?;
+ 
+         // Build dynamic WHERE clause
+         let mut conditions: Vec<String> = Vec::new();
+@@ -225,7 +244,7 @@ impl StorageBackend for PalaceAdapter {
+         filter: DrawerFilter,
+         n: usize,
+     ) -> Result<Vec<DrawerHit>> {
+-        let db = self.db()?;
++        let db = self.db().await?;
+ 
+         // Build optional filter conditions
+         let mut conditions: Vec<String> = Vec::new();
+@@ -285,7 +304,7 @@ impl StorageBackend for PalaceAdapter {
+     }
+ 
+     async fn check_duplicate(&self, content_hash: &str) -> Result<bool> {
+-        let db = self.db()?;
++        let db = self.db().await?;
+         let hash_owned = content_hash.to_string();
+         let mut resp = db
+             .query("SELECT count() AS cnt FROM drawers WHERE content_hash = $hash GROUP ALL")
+@@ -300,7 +319,7 @@ impl StorageBackend for PalaceAdapter {
+     // ── Taxonomy ─────────────────────────────────────────────────────────────
+ 
+     async fn list_wings(&self) -> Result<Vec<WingStats>> {
+-        let db = self.db()?;
++        let db = self.db().await?;
+         let mut resp = db
+             .query(
+                 "SELECT wing AS name, count() AS count \
+@@ -326,7 +345,7 @@ impl StorageBackend for PalaceAdapter {
+     }
+ 
+     async fn list_rooms(&self, wing: Option<&str>) -> Result<Vec<RoomStats>> {
+-        let db = self.db()?;
++        let db = self.db().await?;
+         let sql = if let Some(w) = wing {
+             format!(
+                 "SELECT room AS name, wing, count() AS count \
+@@ -361,7 +380,7 @@ impl StorageBackend for PalaceAdapter {
+     }
+ 
+     async fn drawer_count(&self) -> Result<usize> {
+-        let db = self.db()?;
++        let db = self.db().await?;
+         let mut resp = db
+             .query("SELECT count() AS cnt FROM drawers GROUP ALL")
+             .await
+diff --git a/crates/surreal-memory/src/palace/context.rs b/crates/surreal-memory/src/palace/context.rs
+index e972ffd..568d01e 100644
+--- a/crates/surreal-memory/src/palace/context.rs
++++ b/crates/surreal-memory/src/palace/context.rs
+@@ -6,7 +6,7 @@
+ 
+ use crate::palace::adapter::PalaceAdapter;
+ use crate::palace::embedding::FastEmbedService;
+-use crate::storage::surreal::{ConnectionCell, SurrealStorage};
++use crate::storage::surreal::SurrealStorage;
+ use anyhow::{Context, Result};
+ use mempalace_core::{
+     dialect::compress::{Dialect, DialectConfig},
+@@ -36,24 +36,11 @@ pub struct PalaceContext {
+ impl PalaceContext {
+     /// Build a `PalaceContext` from an existing `SurrealStorage`.
+     ///
+-    /// This reuses the same `Surreal<Any>` connection as the rest of
+-    /// surreal-memory, so there is no extra connection cost.
++    /// This reuses the same connections as the rest of surreal-memory (via a
++    /// read-only `ConnectionView`), so there is no extra connection cost and
++    /// palace queries are subject to the same lanes and embedded admission.
+     pub async fn from_storage(storage: &SurrealStorage) -> Result<Self> {
+-        // Capture connection cell for the adapter closure — atomic load,
+-        // no lock, no contention with the rest of surreal-memory.
+-        let conn = storage.connection_arc();
+-        let adapter = Arc::new(PalaceAdapter::new(move || {
+-            let cell = conn.load();
+-            match &**cell {
+-                ConnectionCell::Connected(db) => Ok(db.clone()),
+-                ConnectionCell::Reconnecting => {
+-                    anyhow::bail!("Connection is reconnecting")
+-                }
+-                ConnectionCell::Failed(msg) => {
+-                    anyhow::bail!("Connection failed: {}", msg)
+-                }
+-            }
+-        }));
++        let adapter = Arc::new(PalaceAdapter::from_view(storage.connection_view()));
+ 
+         // Create embedder
+         let embed_service = FastEmbedService::new()
+@@ -80,19 +67,7 @@ impl PalaceContext {
+ 
+     /// Build a `PalaceContext` with a no-op embedder (for tests).
+     pub fn from_storage_noop(storage: &SurrealStorage) -> Self {
+-        let conn = storage.connection_arc();
+-        let adapter = Arc::new(PalaceAdapter::new(move || {
+-            let cell = conn.load();
+-            match &**cell {
+-                ConnectionCell::Connected(db) => Ok(db.clone()),
+-                ConnectionCell::Reconnecting => {
+-                    anyhow::bail!("Connection is reconnecting")
+-                }
+-                ConnectionCell::Failed(msg) => {
+-                    anyhow::bail!("Connection failed: {}", msg)
+-                }
+-            }
+-        }));
++        let adapter = Arc::new(PalaceAdapter::from_view(storage.connection_view()));
+ 
+         let embed_service = FastEmbedService::noop();
+         let embedder = embed_service.as_embedder();
+diff --git a/crates/surreal-memory/src/storage/mod.rs b/crates/surreal-memory/src/storage/mod.rs
+index e147545..03a2916 100644
+--- a/crates/surreal-memory/src/storage/mod.rs
++++ b/crates/surreal-memory/src/storage/mod.rs
+@@ -6,6 +6,7 @@ use std::any::Any;
+ 
+ pub mod migrations;
+ pub mod auth;
++pub(crate) mod sessions;
+ pub mod surreal;
+ 
+ use crate::entity::{Entity, KnowledgeGraph, Relation, SemanticSearchResult};
+diff --git a/crates/surreal-memory/src/storage/surreal.rs b/crates/surreal-memory/src/storage/surreal.rs
+index 30d7907..e2f990d 100644
+--- a/crates/surreal-memory/src/storage/surreal.rs
++++ b/crates/surreal-memory/src/storage/surreal.rs
+@@ -9,6 +9,7 @@ use crate::{
+     memory::{Memory, MemoryHistory, MemoryScope, MemoryType},
+     mindmap::{MapType, MindMap, MindMapEdge, MindMapNode},
+     storage::migrations::run_migrations,
++    storage::sessions::{DbLease, HeavyScope, Lane, Sessions},
+     task_step::{TaskStep, TaskStepStatus},
+     task_stream::{ContextWindow, TaskStream, TaskStreamStatus},
+ };
+@@ -27,13 +28,6 @@ use uuid::Uuid;
+ /// Token budget constants per model family. Extend via config in Phase 3.
+ const DEFAULT_CONTEXT_BUDGET: u64 = 100_000;
+ 
+-/// SurrealDB query timeout for mindmap `UPDATE` statements. Mindmaps are stored
+-/// as a single record with nested node/edge arrays, so every node/edge add
+-/// rewrites the whole JSON object — a known SurrealDB performance cliff on
+-/// large mindmaps. This `TIMEOUT` makes an oversized update fail fast with a
+-/// clear error instead of stalling the write path open-endedly.
+-const MINDMAP_UPDATE_TIMEOUT: &str = "30s";
+-
+ /// SurrealDB-backed memory storage.
+ ///
+ /// `Surreal<Any>` is internally `Arc`-wrapped and `Clone`-safe; the SDK
+@@ -41,21 +35,18 @@ const MINDMAP_UPDATE_TIMEOUT: &str = "30s";
+ /// (WebSocket in server mode, in-process for embedded). The connection
+ /// lifecycle (Connected/Reconnecting/Failed) is published via an atomic
+ /// `ArcSwap` cell: hot-path readers do a single atomic load (no lock),
+-/// reconnects do a single atomic store. This replaces the previous
++/// reconnects do a single atomic store. This replaced the historical
+ /// `Arc<std::sync::RwLock<ConnectionState>>` that serialized every storage
+ /// call through a blocking lock and produced writer starvation under load.
++///
++/// Every storage operation takes its handle as a [`DbLease`] from
++/// [`Sessions`]: in server mode heavy writes run on an independently
++/// connected lane (see `SURREAL_SERVER_LANES`); in embedded mode each lease
++/// holds an admission permit (see `SURREAL_EMBEDDED_MAX_INFLIGHT`).
+ pub struct SurrealStorage {
+-    connection: Arc<ArcSwap<ConnectionCell>>,
++    sessions: Arc<Sessions>,
+     connection_info: ConnectionInfo,
+     embedding_service: Arc<dyn EmbeddingService>,
+-    /// Bounded-concurrency semaphore for embedded mode. RocksDB's
+-    /// PointLockManager defaults to 16 stripes per column family —
+-    /// concurrent transactions on overlapping keys serialize at the
+-    /// storage engine. Bounding in-flight ops at the application layer
+-    /// prevents head-of-line blocking and turns "lock timeout" /
+-    /// "serialization failure" into honest backpressure. `None` in
+-    /// server mode (the remote SurrealDB handles its own scheduling).
+-    embedded_semaphore: Option<Arc<tokio::sync::Semaphore>>,
+     #[cfg(feature = "palace")]
+     palace: tokio::sync::OnceCell<PalaceContext>,
+ }
+@@ -91,22 +82,49 @@ fn transaction_conflict_backoff(attempt: u32) -> Duration {
+     Duration::from_millis(millis.min(100))
+ }
+ 
+-/// Build the embedded-mode in-flight semaphore from the active config. Returns
+-/// `None` in server mode (the remote DB handles its own scheduling).
+-fn make_embedded_semaphore(config: &SurrealConfig) -> Option<Arc<tokio::sync::Semaphore>> {
++/// Embedded-mode admission permits from the active config. Returns `None` in
++/// server mode (the remote DB handles its own scheduling). RocksDB's
++/// PointLockManager defaults to 16 stripes per column family — concurrent
++/// transactions on overlapping keys serialize at the storage engine, so
++/// bounding in-flight ops turns "lock timeout" / "serialization failure" into
++/// honest backpressure.
++fn embedded_admission_permits(config: &SurrealConfig) -> Option<usize> {
+     match config.mode {
+-        SurrealMode::Embedded => {
+-            let n = std::env::var("SURREAL_EMBEDDED_MAX_INFLIGHT")
++        SurrealMode::Embedded => Some(
++            std::env::var("SURREAL_EMBEDDED_MAX_INFLIGHT")
+                 .ok()
+                 .and_then(|s| s.parse::<usize>().ok())
+                 .filter(|n| *n > 0)
+-                .unwrap_or(DEFAULT_EMBEDDED_MAX_INFLIGHT);
+-            Some(Arc::new(tokio::sync::Semaphore::new(n)))
+-        }
++                .unwrap_or(DEFAULT_EMBEDDED_MAX_INFLIGHT),
++        ),
+         SurrealMode::Server => None,
+     }
+ }
+ 
++/// Whether server mode opens the separate heavy-write connection.
++///
++/// `SURREAL_SERVER_LANES=2` (default) opens an interactive lane and an
++/// independently connected heavy-write lane, so compression, summarisation,
++/// mindmap rewrites and bulk operations cannot head-of-line-block interactive
++/// reads on the shared WebSocket. `SURREAL_SERVER_LANES=1` keeps the single
++/// connection. Ignored in embedded mode (one in-process handle).
++fn server_heavy_lane_enabled(config: &SurrealConfig) -> bool {
++    if !matches!(config.mode, SurrealMode::Server) {
++        return false;
++    }
++    match std::env::var("SURREAL_SERVER_LANES").ok().as_deref() {
++        None | Some("2") => true,
++        Some("1") => false,
++        Some(other) => {
++            tracing::warn!(
++                value = other,
++                "SURREAL_SERVER_LANES must be 1 or 2; using the default of 2"
++            );
++            true
++        }
++    }
++}
++
+ /// What the retry layer should do with an observed error.
+ ///
+ /// Replaces the previous binary "retriable or not" verdict. Three states
+@@ -126,33 +144,67 @@ enum RetryAction {
+     FailFast,
+ }
+ 
+-/// Discriminate a typed `surrealdb::Error` into a `RetryAction`. Kept as a
+-/// free function so it can be unit-tested without a live storage handle.
++/// Discriminate a typed `surrealdb::Error` into a `RetryAction` by its
++/// structured `ErrorDetails` kind. Kept as a free function so it can be
++/// unit-tested without a live storage handle.
++///
++/// Only `Internal` errors — which the SDK itself could not classify (e.g. a
++/// RocksDB `TimedOut` status surfaces as `KvsError::Transaction` →
++/// `Internal`) — take the narrowed message fallback.
+ fn classify_surreal_error(err: &surrealdb::Error) -> RetryAction {
+-    // The exact variant set is SDK-version-specific; match on the
+-    // stringified Display form scoped to the typed error (much narrower
+-    // than matching on a fully-wrapped anyhow chain).
+-    let msg = err.to_string().to_lowercase();
++    use surrealdb_types::{ConnectionError, ErrorDetails, QueryError};
++    match err.details() {
++        // Calling connect twice is a programming error, not transport loss.
++        ErrorDetails::Connection(Some(ConnectionError::AlreadyConnected)) => RetryAction::FailFast,
++        // Uninitialised handle, transport/DNS/WebSocket failure, server
++        // shutting down: the connection is gone.
++        ErrorDetails::Connection(_) => RetryAction::Reconnect,
++        // The server (or engine) is alive but busy: back off on the same
++        // connection.
++        ErrorDetails::Query(Some(
++            QueryError::TimedOut { .. } | QueryError::TransactionConflict | QueryError::Cancelled,
++        )) => RetryAction::Retry,
++        ErrorDetails::Context => err
++            .cause()
++            .map_or(RetryAction::FailFast, classify_surreal_error),
++        ErrorDetails::Internal => classify_message(err.message()),
++        // Validation, NotAllowed/auth, NotFound, AlreadyExists, Configuration,
++        // Serialization (decode), Thrown, and Query NotExecuted — retrying the
++        // identical request cannot change the outcome.
++        _ => RetryAction::FailFast,
++    }
++}
++
++/// Narrow message-based classification, used only for errors that carry no
++/// typed SDK kind (plain `anyhow` errors, or SDK `Internal` errors).
++fn classify_message(message: &str) -> RetryAction {
++    let msg = message.to_lowercase();
++    // A commit that may already have applied must never be resubmitted,
++    // whatever transport text its cause contains.
++    if msg.contains("commit outcome is unknown") {
++        return RetryAction::FailFast;
++    }
+     if msg.contains("connection refused")
+         || msg.contains("connection reset")
+         || msg.contains("connection closed")
++        || msg.contains("connection uninitialised")
+         || msg.contains("not connected")
+-        || msg.contains("disconnect")
++        || msg.contains("dns")
++        || msg.contains("network")
+     {
+-        RetryAction::Reconnect
+-    } else if msg.contains("timeout")
++        return RetryAction::Reconnect;
++    }
++    if msg.contains("timeout")
+         || msg.contains("timed out")
+         || msg.contains("too many connections")
+-        || msg.contains("lock")
+-        || msg.contains("serialization")
+         || msg.contains("backpressure")
++        || msg.contains("lock")
++        || msg.contains("resource busy")
++        || msg.contains("serialization failure")
+     {
+-        RetryAction::Retry
+-    } else {
+-        // Schema, validation, query syntax, auth — do not retry, do not
+-        // reconnect, just surface.
+-        RetryAction::FailFast
++        return RetryAction::Retry;
+     }
++    RetryAction::FailFast
+ }
+ 
+ /// Configuration for retry and reconnection behavior.
+@@ -660,13 +712,25 @@ impl SurrealStorage {
+         run_migrations(&db).await?;
+         Self::ensure_embedding_indexes(&db, embedding_service.dimensions()).await?;
+ 
+-        let embedded_semaphore = make_embedded_semaphore(&connection_info.config);
++        // The heavy-write lane is a second, independently connected and
++        // authenticated transport — not a clone, which would share the
++        // interactive lane's WebSocket.
++        let heavy = if server_heavy_lane_enabled(config) {
++            Some(Self::connect_with_retry(config).await.context(
++                "Failed to open the heavy-write SurrealDB connection (set SURREAL_SERVER_LANES=1 to disable it)",
++            )?)
++        } else {
++            None
++        };
+ 
+         Ok(Self {
+-            connection: Arc::new(ArcSwap::new(Arc::new(ConnectionCell::Connected(db)))),
++            sessions: Arc::new(Sessions::new(
++                db,
++                heavy,
++                embedded_admission_permits(config),
++            )),
+             connection_info,
+             embedding_service,
+-            embedded_semaphore,
+             #[cfg(feature = "palace")]
+             palace: tokio::sync::OnceCell::new(),
+         })
+@@ -882,20 +946,37 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
+         Ok(())
+     }
+ 
+-    /// Hot-path accessor for the live `Surreal<Any>` handle.
+-    ///
+-    /// One atomic load, one `Arc::clone` of the inner SDK handle. No lock,
+-    /// no contention, safe to call across `.await`. Every storage method
+-    /// goes through here.
++    /// Unmetered accessor for the interactive `Surreal<Any>` handle: one
++    /// atomic load, one `Arc::clone`. Storage operations use [`Self::lease`]
++    /// instead; this backs probes and the public [`Self::db`] escape hatch.
+     pub(crate) fn live_db(&self) -> Result<Surreal<Any>> {
+-        let cell = self.connection.load();
+-        match &**cell {
+-            ConnectionCell::Connected(db) => Ok(db.clone()),
+-            ConnectionCell::Reconnecting => {
+-                anyhow::bail!("Connection is currently reconnecting, please retry later")
+-            }
+-            ConnectionCell::Failed(msg) => anyhow::bail!("Connection failed: {}", msg),
+-        }
++        self.sessions.live(Lane::Interactive)
++    }
++
++    /// Database handle for one storage operation. Honors the current task's
++    /// lane and, in embedded mode, waits for an admission permit — the wait
++    /// is bounded by `operation_deadline_ms`.
++    async fn lease(&self) -> Result<DbLease> {
++        self.sessions.lease(self.operation_deadline()).await
++    }
++
++    /// Run the rest of the calling storage method on the heavy-write lane.
++    fn heavy_scope(&self) -> HeavyScope {
++        self.sessions.heavy_scope()
++    }
++
++    fn operation_deadline(&self) -> Duration {
++        Duration::from_millis(self.connection_info.config.retry.operation_deadline_ms)
++    }
++
++    /// Server-side `TIMEOUT` clause value for long-running writes, derived
++    /// from `query_timeout_ms` so the statement can never outlive the query
++    /// timeout. In embedded mode the SDK also enforces `query_timeout`; over
++    /// a `ws://` connection the SurrealDB 3.3.0 SDK does not (it is honored
++    /// only by the local and gRPC engines), so this clause is the per-query
++    /// bound there.
++    fn statement_timeout(&self) -> String {
++        format!("{}ms", self.connection_info.config.retry.query_timeout_ms)
+     }
+ 
+     /// Ping the database to verify the connection is alive.
+@@ -910,10 +991,11 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
+             .context("SurrealDB health check failed")
+     }
+ 
+-    /// Clone the live `Surreal<Any>` handle for shared use by subsystems
+-    /// (e.g. `PalaceAdapter`). `Surreal<Any>` is internally `Arc`-wrapped,
+-    /// so this is cheap. Returns `Err` if the connection is in
+-    /// `Reconnecting` or `Failed` state.
++    /// Clone the live interactive `Surreal<Any>` handle for callers outside
++    /// the storage API. `Surreal<Any>` is internally `Arc`-wrapped, so this is
++    /// cheap. Returns `Err` if the connection is in `Reconnecting` or `Failed`
++    /// state. Queries issued through this handle bypass embedded admission
++    /// and lanes.
+     pub fn db(&self) -> Result<Surreal<Any>> {
+         self.live_db()
+     }
+@@ -958,7 +1040,7 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
+         memory.updated_at = now;
+         memory.version = 1;
+         let payload = DbMemory::from(memory);
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         let response = db
+             .query(
+                 "BEGIN TRANSACTION;\n\
+@@ -994,12 +1076,15 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
+         )
+     }
+ 
+-    /// Return a cloneable reference to the connection cell. Used by
+-    /// `PalaceAdapter` to build a closure that yields the live
+-    /// `Surreal<Any>` handle on each operation (resilient to reconnection).
++    /// Typed read-only view of this instance's connections for the palace
++    /// adapter: leases honor lanes and embedded admission and follow
++    /// reconnects, but the view cannot publish connection state.
+     #[cfg(feature = "palace")]
+-    pub(crate) fn connection_arc(&self) -> Arc<ArcSwap<ConnectionCell>> {
+-        Arc::clone(&self.connection)
++    pub(crate) fn connection_view(&self) -> crate::storage::sessions::ConnectionView {
++        crate::storage::sessions::ConnectionView::new(
++            Arc::clone(&self.sessions),
++            self.operation_deadline(),
++        )
+     }
+ 
+     // ── Private helpers ───────────────────────────────────────────────────────
+@@ -1015,34 +1100,14 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
+     /// failure", which hammered the contended path instead of letting it
+     /// drain.
+     fn classify_error(&self, error: &anyhow::Error) -> RetryAction {
+-        // Typed-source discrimination first.
+-        if let Some(surreal_err) = error.downcast_ref::<surrealdb::Error>() {
+-            return classify_surreal_error(surreal_err);
+-        }
+-        // Fallback: string-based, but narrower and three-valued — replaces
+-        // the legacy any-of-many matcher that conflated transport with
+-        // server-busy.
+-        let msg = format!("{}", error).to_lowercase();
+-        if msg.contains("connection refused")
+-            || msg.contains("connection reset")
+-            || msg.contains("connection closed")
+-            || msg.contains("connection uninitialised")
+-            || msg.contains("not connected")
+-            || msg.contains("dns")
+-            || msg.contains("network")
++        // Typed-source discrimination first, anywhere in the context chain.
++        if let Some(surreal_err) = error
++            .chain()
++            .find_map(|cause| cause.downcast_ref::<surrealdb::Error>())
+         {
+-            return RetryAction::Reconnect;
+-        }
+-        if msg.contains("timeout")
+-            || msg.contains("timed out")
+-            || msg.contains("too many connections")
+-            || msg.contains("backpressure")
+-            || msg.contains("lock")
+-            || msg.contains("serialization failure")
+-        {
+-            return RetryAction::Retry;
++            return classify_surreal_error(surreal_err);
+         }
+-        RetryAction::FailFast
++        classify_message(&error.to_string())
+     }
+ 
+     /// Reconnect with an explicit connect-attempt cap. `retry_operation` calls
+@@ -1055,28 +1120,26 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
+     /// (e.g. the operation deadline fires), the state is not stranded in
+     /// `Reconnecting` — it is forced to `Failed` on drop so the storage
+     /// instance stays usable (subsequent calls retry rather than bail forever).
+-    async fn reconnect_with_attempts(&self, max_attempts: u32) -> Result<()> {
++    async fn reconnect_with_attempts(&self, lane: Lane, max_attempts: u32) -> Result<()> {
++        let connection = self.sessions.cell(lane);
+         // Publish Reconnecting state atomically; arm the cancellation guard.
+-        self.connection
+-            .store(Arc::new(ConnectionCell::Reconnecting));
+-        tracing::warn!("Connection lost, attempting reconnection");
++        connection.store(Arc::new(ConnectionCell::Reconnecting));
++        tracing::warn!(lane = ?lane, "Connection lost, attempting reconnection");
+         let guard = ReconnectGuard {
+-            connection: Arc::clone(&self.connection),
++            connection: Arc::clone(connection),
+         };
+ 
+         match Self::connect_with_attempts(&self.connection_info.config, max_attempts).await {
+             Ok(db) => {
+                 guard.disarm();
+-                self.connection
+-                    .store(Arc::new(ConnectionCell::Connected(db)));
+-                tracing::info!("Reconnection successful");
++                connection.store(Arc::new(ConnectionCell::Connected(db)));
++                tracing::info!(lane = ?lane, "Reconnection successful");
+                 Ok(())
+             }
+             Err(err) => {
+                 guard.disarm();
+                 let error_msg = format!("{}", err);
+-                self.connection
+-                    .store(Arc::new(ConnectionCell::Failed(error_msg.clone())));
++                connection.store(Arc::new(ConnectionCell::Failed(error_msg.clone())));
+                 tracing::error!(error = %err, "Reconnection failed after exhausting retries");
+                 Err(anyhow::anyhow!("Reconnection failed: {}", error_msg))
+             }
+@@ -1085,7 +1148,7 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
+ 
+     /// Generic retry wrapper for database operations.
+     ///
+-    /// Handles connection extraction, error classification, reconnection, and
++    /// Handles lease acquisition, error classification, reconnection, and
+     /// exponential backoff — all under a single wall-clock deadline
+     /// (`operation_deadline_ms`). When the deadline is exceeded the operation
+     /// returns a typed error instead of stalling. This bounds the previous
+@@ -1097,25 +1160,10 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
+     {
+         use tracing::Instrument as _;
+ 
+-        // Acquire an embedded-mode permit (no-op in server mode). The
+-        // permit is held for the entire retry × reconnect cycle so the
+-        // application-layer concurrency cap holds end-to-end. The wait
+-        // itself counts against the operation deadline below — this is
+-        // the *honest* backpressure path that replaces the lock-timeout /
+-        // serialization-failure error storm of the previous design.
+-        let _permit = if let Some(sem) = &self.embedded_semaphore {
+-            Some(
+-                Arc::clone(sem)
+-                    .acquire_owned()
+-                    .await
+-                    .context("embedded concurrency semaphore was closed")?,
+-            )
+-        } else {
+-            None
+-        };
+-
+-        let deadline =
+-            Duration::from_millis(self.connection_info.config.retry.operation_deadline_ms);
++        // The embedded admission wait happens inside the timeout (each
++        // attempt leases), so it counts against the deadline like the
++        // queries themselves.
++        let deadline = self.operation_deadline();
+         let span = tracing::debug_span!("retry_operation", operation = op_name);
+ 
+         match tokio::time::timeout(
+@@ -1144,11 +1192,15 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
+         let mut last_error = None;
+ 
+         for attempt in 0..max_retries {
+-            // Extract current connection
+-            let db = self.live_db()?;
++            // Lease per attempt: the admission permit is not held through
++            // the backoff sleep.
++            let lease = self.lease().await?;
++            let lane = lease.lane();
+ 
+             // Attempt operation
+-            match op(db).await {
++            let outcome = op((*lease).clone()).await;
++            drop(lease);
++            match outcome {
+                 Ok(result) => return Ok(result),
+                 Err(err) => {
+                     let action = self.classify_error(&err);
+@@ -1158,13 +1210,13 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
+                         break;
+                     }
+ 
+-                    // Only `Reconnect` actions touch the connection cell.
+-                    // `Retry` actions backoff and use the same handle —
+-                    // the SDK multiplexes, so a busy/locked query does not
+-                    // poison the connection.
++                    // Only `Reconnect` actions touch a connection cell, and
++                    // only the lane that failed. `Retry` actions backoff and
++                    // use the same handle — the SDK multiplexes, so a
++                    // busy/locked query does not poison the connection.
+                     if action == RetryAction::Reconnect
+                         && let Err(reconnect_err) = self
+-                            .reconnect_with_attempts(OPERATION_RECONNECT_ATTEMPTS)
++                            .reconnect_with_attempts(lane, OPERATION_RECONNECT_ATTEMPTS)
+                             .await
+                     {
+                         tracing::warn!(
+@@ -1243,7 +1295,7 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
+         agent_id: Option<&str>,
+         status: TaskStreamStatus,
+     ) -> Result<TaskStream> {
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         let mut sql = "UPDATE task_stream SET status = $status WHERE name = $name".to_string();
+         if user_id.is_some() {
+             sql.push_str(" AND user_id = $uid");
+@@ -1288,7 +1340,7 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
+     /// when no step with that key exists. Backs the idempotency checks in
+     /// `add_task_step` and `complete_step`.
+     async fn find_task_step_by_key(&self, idempotency_key: &str) -> Result<Option<TaskStep>> {
+-        let db = self.db()?;
++        let db = self.lease().await?;
+         let steps: Vec<DbTaskStep> = db
+             .query("SELECT * FROM task_step WHERE idempotency_key = $key LIMIT 1")
+             .bind(("key", idempotency_key.to_string()))
+@@ -1319,17 +1371,21 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
+         let operation = op.to_string();
+         let payload = Self::sanitize_explicit_record_content(value);
+ 
++        let create_sql = format!(
++            "CREATE type::record($table, $key) CONTENT $value RETURN AFTER TIMEOUT {}",
++            self.statement_timeout()
++        );
++
+         self.retry_operation(&operation, |db| {
+             let table = table.clone();
+             let key = key.clone();
+             let operation = operation.clone();
+             let payload = payload.clone();
++            let create_sql = create_sql.clone();
+ 
+             async move {
+                 let mut response = db
+-                    .query(
+-                        "CREATE type::record($table, $key) CONTENT $value RETURN AFTER TIMEOUT 30s",
+-                    )
++                    .query(create_sql)
+                     .bind(("table", table))
+                     .bind(("key", key))
+                     .bind(("value", payload))
+@@ -1392,7 +1448,7 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
+         updated_at: Datetime,
+         op: &str,
+     ) -> Result<MindMap> {
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         let (table, key) = Self::record_id_parts(id);
+         let edge_values = serde_json::to_value(edges)
+             .with_context(|| format!("{op}: edge serialization failed"))?;
+@@ -1400,7 +1456,8 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
+             .query(format!(
+                 "UPDATE type::record($table, $key) \
+                  SET nodes = $nodes, edges = $edges, updated_at = $updated_at \
+-                 RETURN AFTER TIMEOUT {MINDMAP_UPDATE_TIMEOUT}"
++                 RETURN AFTER TIMEOUT {}",
++                self.statement_timeout()
+             ))
+             .bind(("table", table))
+             .bind(("key", key))
+@@ -1427,13 +1484,14 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
+         updated_at: Datetime,
+         op: &str,
+     ) -> Result<MindMap> {
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         let (table, key) = Self::record_id_parts(id);
+         let mut response = db
+             .query(format!(
+                 "UPDATE type::record($table, $key) \
+                  SET nodes = array::append(nodes, $node), updated_at = $updated_at \
+-                 RETURN AFTER TIMEOUT {MINDMAP_UPDATE_TIMEOUT}"
++                 RETURN AFTER TIMEOUT {}",
++                self.statement_timeout()
+             ))
+             .bind(("table", table))
+             .bind(("key", key))
+@@ -1459,7 +1517,7 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
+         updated_at: Datetime,
+         op: &str,
+     ) -> Result<MindMap> {
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         let (table, key) = Self::record_id_parts(id);
+         let edge_value = serde_json::to_value(edge)
+             .with_context(|| format!("{op}: edge serialization failed"))?;
+@@ -1467,7 +1525,8 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
+             .query(format!(
+                 "UPDATE type::record($table, $key) \
+                  SET edges = array::append(edges, $edge), updated_at = $updated_at \
+-                 RETURN AFTER TIMEOUT {MINDMAP_UPDATE_TIMEOUT}"
++                 RETURN AFTER TIMEOUT {}",
++                self.statement_timeout()
+             ))
+             .bind(("table", table))
+             .bind(("key", key))
+@@ -1541,7 +1600,7 @@ impl MemoryStorage for SurrealStorage {
+     // ── Knowledge Graph ───────────────────────────────────────────────────────
+ 
+     async fn create_entity(&self, mut entity: Entity) -> Result<Entity> {
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         let now = Datetime::default();
+         entity.created_at = now;
+         entity.updated_at = now;
+@@ -1557,6 +1616,8 @@ impl MemoryStorage for SurrealStorage {
+     }
+ 
+     async fn create_entities(&self, entities: Vec<Entity>) -> Result<Vec<Entity>> {
++        // Heavy write: run on the heavy-write lane (server mode).
++        let _heavy = self.heavy_scope();
+         let mut results = Vec::with_capacity(entities.len());
+         for entity in entities {
+             results.push(self.create_entity(entity).await?);
+@@ -1565,7 +1626,7 @@ impl MemoryStorage for SurrealStorage {
+     }
+ 
+     async fn get_entity(&self, name: &str) -> Result<Option<Entity>> {
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         let result: Vec<Entity> = db
+             .query("SELECT * FROM entity WHERE name = $name")
+             .bind(("name", name.to_string()))
+@@ -1575,7 +1636,7 @@ impl MemoryStorage for SurrealStorage {
+     }
+ 
+     async fn update_entity(&self, mut entity: Entity) -> Result<Entity> {
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         entity.updated_at = Datetime::default();
+         entity.embedding = Some(self.embed_entity(&entity).await?);
+ 
+@@ -1592,7 +1653,7 @@ impl MemoryStorage for SurrealStorage {
+     }
+ 
+     async fn delete_entity(&self, name: &str) -> Result<()> {
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         db.query("DELETE FROM entity WHERE name = $name; DELETE FROM relation WHERE from = $name OR to = $name")
+             .bind(("name", name.to_string()))
+             .await?;
+@@ -1600,7 +1661,7 @@ impl MemoryStorage for SurrealStorage {
+     }
+ 
+     async fn search_entities(&self, query: &str) -> Result<Vec<Entity>> {
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         let results: Vec<Entity> = db
+             .query("SELECT * FROM entity WHERE name CONTAINS $q OR entity_type CONTAINS $q OR observations CONTAINS $q")
+             .bind(("q", query.to_string()))
+@@ -1610,7 +1671,7 @@ impl MemoryStorage for SurrealStorage {
+     }
+ 
+     async fn create_relation(&self, mut relation: Relation) -> Result<Relation> {
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         relation.created_at = Datetime::default();
+         let created: Option<Relation> = db
+             .create("relation")
+@@ -1621,6 +1682,8 @@ impl MemoryStorage for SurrealStorage {
+     }
+ 
+     async fn create_relations(&self, relations: Vec<Relation>) -> Result<Vec<Relation>> {
++        // Heavy write: run on the heavy-write lane (server mode).
++        let _heavy = self.heavy_scope();
+         let mut results = Vec::with_capacity(relations.len());
+         for r in relations {
+             results.push(self.create_relation(r).await?);
+@@ -1629,7 +1692,7 @@ impl MemoryStorage for SurrealStorage {
+     }
+ 
+     async fn get_relations(&self, entity_name: &str) -> Result<Vec<Relation>> {
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         let results: Vec<Relation> = db
+             .query("SELECT * FROM relation WHERE from = $name OR to = $name")
+             .bind(("name", entity_name.to_string()))
+@@ -1639,7 +1702,7 @@ impl MemoryStorage for SurrealStorage {
+     }
+ 
+     async fn delete_relation(&self, from: &str, to: &str, relation_type: &str) -> Result<()> {
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         db.query("DELETE FROM relation WHERE from = $from AND to = $to AND relation_type = $rt")
+             .bind(("from", from.to_string()))
+             .bind(("to", to.to_string()))
+@@ -1649,7 +1712,7 @@ impl MemoryStorage for SurrealStorage {
+     }
+ 
+     async fn get_graph(&self) -> Result<KnowledgeGraph> {
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         let entities: Vec<Entity> = db.query("SELECT * FROM entity").await?.take(0)?;
+         let relations: Vec<Relation> = db.query("SELECT * FROM relation").await?.take(0)?;
+         Ok(KnowledgeGraph {
+@@ -1677,7 +1740,7 @@ impl MemoryStorage for SurrealStorage {
+         limit: usize,
+         threshold: f32,
+     ) -> Result<Vec<SemanticSearchResult>> {
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         let query_emb = self.embed_text(query).await?;
+         let all: Vec<Entity> = db
+             .query("SELECT * FROM entity WHERE embedding IS NOT NONE")
+@@ -1740,7 +1803,7 @@ impl MemoryStorage for SurrealStorage {
+             }
+         }
+ 
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+ 
+         let now = Datetime::default();
+         memory.embedding = Some(emb);
+@@ -1772,7 +1835,7 @@ impl MemoryStorage for SurrealStorage {
+     }
+ 
+     async fn get_memory(&self, id: &str) -> Result<Option<Memory>> {
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         let (table, key) = Self::parse_record_id_str(id, "memory")?;
+         let result: Vec<DbMemory> = db
+             .query("SELECT * FROM type::record($table, $key)")
+@@ -1788,7 +1851,7 @@ impl MemoryStorage for SurrealStorage {
+     }
+ 
+     async fn update_memory(&self, id: &str, content: String) -> Result<Memory> {
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         let old = self
+             .get_memory(id)
+             .await?
+@@ -1835,7 +1898,7 @@ impl MemoryStorage for SurrealStorage {
+     }
+ 
+     async fn delete_memory(&self, id: &str) -> Result<()> {
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         let (table, key) = Self::parse_record_id_str(id, "memory")?;
+ 
+         // The audit row and the delete must land together. Issued as two
+@@ -1877,6 +1940,8 @@ impl MemoryStorage for SurrealStorage {
+         agent_id: Option<&str>,
+         session_id: Option<&str>,
+     ) -> Result<u64> {
++        // Heavy write: run on the heavy-write lane (server mode).
++        let _heavy = self.heavy_scope();
+         let memories = self.get_all_memories(user_id, agent_id, session_id).await?;
+         let count = memories.len() as u64;
+         for mem in memories {
+@@ -1915,7 +1980,7 @@ impl MemoryStorage for SurrealStorage {
+ 
+         query.push_str(&parts.join(" AND "));
+ 
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+ 
+         let mut q = db.query(query);
+         if let Some(v) = uid {
+@@ -1961,7 +2026,7 @@ impl MemoryStorage for SurrealStorage {
+     }
+ 
+     async fn get_memory_history(&self, memory_id: &str) -> Result<Vec<MemoryHistory>> {
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         // `memory_history.memory_id` is a record link, not a string. Binding a
+         // string here compares `record` against `string`, which is never equal
+         // in SurrealQL, so the query silently returned zero rows for every
+@@ -1998,7 +2063,7 @@ impl MemoryStorage for SurrealStorage {
+         user_id: Option<&str>,
+         agent_id: Option<&str>,
+     ) -> Result<Option<TaskStream>> {
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         let mut sql = "SELECT * FROM task_stream WHERE name = $name".to_string();
+         if user_id.is_some() {
+             sql.push_str(" AND user_id = $uid");
+@@ -2102,7 +2167,7 @@ impl MemoryStorage for SurrealStorage {
+         // SurrealDB `LET`/response-index semantics.
+         let memory_key = Uuid::new_v4().to_string();
+ 
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+ 
+         let mut txn_sql = "BEGIN TRANSACTION;\n\
+              CREATE type::record('memory', $mkey) CONTENT $memory;\n\
+@@ -2226,7 +2291,7 @@ impl MemoryStorage for SurrealStorage {
+     ) -> Result<ContextWindow> {
+         let budget = max_tokens.unwrap_or_else(|| Self::model_context_budget(model_name));
+ 
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+ 
+         let stream_id = {
+             let stream = self
+@@ -2287,7 +2352,7 @@ impl MemoryStorage for SurrealStorage {
+             parts.push("true".into());
+         }
+ 
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+ 
+         let query = format!(
+             "SELECT * FROM task_stream WHERE {} ORDER BY last_active DESC",
+@@ -2311,6 +2376,8 @@ impl MemoryStorage for SurrealStorage {
+         user_id: Option<&str>,
+         agent_id: Option<&str>,
+     ) -> Result<()> {
++        // Heavy write: run on the heavy-write lane (server mode).
++        let _heavy = self.heavy_scope();
+         let stream = self
+             .get_task_stream(name, user_id, agent_id)
+             .await?
+@@ -2318,7 +2385,7 @@ impl MemoryStorage for SurrealStorage {
+         let stream_id = stream.id.clone().context("TaskStream missing id")?;
+ 
+         let memories: Vec<DbMemory> = {
+-            let db = self.live_db()?;
++            let db = self.lease().await?;
+             db.query("SELECT * FROM memory WHERE task_stream_id = $sid")
+                 .bind(("sid", stream_id.clone()))
+                 .await?
+@@ -2332,7 +2399,7 @@ impl MemoryStorage for SurrealStorage {
+             }
+         }
+ 
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         db.query("UPDATE mindmap SET task_stream_id = NONE WHERE task_stream_id = $sid")
+             .bind(("sid", stream_id.clone()))
+             .await?;
+@@ -2399,7 +2466,7 @@ impl MemoryStorage for SurrealStorage {
+             scope_parts.push("session_id = $sid".into());
+         }
+ 
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+ 
+         let bm25_sql = format!(
+             "SELECT *, search::score(0) AS bm25_score FROM memory WHERE {} LIMIT {}",
+@@ -2460,6 +2527,8 @@ impl MemoryStorage for SurrealStorage {
+         session_id: Option<&str>,
+         older_than_days: u32,
+     ) -> Result<Option<Memory>> {
++        // Heavy write: run on the heavy-write lane (server mode).
++        let _heavy = self.heavy_scope();
+         let mut conditions = vec![format!("created_at < time::now() - {}d", older_than_days)];
+         if user_id.is_some() {
+             conditions.push("user_id = $uid".into());
+@@ -2471,7 +2540,7 @@ impl MemoryStorage for SurrealStorage {
+             conditions.push("session_id = $sid".into());
+         }
+ 
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+ 
+         let sql = format!(
+             "SELECT * FROM memory WHERE {} ORDER BY created_at ASC",
+@@ -2530,6 +2599,8 @@ impl MemoryStorage for SurrealStorage {
+         agent_id: Option<&str>,
+         session_id: Option<&str>,
+     ) -> Result<Vec<Memory>> {
++        // Heavy write: run on the heavy-write lane (server mode).
++        let _heavy = self.heavy_scope();
+         let mut stored = Vec::new();
+         for msg in &messages {
+             let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+@@ -2559,7 +2630,9 @@ impl MemoryStorage for SurrealStorage {
+     }
+ 
+     async fn expire_stale_memories(&self) -> Result<u64> {
+-        let db = self.live_db()?;
++        // Heavy write: run on the heavy-write lane (server mode).
++        let _heavy = self.heavy_scope();
++        let db = self.lease().await?;
+         let expired: Vec<DbMemory> = db
+             .query(
+                 "SELECT * FROM memory WHERE valid_until IS NOT NONE AND valid_until < time::now()",
+@@ -2633,7 +2706,7 @@ impl MemoryStorage for SurrealStorage {
+         result: Option<String>,
+         error: Option<String>,
+     ) -> Result<TaskStep> {
+-        let db = self.db()?;
++        let db = self.lease().await?;
+         let now = Datetime::default();
+         // Set started_at the first time the step leaves Pending — for ANY
+         // non-Pending target status, including a direct jump to Completed/
+@@ -2683,7 +2756,7 @@ impl MemoryStorage for SurrealStorage {
+             .with_context(|| format!("TaskStream '{}' not found", stream_name))?;
+         let stream_id = stream.id.clone().context("TaskStream has no id")?;
+ 
+-        let db = self.db()?;
++        let db = self.lease().await?;
+         let steps: Vec<DbTaskStep> = db
+             .query("SELECT * FROM task_step WHERE task_stream_id = $sid ORDER BY ordinal ASC")
+             .bind(("sid", stream_id))
+@@ -2707,7 +2780,7 @@ impl MemoryStorage for SurrealStorage {
+             .with_context(|| format!("TaskStream '{}' not found", stream_name))?;
+         let stream_id = stream.id.clone().context("TaskStream has no id")?;
+ 
+-        let db = self.db()?;
++        let db = self.lease().await?;
+         let steps: Vec<DbTaskStep> = db
+             .query(
+                 "SELECT * FROM task_step WHERE task_stream_id = $sid \
+@@ -2760,7 +2833,7 @@ impl MemoryStorage for SurrealStorage {
+         user_id: Option<&str>,
+         agent_id: Option<&str>,
+     ) -> Result<Option<MindMap>> {
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         let mut sql = "SELECT * FROM mindmap WHERE name = $name".to_string();
+         if user_id.is_some() {
+             sql.push_str(" AND user_id = $uid");
+@@ -2786,6 +2859,8 @@ impl MemoryStorage for SurrealStorage {
+         agent_id: Option<&str>,
+         node: crate::mindmap::MindMapNode,
+     ) -> Result<MindMap> {
++        // Heavy write: run on the heavy-write lane (server mode).
++        let _heavy = self.heavy_scope();
+         let mut mm = self
+             .get_mindmap(mindmap_name, user_id, agent_id)
+             .await?
+@@ -2836,6 +2911,8 @@ impl MemoryStorage for SurrealStorage {
+         agent_id: Option<&str>,
+         edge: crate::mindmap::MindMapEdge,
+     ) -> Result<MindMap> {
++        // Heavy write: run on the heavy-write lane (server mode).
++        let _heavy = self.heavy_scope();
+         let mut mm = self
+             .get_mindmap(mindmap_name, user_id, agent_id)
+             .await?
+@@ -2866,6 +2943,8 @@ impl MemoryStorage for SurrealStorage {
+         agent_id: Option<&str>,
+         node_id: &str,
+     ) -> Result<MindMap> {
++        // Heavy write: run on the heavy-write lane (server mode).
++        let _heavy = self.heavy_scope();
+         let mut mm = self
+             .get_mindmap(mindmap_name, user_id, agent_id)
+             .await?
+@@ -2905,7 +2984,7 @@ impl MemoryStorage for SurrealStorage {
+                 parts.join(" AND ")
+             )
+         };
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         let mut q = db.query(&sql);
+         if let Some(v) = user_id {
+             q = q.bind(("uid", v.to_string()));
+@@ -2923,7 +3002,7 @@ impl MemoryStorage for SurrealStorage {
+         user_id: Option<&str>,
+         agent_id: Option<&str>,
+     ) -> Result<()> {
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         if let Some(mm) = self.get_mindmap(name, user_id, agent_id).await?
+             && let Some(id) = &mm.id
+         {
+@@ -2947,6 +3026,8 @@ impl MemoryStorage for SurrealStorage {
+         agent_id: Option<&str>,
+         model_id: &str,
+     ) -> Result<Option<crate::memory::Memory>> {
++        // Heavy write: run on the heavy-write lane (server mode).
++        let _heavy = self.heavy_scope();
+         use crate::model_profiles::profile_for;
+         use crate::task_stream::TaskStreamStatus;
+ 
+@@ -2976,7 +3057,7 @@ impl MemoryStorage for SurrealStorage {
+         if agent_id.is_some() {
+             scope_parts.push("agent_id = $aid".into());
+         }
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+ 
+         let sql = format!(
+             "SELECT * FROM memory WHERE {} ORDER BY created_at ASC LIMIT 200",
+@@ -3087,7 +3168,9 @@ impl MemoryStorage for SurrealStorage {
+         user_id: &str,
+         memory: &crate::memory::Memory,
+     ) -> Result<()> {
+-        let db = self.live_db()?;
++        // Heavy write: run on the heavy-write lane (server mode).
++        let _heavy = self.heavy_scope();
++        let db = self.lease().await?;
+         // Look for a persona mindmap belonging to this user
+         let maps: Vec<DbMindMap> = db
+             .query("SELECT * FROM mindmap WHERE user_id = $uid AND map_type = 'radial' LIMIT 1")
+@@ -3150,7 +3233,7 @@ impl MemoryStorage for SurrealStorage {
+                     break;
+                 }
+                 // Expand forward relations
+-                let db = self.live_db()?;
++                let db = self.lease().await?;
+                 let neighbors: Vec<crate::entity::Relation> = db
+                     .query("SELECT * FROM relation WHERE from = $entity")
+                     .bind(("entity", current.clone()))
+@@ -3198,7 +3281,7 @@ impl MemoryStorage for SurrealStorage {
+                 if let Some(e) = self.get_entity(&name).await? {
+                     entities.push(e);
+                 }
+-                let db = self.live_db()?;
++                let db = self.lease().await?;
+                 let rels: Vec<crate::entity::Relation> = db
+                     .query("SELECT * FROM relation WHERE from = $n OR to = $n")
+                     .bind(("n", name.clone()))
+@@ -3247,7 +3330,7 @@ impl MemoryStorage for SurrealStorage {
+         if let Some(rt) = relation_type {
+             conditions.push(format!("relation_type = '{}'", rt));
+         }
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+ 
+         let sql = format!(
+             "SELECT * FROM relation WHERE {} LIMIT {}",
+@@ -3273,7 +3356,7 @@ impl MemoryStorage for SurrealStorage {
+     // ── Phase 4: Temporal Entity History ─────────────────────────────────────
+ 
+     async fn get_entity_history(&self, name: &str) -> Result<Vec<crate::memory::MemoryHistory>> {
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         let rows: Vec<crate::memory::MemoryHistory> = db
+             .query("SELECT * FROM memory_history WHERE memory_id = $n ORDER BY changed_at DESC")
+             .bind(("n", name.to_string()))
+@@ -3287,7 +3370,7 @@ impl MemoryStorage for SurrealStorage {
+         &self,
+         before_rfc3339: &str,
+     ) -> Result<crate::entity::KnowledgeGraph> {
+-        let db = self.live_db()?;
++        let db = self.lease().await?;
+         let entities: Vec<crate::entity::Entity> = db
+             .query("SELECT * FROM entity WHERE created_at <= type::datetime($t)")
+             .bind(("t", before_rfc3339.to_string()))
+@@ -3351,13 +3434,14 @@ impl SurrealStorage {
+         run_migrations(&db).await?;
+         Self::ensure_embedding_indexes(&db, embedding_service.dimensions()).await?;
+ 
+-        let embedded_semaphore = make_embedded_semaphore(&connection_info.config);
+-
+         Ok(Self {
+-            connection: Arc::new(ArcSwap::new(Arc::new(ConnectionCell::Connected(db)))),
++            sessions: Arc::new(Sessions::new(
++                db,
++                None,
++                embedded_admission_permits(&config),
++            )),
+             connection_info,
+             embedding_service,
+-            embedded_semaphore,
+             #[cfg(feature = "palace")]
+             palace: tokio::sync::OnceCell::new(),
+         })
+@@ -3690,6 +3774,239 @@ mod retry_tests {
+         }
+     }
+ 
++    #[test]
++    fn test_classify_typed_sdk_errors_by_variant() {
++        use surrealdb_types::{ConnectionError, QueryError, SerializationError, ValidationError};
++        let cases = [
++            (
++                surrealdb::Error::connection(
++                    "WebSocket error: reset".to_string(),
++                    ConnectionError::ConnectionFailed,
++                ),
++                RetryAction::Reconnect,
++            ),
++            (
++                surrealdb::Error::connection(
++                    "query timed out".to_string(),
++                    ConnectionError::Uninitialised,
++                ),
++                RetryAction::Reconnect,
++            ),
++            (
++                surrealdb::Error::connection(
++                    "already connected".to_string(),
++                    ConnectionError::AlreadyConnected,
++                ),
++                RetryAction::FailFast,
++            ),
++            (
++                surrealdb::Error::query(
++                    "The query was not executed because it exceeded the timeout".to_string(),
++                    QueryError::TimedOut {
++                        duration: Duration::from_secs(10),
++                    },
++                ),
++                RetryAction::Retry,
++            ),
++            (
++                surrealdb::Error::query(
++                    "Resource busy".to_string(),
++                    QueryError::TransactionConflict,
++                ),
++                RetryAction::Retry,
++            ),
++            (
++                surrealdb::Error::query(
++                    "connection closed while not executed".to_string(),
++                    QueryError::NotExecuted,
++                ),
++                RetryAction::FailFast,
++            ),
++            (
++                // Message mentions lock + timeout; the typed kind wins.
++                surrealdb::Error::serialization(
++                    "lock timeout field failed to decode".to_string(),
++                    SerializationError::Deserialization,
++                ),
++                RetryAction::FailFast,
++            ),
++            (
++                surrealdb::Error::validation("parse error".to_string(), ValidationError::Parse),
++                RetryAction::FailFast,
++            ),
++            (
++                // RocksDB TimedOut surfaces as an untyped Internal error.
++                surrealdb::Error::internal("Operation timed out".to_string()),
++                RetryAction::Retry,
++            ),
++            (
++                surrealdb::Error::internal(
++                    "The transaction's commit outcome is unknown; it may or may not have been applied: timed out"
++                        .to_string(),
++                ),
++                RetryAction::FailFast,
++            ),
++        ];
++        let storage = mock_storage();
++        for (err, expected) in cases {
++            assert_eq!(classify_surreal_error(&err), expected, "{err:?}");
++            // The typed source must be found through anyhow context layers,
++            // even when the outer message would string-match differently.
++            let wrapped = anyhow::Error::new(err.clone())
++                .context("connection refused while running query")
++                .context("outer operation");
++            assert_eq!(storage.classify_error(&wrapped), expected, "wrapped {err:?}");
++        }
++    }
++
++    struct ZeroEmbedding;
++    #[async_trait::async_trait]
++    impl crate::embeddings::EmbeddingService for ZeroEmbedding {
++        async fn embed(&self, _text: &str) -> Result<Vec<f32>> {
++            Ok(vec![0.0; 1536])
++        }
++        async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
++            Ok(texts.iter().map(|_| vec![0.0; 1536]).collect())
++        }
++        fn dimensions(&self) -> usize {
++            1536
++        }
++    }
++
++    /// Embedded storage whose admission is capped at `permits`, as if
++    /// `SURREAL_EMBEDDED_MAX_INFLIGHT=permits` (set directly so parallel
++    /// tests do not race on the process environment).
++    async fn embedded_storage_with_permits(permits: usize) -> SurrealStorage {
++        let mut storage = SurrealStorage::new_mem(Arc::new(ZeroEmbedding))
++            .await
++            .expect("embedded storage");
++        let db = storage.live_db().expect("connected");
++        storage.sessions = Arc::new(Sessions::new(db, None, Some(permits)));
++        storage
++    }
++
++    fn memory(i: usize) -> Memory {
++        Memory::new(
++            format!("admission test memory {i}"),
++            Some("anonymous".to_string()),
++            Some("admission-agent".to_string()),
++            None,
++            vec![],
++        )
++    }
++
++    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
++    async fn test_embedded_admission_covers_add_memory_and_wait_is_bounded() {
++        let mut storage = embedded_storage_with_permits(1).await;
++        storage.connection_info.config.retry.operation_deadline_ms = 300;
++        let storage = Arc::new(storage);
++
++        // Another task holds the only permit.
++        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
++        let (held_tx, held_rx) = tokio::sync::oneshot::channel::<()>();
++        let holder = {
++            let storage = Arc::clone(&storage);
++            tokio::spawn(async move {
++                let _lease = storage.lease().await.expect("holder lease");
++                held_tx.send(()).unwrap();
++                release_rx.await.unwrap();
++            })
++        };
++        held_rx.await.unwrap();
++
++        // add_memory never goes through retry_operation, so this proves the
++        // admission is applied outside create_record, and that the permit
++        // wait is bounded by the operation deadline.
++        let start = std::time::Instant::now();
++        let blocked = storage.add_memory(memory(0)).await;
++        let waited = start.elapsed();
++        let err = blocked.expect_err("add_memory must not run while the permit is held");
++        assert!(
++            err.to_string().contains("admission wait exceeded"),
++            "expected a deadline-bounded admission error, got: {err:#}"
++        );
++        assert!(
++            waited >= Duration::from_millis(250) && waited < Duration::from_secs(5),
++            "admission wait must be bounded by the 300ms deadline, took {waited:?}"
++        );
++
++        release_tx.send(()).unwrap();
++        holder.await.unwrap();
++        let stored = storage
++            .add_memory(memory(1))
++            .await
++            .expect("add_memory succeeds once the permit is free");
++        assert!(stored.id.is_some());
++    }
++
++    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
++    async fn test_embedded_admission_one_permit_no_overlap_no_deadlock() {
++        let storage = Arc::new(embedded_storage_with_permits(1).await);
++        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
++
++        // Sample how many tasks hold database access at once.
++        let sampler = {
++            let sessions = Arc::clone(&storage.sessions);
++            let done = Arc::clone(&done);
++            tokio::spawn(async move {
++                let mut max_seen = 0usize;
++                while !done.load(std::sync::atomic::Ordering::Relaxed) {
++                    max_seen = max_seen.max(sessions.admitted_tasks());
++                    tokio::task::yield_now().await;
++                }
++                max_seen
++            })
++        };
++
++        // add_memory nests search_memories → get_all_memories while it holds
++        // a lease; with one permit, non-reentrant admission would deadlock.
++        let mut writers = Vec::new();
++        for i in 0..8 {
++            let storage = Arc::clone(&storage);
++            writers.push(tokio::spawn(
++                async move { storage.add_memory(memory(i)).await },
++            ));
++        }
++        for writer in writers {
++            writer
++                .await
++                .expect("writer task")
++                .expect("add_memory under a one-permit cap");
++        }
++        done.store(true, std::sync::atomic::Ordering::Relaxed);
++        let max_seen = sampler.await.unwrap();
++        assert!(max_seen <= 1, "{max_seen} tasks held database access at once");
++        assert_eq!(storage.sessions.admitted_tasks(), 0, "all permits released");
++    }
++
++    #[tokio::test]
++    async fn test_heavy_scope_routes_nested_leases_to_heavy_lane() {
++        let storage = SurrealStorage::new_mem(Arc::new(ZeroEmbedding))
++            .await
++            .expect("embedded storage");
++        let db = storage.live_db().expect("connected");
++        // The heavy lane is deliberately failed so routing is observable.
++        let sessions = Arc::new(Sessions::from_cells(
++            ConnectionCell::Connected(db),
++            Some(ConnectionCell::Failed("heavy lane".to_string())),
++            None,
++        ));
++        let deadline = Duration::from_secs(1);
++
++        assert!(sessions.lease(deadline).await.is_ok());
++        {
++            let _heavy = sessions.heavy_scope();
++            let err = sessions.lease(deadline).await.err().expect("heavy lane");
++            assert!(err.to_string().contains("heavy lane"), "{err}");
++            {
++                let _nested = sessions.heavy_scope();
++                assert!(sessions.lease(deadline).await.is_err());
++            }
++            assert!(sessions.lease(deadline).await.is_err(), "outer scope still active");
++        }
++        assert!(sessions.lease(deadline).await.is_ok(), "scope ended");
++    }
++
+     #[tokio::test]
+     async fn test_connect_with_retry_succeeds_after_transient_failure() {
+         // Test that the static connect_with_retry function has correct signature.
+@@ -3713,13 +4030,13 @@ mod retry_tests {
+ 
+         // Call reconnect with the operation-path attempt cap
+         let result = storage
+-            .reconnect_with_attempts(OPERATION_RECONNECT_ATTEMPTS)
++            .reconnect_with_attempts(Lane::Interactive, OPERATION_RECONNECT_ATTEMPTS)
+             .await;
+ 
+         // After reconnect, state should be either Connected (if DB available) or Failed (if not)
+         // The important thing is that it's no longer in the initial Failed/Reconnecting state
+         {
+-            let cell = storage.connection.load();
++            let cell = storage.sessions.cell(Lane::Interactive).load();
+             match &**cell {
+                 ConnectionCell::Connected(_) => {
+                     // Reconnection succeeded
+@@ -3855,14 +4172,14 @@ mod retry_tests {
+         // A very short timeout cancels reconnect_with_attempts mid-connect.
+         let _ = tokio::time::timeout(
+             Duration::from_millis(1),
+-            storage.reconnect_with_attempts(OPERATION_RECONNECT_ATTEMPTS),
++            storage.reconnect_with_attempts(Lane::Interactive, OPERATION_RECONNECT_ATTEMPTS),
+         )
+         .await;
+ 
+         // Give the dropped future's guard a moment to run.
+         tokio::time::sleep(Duration::from_millis(20)).await;
+ 
+-        let cell = storage.connection.load();
++        let cell = storage.sessions.cell(Lane::Interactive).load();
+         assert!(
+             !matches!(&**cell, ConnectionCell::Reconnecting),
+             "connection must not be stranded in Reconnecting after cancellation"
+@@ -3928,12 +4245,13 @@ mod retry_tests {
+         };
+ 
+         SurrealStorage {
+-            connection: Arc::new(ArcSwap::new(Arc::new(ConnectionCell::Failed(
+-                "test".to_string(),
+-            )))),
++            sessions: Arc::new(Sessions::from_cells(
++                ConnectionCell::Failed("test".to_string()),
++                None,
++                None,
++            )),
+             connection_info,
+             embedding_service: Arc::new(MockEmbedding),
+-            embedded_semaphore: None,
+             #[cfg(feature = "palace")]
+             palace: tokio::sync::OnceCell::new(),
+         }
+diff --git a/crates/surreal-memory/tests/load_repro.rs b/crates/surreal-memory/tests/load_repro.rs
+index 1d8e9d8..7ca689e 100644
+--- a/crates/surreal-memory/tests/load_repro.rs
++++ b/crates/surreal-memory/tests/load_repro.rs
+@@ -1,36 +1,37 @@
+-//! Load-repro harness — Change 1 of the
+-//! `surrealdb-connection-architecture` KBD phase.
++//! Load-repro harness for the `surrealdb-connection-architecture` KBD phase.
+ //!
+-//! Goal: deterministic, repeatable measurement of `SurrealStorage` under
+-//! concurrent load to surface the symptoms the user reported (timeouts in
+-//! server mode, sync errors in embedded mode under load) BEFORE we change
+-//! any production code.
++//! Deterministic, repeatable measurement of `SurrealStorage` under concurrent
++//! load, in server mode and embedded mode.
+ //!
+ //! Tests are `#[ignore]`-gated so `cargo test` stays free of external
+-//! dependencies. Run explicitly with:
++//! dependencies. Server mode REQUIRES an explicit, isolated endpoint — never
++//! point it at a shared SurrealDB (see `docs/lessons.md`):
+ //!
+ //! ```bash
+-//! # Bring up the docker-compose SurrealDB first:
+-//! docker-compose up -d surrealdb
++//! docker run -d --name smm-loadrepro -p 127.0.0.1:28110:8000 \
++//!   surrealdb/surrealdb:v3.3.0 start --user root --pass root memory
+ //!
+-//! # Server mode (default endpoint = ws://127.0.0.1:28000 per docker-compose.yaml):
+-//! cargo test --test load_repro --features embedded,metal --release -- --ignored server
++//! # Throughput / latency workloads (server, then embedded):
++//! TEST_SURREAL_ENDPOINT=ws://127.0.0.1:28110 LOAD_REPRO_LABEL="<commit> <note>" \
++//!   cargo test -p surreal-memory --test load_repro --release -- --ignored --exact server_mixed_load
++//! LOAD_REPRO_LABEL="<commit> <note>" \
++//!   cargo test -p surreal-memory --test load_repro --release -- --ignored --exact embedded_mixed_load
+ //!
+-//! # Embedded mode (uses a temp RocksDB path):
+-//! cargo test --test load_repro --features embedded,metal --release -- --ignored embedded
++//! # Heavy writes vs interactive reads; compare SURREAL_SERVER_LANES=2 vs 1:
++//! SURREAL_SERVER_LANES=2 TEST_SURREAL_ENDPOINT=ws://127.0.0.1:28110 \
++//!   cargo test -p surreal-memory --test load_repro --release -- --ignored --exact server_heavy_write_vs_read
+ //! ```
+ //!
+-//! Override the server endpoint with `TEST_SURREAL_ENDPOINT=ws://host:port`
+-//! (matches the existing `integration_test.rs` convention).
+-//!
+-//! Each test appends a markdown row to
+-//! `crates/surreal-memory/tests/load_repro_baseline.md` so successive runs
+-//! are diffable.
++//! Each test appends a section to `tests/load_repro_baseline.md`. Latency
++//! percentiles are computed over successful operations only, per operation
++//! class; failures are counted separately by error class.
+ 
++use std::collections::BTreeMap;
+ use std::sync::Arc;
++use std::sync::atomic::{AtomicBool, Ordering};
+ use std::time::{Duration, Instant};
+ use surreal_memory::{
+-    Memory, MemoryStorage,
++    MapType, Memory, MemoryStorage, MindMap, MindMapNode,
+     storage::surreal::{RetryConfig, SurrealConfig, SurrealMode, SurrealStorage},
+ };
+ use uuid::Uuid;
+@@ -54,14 +55,19 @@ impl surreal_memory::embeddings::EmbeddingService for NoOpEmbedder {
+ 
+ // ── Storage builders ─────────────────────────────────────────────────────────
+ 
+-async fn server_storage(namespace: String) -> Arc<SurrealStorage> {
++fn required_endpoint() -> String {
++    std::env::var("TEST_SURREAL_ENDPOINT").expect(
++        "TEST_SURREAL_ENDPOINT must name an isolated SurrealDB (e.g. ws://127.0.0.1:28110); \
++         the harness never defaults to a shared server",
++    )
++}
++
++async fn server_storage(namespace: &str) -> Arc<SurrealStorage> {
+     let embedder: Arc<dyn surreal_memory::embeddings::EmbeddingService> = Arc::new(NoOpEmbedder);
+-    let endpoint = std::env::var("TEST_SURREAL_ENDPOINT")
+-        .unwrap_or_else(|_| "ws://127.0.0.1:28000".to_string());
+     let config = SurrealConfig {
+         auth_level: Default::default(),
+         mode: SurrealMode::Server,
+-        endpoint: Some(endpoint),
++        endpoint: Some(required_endpoint()),
+         embedded_path: None,
+         username: Some(
+             std::env::var("TEST_SURREAL_USERNAME").unwrap_or_else(|_| "root".to_string()),
+@@ -69,7 +75,7 @@ async fn server_storage(namespace: String) -> Arc<SurrealStorage> {
+         password: Some(
+             std::env::var("TEST_SURREAL_PASSWORD").unwrap_or_else(|_| "root".to_string()),
+         ),
+-        namespace,
++        namespace: namespace.to_string(),
+         database: "main".to_string(),
+         retry: RetryConfig::default(),
+     };
+@@ -100,52 +106,146 @@ async fn embedded_storage(path: String) -> Arc<SurrealStorage> {
+     )
+ }
+ 
++/// Remove the per-run namespace so repeated runs do not accumulate data.
++async fn remove_namespace(storage: &SurrealStorage, namespace: &str) {
++    // `namespace` is generated by this harness (`loadrepro_<uuid>`), never
++    // caller input; identifiers cannot be bound as parameters.
++    let result = match storage.db() {
++        Ok(db) => db
++            .query(format!("REMOVE NAMESPACE IF EXISTS {namespace}"))
++            .await
++            .and_then(|response| response.check())
++            .map(|_| ()),
++        Err(error) => {
++            eprintln!("namespace cleanup skipped: {error:#}");
++            return;
++        }
++    };
++    if let Err(error) = result {
++        eprintln!("namespace cleanup for {namespace} failed: {error}");
++    }
++}
++
+ // ── Workload primitives ──────────────────────────────────────────────────────
+ 
+-/// A single operation classification — kept narrow on purpose.
++const READ_AGENT: &str = "load-repro-agent";
++const HEAVY_AGENT: &str = "load-repro-heavy";
++
+ #[derive(Debug, Clone, Copy)]
+ enum Op {
+     AddMemory,
+     HybridSearch,
++    /// `add_memories_from_conversation` with 10 messages.
++    Conversation,
++    /// `add_mindmap_node` onto a mindmap seeded with `MINDMAP_SEED_NODES`.
++    MindmapNode,
++    /// `compress_memories` over the heavy agent's session.
++    Compress,
++}
++
++impl Op {
++    fn name(self) -> &'static str {
++        match self {
++            Op::AddMemory => "add_memory",
++            Op::HybridSearch => "hybrid_search",
++            Op::Conversation => "add_memories_from_conversation(10)",
++            Op::MindmapNode => "add_mindmap_node",
++            Op::Compress => "compress_memories",
++        }
++    }
+ }
+ 
+ fn make_memory(i: usize) -> Memory {
+     Memory::new(
+         format!("load-repro memory entry #{i} — quick brown fox"),
+         Some("anonymous".to_string()),
+-        Some("load-repro-agent".to_string()),
++        Some(READ_AGENT.to_string()),
+         None,
+         vec!["load-repro".to_string()],
+     )
+ }
+ 
+-async fn run_op(storage: &Arc<SurrealStorage>, op: Op, i: usize) -> Result<(), String> {
+-    match op {
+-        Op::AddMemory => storage
+-            .add_memory(make_memory(i))
+-            .await
+-            .map(|_| ())
+-            .map_err(|e| classify_error(&e)),
++async fn run_op(storage: &SurrealStorage, op: Op, task: usize, i: usize) -> Result<(), String> {
++    let result = match op {
++        Op::AddMemory => storage.add_memory(make_memory(i)).await.map(|_| ()),
+         Op::HybridSearch => storage
+             .hybrid_search_memories(
+                 "quick brown fox",
+                 Some("anonymous"),
+-                Some("load-repro-agent"),
++                Some(READ_AGENT),
+                 None,
+                 10,
+                 0.6,
+                 0.4,
+             )
+             .await
+-            .map(|_| ())
+-            .map_err(|e| classify_error(&e)),
+-    }
++            .map(|_| ()),
++        Op::Conversation => {
++            let messages = (0..10)
++                .map(|m| {
++                    serde_json::json!({
++                        "role": if m % 2 == 0 { "user" } else { "assistant" },
++                        "content": format!("heavy task {task} turn {i} message {m} lorem ipsum"),
++                    })
++                })
++                .collect();
++            storage
++                .add_memories_from_conversation(
++                    messages,
++                    Some("anonymous"),
++                    Some(HEAVY_AGENT),
++                    Some(&heavy_session(task)),
++                )
++                .await
++                .map(|_| ())
++        }
++        Op::MindmapNode => storage
++            .add_mindmap_node(
++                &heavy_mindmap(task),
++                None,
++                Some(HEAVY_AGENT),
++                MindMapNode {
++                    id: format!("n-{i}-{}", Uuid::new_v4().simple()),
++                    label: format!("heavy node {i}"),
++                    parent_id: Some("root".to_string()),
++                    node_type: None,
++                    color: None,
++                    metadata: None,
++                },
++            )
++            .await
++            .map(|_| ()),
++        Op::Compress => storage
++            .compress_memories(
++                Some("anonymous"),
++                Some(HEAVY_AGENT),
++                Some(&heavy_session(task)),
++                0,
++            )
++            .await
++            .map(|_| ()),
++    };
++    result.map_err(|e| classify_error(&e))
++}
++
++fn heavy_session(task: usize) -> String {
++    format!("heavy-session-{task}")
++}
++
++fn heavy_mindmap(task: usize) -> String {
++    format!("load-repro-heavy-map-{task}")
+ }
+ 
+ fn classify_error(err: &anyhow::Error) -> String {
+     let s = format!("{err:#}").to_lowercase();
+-    if s.contains("timeout") || s.contains("timed out") {
++    if s.contains("admission") {
++        "admission-deadline".to_string()
++    } else if s.contains("deadline") {
++        "deadline".to_string()
++    } else if s.contains("timeout") || s.contains("timed out") {
+         "timeout".to_string()
++    } else if s.contains("conflict") {
++        "conflict".to_string()
+     } else if s.contains("lock") {
+         "lock".to_string()
+     } else if s.contains("serialization") {
+@@ -157,57 +257,93 @@ fn classify_error(err: &anyhow::Error) -> String {
+     }
+ }
+ 
+-// ── Latency aggregation ──────────────────────────────────────────────────────
++// ── Aggregation ──────────────────────────────────────────────────────────────
+ 
+ #[derive(Default)]
+-struct LatencyReport {
+-    samples_ms: Vec<u64>,
+-    errors: std::collections::BTreeMap<String, u64>,
++struct OpStats {
++    ok_ms: Vec<u64>,
++    failures: BTreeMap<String, u64>,
+ }
+ 
+-impl LatencyReport {
+-    fn record(&mut self, dur: Duration, result: Result<(), String>) {
+-        self.samples_ms.push(dur.as_millis() as u64);
+-        if let Err(class) = result {
+-            *self.errors.entry(class).or_insert(0) += 1;
+-        }
+-    }
+-
+-    fn percentile(&self, p: f64) -> u64 {
+-        if self.samples_ms.is_empty() {
++impl OpStats {
++    fn percentile(sorted: &[u64], p: f64) -> u64 {
++        if sorted.is_empty() {
+             return 0;
+         }
+-        let mut sorted = self.samples_ms.clone();
+-        sorted.sort_unstable();
+         let idx = ((sorted.len() as f64 - 1.0) * p).round() as usize;
+         sorted[idx]
+     }
++}
++
++#[derive(Default)]
++struct Report {
++    ops: BTreeMap<&'static str, OpStats>,
++    join_errors: u64,
++}
+ 
+-    fn error_total(&self) -> u64 {
+-        self.errors.values().sum()
++impl Report {
++    fn record(&mut self, op: Op, elapsed: Duration, result: Result<(), String>) {
++        let stats = self.ops.entry(op.name()).or_default();
++        match result {
++            Ok(()) => stats.ok_ms.push(elapsed.as_millis() as u64),
++            Err(class) => *stats.failures.entry(class).or_insert(0) += 1,
++        }
+     }
+ 
+-    fn summary_md_row(&self, label: &str) -> String {
+-        let p50 = self.percentile(0.50);
+-        let p95 = self.percentile(0.95);
+-        let p99 = self.percentile(0.99);
+-        let errs = self
+-            .errors
+-            .iter()
+-            .map(|(k, v)| format!("{k}:{v}"))
+-            .collect::<Vec<_>>()
+-            .join(" ");
+-        let errs = if errs.is_empty() {
+-            "—".to_string()
+-        } else {
+-            errs
+-        };
+-        format!(
+-            "| {label} | {} | {p50} | {p95} | {p99} | {} | {errs} |",
+-            self.samples_ms.len(),
+-            self.error_total()
+-        )
++    fn rows(&self, workload: &str) -> Vec<String> {
++        let mut rows = Vec::new();
++        for (op, stats) in &self.ops {
++            let mut sorted = stats.ok_ms.clone();
++            sorted.sort_unstable();
++            let failed: u64 = stats.failures.values().sum();
++            let classes = if stats.failures.is_empty() {
++                "—".to_string()
++            } else {
++                stats
++                    .failures
++                    .iter()
++                    .map(|(k, v)| format!("{k}:{v}"))
++                    .collect::<Vec<_>>()
++                    .join(" ")
++            };
++            rows.push(format!(
++                "| {workload} | {op} | {} | {} | {} | {} | {} | {failed} | {classes} |",
++                sorted.len(),
++                OpStats::percentile(&sorted, 0.50),
++                OpStats::percentile(&sorted, 0.95),
++                OpStats::percentile(&sorted, 0.99),
++                sorted.last().copied().unwrap_or(0),
++            ));
++        }
++        if self.join_errors > 0 {
++            rows.push(format!(
++                "| {workload} | task panics (JoinError) | — | — | — | — | — | {} | join |",
++                self.join_errors
++            ));
++        }
++        rows
++    }
++
++}
++
++type Samples = Vec<(Op, Duration, Result<(), String>)>;
++
++async fn collect(handles: Vec<tokio::task::JoinHandle<Samples>>) -> Report {
++    let mut report = Report::default();
++    for handle in handles {
++        match handle.await {
++            Ok(samples) => {
++                for (op, elapsed, result) in samples {
++                    report.record(op, elapsed, result);
++                }
++            }
++            Err(join_err) => {
++                eprintln!("load task failed to join: {join_err}");
++                report.join_errors += 1;
++            }
++        }
+     }
++    report
+ }
+ 
+ async fn run_workload(
+@@ -215,45 +351,116 @@ async fn run_workload(
+     concurrency: usize,
+     ops_per_task: usize,
+     mix: &[Op],
+-) -> LatencyReport {
++) -> Report {
+     let mut handles = Vec::with_capacity(concurrency);
+-    let start_offset = Instant::now().elapsed().as_nanos() as usize;
+-
+     for t in 0..concurrency {
+         let storage = Arc::clone(&storage);
+         let mix = mix.to_vec();
+         handles.push(tokio::spawn(async move {
+-            let mut local: Vec<(Duration, Result<(), String>)> = Vec::with_capacity(ops_per_task);
++            let mut local = Vec::with_capacity(ops_per_task);
+             for i in 0..ops_per_task {
+                 let op = mix[(t * ops_per_task + i) % mix.len()];
+-                let item_idx = start_offset.wrapping_add(t * 10_000 + i);
+                 let started = Instant::now();
+-                let result = run_op(&storage, op, item_idx).await;
+-                local.push((started.elapsed(), result));
++                let result = run_op(&storage, op, t, t * 10_000 + i).await;
++                local.push((op, started.elapsed(), result));
+             }
+             local
+         }));
+     }
++    collect(handles).await
++}
+ 
+-    let mut report = LatencyReport::default();
+-    for h in handles {
+-        match h.await {
+-            Ok(samples) => {
+-                for (dur, res) in samples {
+-                    report.record(dur, res);
+-                }
+-            }
+-            Err(join_err) => {
+-                report.errors.insert(format!("join:{join_err}"), 1);
++/// Interactive readers run a fixed number of hybrid searches while heavy
++/// writers loop until the readers finish. Returns (readers, heavy writers).
++async fn run_heavy_vs_read(
++    storage: Arc<SurrealStorage>,
++    readers: usize,
++    reads_per_reader: usize,
++    writers: usize,
++) -> (Report, Report) {
++    let stop = Arc::new(AtomicBool::new(false));
++    let mut heavy = Vec::with_capacity(writers);
++    for t in 0..writers {
++        let storage = Arc::clone(&storage);
++        let stop = Arc::clone(&stop);
++        heavy.push(tokio::spawn(async move {
++            let cycle = [Op::Conversation, Op::MindmapNode, Op::Compress];
++            let mut local = Vec::new();
++            let mut i = 0usize;
++            while !stop.load(Ordering::Relaxed) {
++                let op = cycle[i % cycle.len()];
++                let started = Instant::now();
++                let result = run_op(&storage, op, t, i).await;
++                local.push((op, started.elapsed(), result));
++                i += 1;
+             }
++            local
++        }));
++    }
++    // Let the heavy writers reach steady state before reads start.
++    tokio::time::sleep(Duration::from_millis(500)).await;
++    let reads = run_workload(
++        Arc::clone(&storage),
++        readers,
++        reads_per_reader,
++        &[Op::HybridSearch],
++    )
++    .await;
++    stop.store(true, Ordering::Relaxed);
++    (reads, collect(heavy).await)
++}
++
++async fn seed_memories(storage: &Arc<SurrealStorage>, n: usize) {
++    for i in 0..n {
++        storage
++            .add_memory(make_memory(1_000_000 + i))
++            .await
++            .expect("seed memory");
++    }
++}
++
++const MINDMAP_SEED_NODES: usize = 300;
++
++async fn seed_heavy_mindmaps(storage: &Arc<SurrealStorage>, writers: usize) {
++    for t in 0..writers {
++        let mut map = MindMap::new(
++            heavy_mindmap(t),
++            MapType::Radial,
++            "root",
++            None,
++            Some(HEAVY_AGENT.to_string()),
++            None,
++        );
++        for n in 0..MINDMAP_SEED_NODES {
++            map.nodes.push(MindMapNode {
++                id: format!("seed-{n}"),
++                label: format!("seed node {n} with a moderately long label for payload size"),
++                parent_id: Some("root".to_string()),
++                node_type: None,
++                color: None,
++                metadata: None,
++            });
+         }
++        storage.create_mindmap(map).await.expect("seed mindmap");
+     }
+-    report
+ }
+ 
+ // ── Baseline file append ─────────────────────────────────────────────────────
+ 
+-fn append_baseline(section: &str, header: &str, rows: &[String]) {
++const HEADER: &str =
++    "| workload | op | ok_n | p50_ms | p95_ms | p99_ms | max_ms | failed | failure_classes |";
++
++fn run_context() -> String {
++    let label = std::env::var("LOAD_REPRO_LABEL").unwrap_or_else(|_| "unlabeled".to_string());
++    let lanes = std::env::var("SURREAL_SERVER_LANES").unwrap_or_else(|_| "default(2)".into());
++    let inflight =
++        std::env::var("SURREAL_EMBEDDED_MAX_INFLIGHT").unwrap_or_else(|_| "default(16)".into());
++    format!(
++        "label: `{label}` · SURREAL_SERVER_LANES={lanes} · SURREAL_EMBEDDED_MAX_INFLIGHT={inflight}"
++    )
++}
++
++fn append_baseline(section: &str, rows: &[String]) {
+     use std::fs::OpenOptions;
+     use std::io::Write as _;
+ 
+@@ -268,24 +475,22 @@ fn append_baseline(section: &str, header: &str, rows: &[String]) {
+         .expect("open baseline file");
+ 
+     let ts = chrono::Utc::now().to_rfc3339();
+-    writeln!(file, "\n## {section} — {ts}\n").unwrap();
+-    writeln!(file, "{header}").unwrap();
+-    writeln!(file, "|---|---|---|---|---|---|---|").unwrap();
++    writeln!(file, "\n### {section} — {ts}\n").unwrap();
++    writeln!(file, "{}\n", run_context()).unwrap();
++    writeln!(file, "{HEADER}").unwrap();
++    writeln!(file, "|---|---|---|---|---|---|---|---|---|").unwrap();
+     for row in rows {
+         writeln!(file, "{row}").unwrap();
+     }
+ }
+ 
+-const HEADER: &str = "| workload | n | p50_ms | p95_ms | p99_ms | err_total | err_breakdown |";
+-
+-// ── Tests ────────────────────────────────────────────────────────────────────
+-
+-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+-#[ignore = "requires docker-compose up -d surrealdb"]
+-async fn server_mixed_load() {
+-    let namespace = format!("loadrepro_{}", Uuid::new_v4().simple());
+-    let storage = server_storage(namespace).await;
++const SEED_MEMORIES: usize = 100;
++const HEAVY_READERS: usize = 16;
++const HEAVY_READS_PER_READER: usize = 20;
++const HEAVY_WRITERS: usize = 4;
+ 
++async fn mixed_load(storage: Arc<SurrealStorage>) -> Vec<String> {
++    seed_memories(&storage, SEED_MEMORIES).await;
+     let read_only = run_workload(Arc::clone(&storage), 64, 25, &[Op::HybridSearch]).await;
+     let write_only = run_workload(Arc::clone(&storage), 64, 25, &[Op::AddMemory]).await;
+     let mixed = run_workload(
+@@ -295,49 +500,82 @@ async fn server_mixed_load() {
+         &[Op::HybridSearch, Op::AddMemory],
+     )
+     .await;
++    let mut rows = read_only.rows("read-only × 64");
++    rows.extend(write_only.rows("write-only × 64"));
++    rows.extend(mixed.rows("mixed 50/50 × 128"));
++    rows
++}
++
++async fn heavy_write_vs_read(storage: Arc<SurrealStorage>) -> Vec<String> {
++    seed_memories(&storage, SEED_MEMORIES).await;
++    seed_heavy_mindmaps(&storage, HEAVY_WRITERS).await;
++    let idle = run_workload(
++        Arc::clone(&storage),
++        HEAVY_READERS,
++        HEAVY_READS_PER_READER,
++        &[Op::HybridSearch],
++    )
++    .await;
++    let (reads, heavy) = run_heavy_vs_read(
++        Arc::clone(&storage),
++        HEAVY_READERS,
++        HEAVY_READS_PER_READER,
++        HEAVY_WRITERS,
++    )
++    .await;
++    let mut rows = idle.rows(&format!("reads, no writers × {HEAVY_READERS}"));
++    rows.extend(reads.rows(&format!(
++        "reads under {HEAVY_WRITERS} heavy writers × {HEAVY_READERS}"
++    )));
++    rows.extend(heavy.rows(&format!("heavy writers × {HEAVY_WRITERS}")));
++    rows
++}
++
++// ── Tests ────────────────────────────────────────────────────────────────────
+ 
+-    append_baseline(
+-        "server-mode (pre-refactor baseline)",
+-        HEADER,
+-        &[
+-            read_only.summary_md_row("hybrid_search × 64"),
+-            write_only.summary_md_row("add_memory × 64"),
+-            mixed.summary_md_row("mixed 50/50 × 128"),
+-        ],
+-    );
+-
+-    // Test does NOT fail on errors — this is a measurement run.
+-    // The assertion is informational, captured in the baseline file.
++#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
++#[ignore = "requires TEST_SURREAL_ENDPOINT pointing at an isolated SurrealDB"]
++async fn server_mixed_load() {
++    let namespace = format!("loadrepro_{}", Uuid::new_v4().simple());
++    let storage = server_storage(&namespace).await;
++    let rows = mixed_load(Arc::clone(&storage)).await;
++    remove_namespace(&storage, &namespace).await;
++    append_baseline("server mode — throughput", &rows);
+     eprintln!("server_mixed_load: see crates/surreal-memory/tests/load_repro_baseline.md");
+ }
+ 
++#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
++#[ignore = "requires TEST_SURREAL_ENDPOINT pointing at an isolated SurrealDB"]
++async fn server_heavy_write_vs_read() {
++    let namespace = format!("loadrepro_{}", Uuid::new_v4().simple());
++    let storage = server_storage(&namespace).await;
++    let rows = heavy_write_vs_read(Arc::clone(&storage)).await;
++    remove_namespace(&storage, &namespace).await;
++    append_baseline("server mode — heavy writes vs interactive reads", &rows);
++    eprintln!("server_heavy_write_vs_read: see crates/surreal-memory/tests/load_repro_baseline.md");
++}
++
+ #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+ #[ignore = "writes to a temp embedded RocksDB path"]
+ async fn embedded_mixed_load() {
+     let temp = std::env::temp_dir().join(format!("loadrepro_{}", Uuid::new_v4().simple()));
+     let storage = embedded_storage(temp.to_string_lossy().into_owned()).await;
+-
+-    let read_only = run_workload(Arc::clone(&storage), 64, 25, &[Op::HybridSearch]).await;
+-    let write_only = run_workload(Arc::clone(&storage), 64, 25, &[Op::AddMemory]).await;
+-    let mixed = run_workload(
+-        Arc::clone(&storage),
+-        128,
+-        25,
+-        &[Op::HybridSearch, Op::AddMemory],
+-    )
+-    .await;
+-
+-    append_baseline(
+-        "embedded mode (pre-refactor baseline)",
+-        HEADER,
+-        &[
+-            read_only.summary_md_row("hybrid_search × 64"),
+-            write_only.summary_md_row("add_memory × 64"),
+-            mixed.summary_md_row("mixed 50/50 × 128"),
+-        ],
+-    );
+-
++    let rows = mixed_load(Arc::clone(&storage)).await;
++    append_baseline("embedded mode — throughput", &rows);
++    drop(storage);
+     eprintln!("embedded_mixed_load: see crates/surreal-memory/tests/load_repro_baseline.md");
+-    // Best-effort cleanup; ignore errors (RocksDB lock files may linger briefly).
++    // Best-effort cleanup; RocksDB lock files may linger briefly.
++    let _ = std::fs::remove_dir_all(&temp);
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
++#[ignore = "writes to a temp embedded RocksDB path"]
++async fn embedded_heavy_write_vs_read() {
++    let temp = std::env::temp_dir().join(format!("loadrepro_{}", Uuid::new_v4().simple()));
++    let storage = embedded_storage(temp.to_string_lossy().into_owned()).await;
++    let rows = heavy_write_vs_read(Arc::clone(&storage)).await;
++    append_baseline("embedded mode — heavy writes vs interactive reads", &rows);
++    drop(storage);
++    eprintln!("embedded_heavy_write_vs_read: see crates/surreal-memory/tests/load_repro_baseline.md");
+     let _ = std::fs::remove_dir_all(&temp);
+ }
+diff --git a/crates/surreal-memory/tests/load_repro_baseline.md b/crates/surreal-memory/tests/load_repro_baseline.md
+index 307bc66..88843fe 100644
+--- a/crates/surreal-memory/tests/load_repro_baseline.md
++++ b/crates/surreal-memory/tests/load_repro_baseline.md
+@@ -7,34 +7,54 @@ actually moved the needle.
+ 
+ ## How to run
+ 
++Server mode requires an explicit, **isolated** SurrealDB endpoint. The
++harness has no default endpoint; never point it at a shared server (the
++`:28000` instance serves live UAR/MCP traffic — see `docs/lessons.md`).
++
+ ```bash
+-# 1. Start the docker-compose SurrealDB (server-mode tests)
+-docker-compose up -d surrealdb
++# 1. Isolated in-memory SurrealDB matching the SDK pin
++docker run -d --name smm-loadrepro -p 127.0.0.1:28110:8000 \
++  surrealdb/surrealdb:v3.3.0 start --user root --pass root memory
+ 
+-# 2. Server-mode workloads
+-cargo test --test load_repro --features embedded,metal --release -- --ignored server_mixed_load
++# 2. Throughput workloads (server, then embedded)
++TEST_SURREAL_ENDPOINT=ws://127.0.0.1:28110 LOAD_REPRO_LABEL="<sha> <note>" \
++  cargo test -p surreal-memory --test load_repro --release -- --ignored --exact server_mixed_load
++LOAD_REPRO_LABEL="<sha> <note>" \
++  cargo test -p surreal-memory --test load_repro --release -- --ignored --exact embedded_mixed_load
+ 
+-# 3. Embedded-mode workloads (uses a temp RocksDB path; auto-cleaned)
+-cargo test --test load_repro --features embedded,metal --release -- --ignored embedded_mixed_load
++# 3. Heavy writes vs interactive reads (lanes on vs off, then embedded)
++SURREAL_SERVER_LANES=2 TEST_SURREAL_ENDPOINT=ws://127.0.0.1:28110 LOAD_REPRO_LABEL="<sha> lanes=2" \
++  cargo test -p surreal-memory --test load_repro --release -- --ignored --exact server_heavy_write_vs_read
++SURREAL_SERVER_LANES=1 TEST_SURREAL_ENDPOINT=ws://127.0.0.1:28110 LOAD_REPRO_LABEL="<sha> lanes=1" \
++  cargo test -p surreal-memory --test load_repro --release -- --ignored --exact server_heavy_write_vs_read
++LOAD_REPRO_LABEL="<sha>" \
++  cargo test -p surreal-memory --test load_repro --release -- --ignored --exact embedded_heavy_write_vs_read
+ 
+-# 4. Both:
+-cargo test --test load_repro --features embedded,metal --release -- --ignored
++# 4. Clean up
++docker rm -f smm-loadrepro
+ ```
+ 
++Server-mode runs use a fresh `loadrepro_<uuid>` namespace and remove it at
++the end. Record `uptime` with every appended section: timings from a
++saturated host are not evidence about code.
++
+ ## What's measured
+ 
+-Three workloads × two modes:
++Every workload first seeds 100 memories so searches hit real rows.
+ 
+ | Workload | Concurrency | Ops/task | Description |
+ |---|---|---|---|
+-| `hybrid_search × 64` | 64 | 25 | Read-only pressure on `hybrid_search_memories` |
+-| `add_memory × 64` | 64 | 25 | Write-only pressure on `add_memory` |
++| `read-only × 64` | 64 | 25 | `hybrid_search_memories` |
++| `write-only × 64` | 64 | 25 | `add_memory` |
+ | `mixed 50/50 × 128` | 128 | 25 | Interleaved reads + writes; the head-of-line-blocking workload |
++| `reads, no writers × 16` | 16 | 20 | Interactive-read reference for the heavy workload |
++| `reads under 4 heavy writers × 16` | 16 (+4 writers) | 20 | Same reads while 4 writers loop `add_memories_from_conversation(10)`, `add_mindmap_node` on a 300-node mindmap, and `compress_memories` |
+ 
+-Errors are bucketed into: `timeout`, `lock`, `serialization`, `connection`,
+-`other`. The mix of these classes is the *signature* of the architectural
+-defects from the assessment (§2). After Change 2 lands, the same workloads
+-must show a materially different signature — that is the gate.
++Latency percentiles are over **successful** operations only, reported per
++operation class; failures are counted separately and bucketed into
++`admission-deadline`, `deadline`, `timeout`, `conflict`, `lock`,
++`serialization`, `connection`, `other`. Task panics are reported as a
++separate JoinError row.
+ 
+ ## Pass criteria for Change 2 (ArcSwap refactor)
+ 
+@@ -44,6 +64,11 @@ must show a materially different signature — that is the gate.
+ 
+ If either fails, Change 2 is not done.
+ 
++## Pass criterion for Change 5 (server lanes)
++
++- `reads under 4 heavy writers` p99 with `SURREAL_SERVER_LANES=2` is lower
++  than with `SURREAL_SERVER_LANES=1` on the same host, same commit.
++
+ ---
+ 
+ <!-- Append new ## sections below this line. Do not edit older sections. -->
+diff --git a/docker-compose-local.yml b/docker-compose-local.yml
+index e76caed..ef34ad2 100644
+--- a/docker-compose-local.yml
++++ b/docker-compose-local.yml
+@@ -12,10 +12,10 @@
+ 
+ services:
+   surrealdb:
+-    # Kept in lockstep with the `surrealdb = "=3.2.4"` crate this server links (Cargo.toml).
++    # Kept in lockstep with the `surrealdb = "=3.3.0"` crate this server links (Cargo.toml).
+     # Pinned by digest because a tag is mutable; the same pin as prometheus-skills-mini and
+     # universal-agent-runtime, which share this SurrealDB.
+-    image: surrealdb/surrealdb:v3.2.4@sha256:51baed8709f57f67dcf04b30e3177db846803fa9342dae2be58c6fa5f8d59843
++    image: surrealdb/surrealdb:v3.3.0@sha256:681c6c22c287421b5c7d99e0fde79b6e0d32c36c1ddeaab2762a1661cb04cd20
+     container_name: surrealdb
+     restart: unless-stopped
+     user: root
+diff --git a/docker-compose.yaml b/docker-compose.yaml
+index a62409a..bf66dfa 100644
+--- a/docker-compose.yaml
++++ b/docker-compose.yaml
+@@ -4,10 +4,10 @@
+ 
+ services:
+   surrealdb:
+-    # Kept in lockstep with the `surrealdb = "=3.2.4"` crate this server links (Cargo.toml).
++    # Kept in lockstep with the `surrealdb = "=3.3.0"` crate this server links (Cargo.toml).
+     # Pinned by digest because a tag is mutable; the same pin as prometheus-skills-mini and
+     # universal-agent-runtime, which share this SurrealDB.
+-    image: surrealdb/surrealdb:v3.2.4@sha256:51baed8709f57f67dcf04b30e3177db846803fa9342dae2be58c6fa5f8d59843
++    image: surrealdb/surrealdb:v3.3.0@sha256:681c6c22c287421b5c7d99e0fde79b6e0d32c36c1ddeaab2762a1661cb04cd20
+     container_name: surrealdb
+     restart: unless-stopped
+     user: root
+diff --git a/docs/MINDMAP_PERFORMANCE.md b/docs/MINDMAP_PERFORMANCE.md
+index c6bb553..eb64154 100644
+--- a/docs/MINDMAP_PERFORMANCE.md
++++ b/docs/MINDMAP_PERFORMANCE.md
+@@ -20,9 +20,9 @@ Every time a single node is added, the **entire mindmap** is re-serialized and w
+ 
+ ### Fix Applied (v0.1.0+)
+ 
+-1. **Query Timeout**: Added 30-second timeout to `UPDATE` queries to fail fast instead of hanging indefinitely
++1. **Query Timeout**: `UPDATE` queries carry a server-side `TIMEOUT` equal to `SURREAL_QUERY_TIMEOUT_MS` (default 10s) to fail fast instead of hanging indefinitely (originally a fixed 30s, which outlived the 10s SDK query timeout)
+    ```sql
+-   UPDATE type::record($id) CONTENT $value RETURN AFTER TIMEOUT 30s
++   UPDATE type::record($table, $key) SET nodes = array::append(nodes, $node), updated_at = $updated_at RETURN AFTER TIMEOUT 10000ms
+    ```
+ 
+ 2. **Performance Warnings**: Added logging to warn when mindmaps exceed 500 nodes:
+diff --git a/docs/lessons.md b/docs/lessons.md
+index b42e74e..aad3d75 100644
+--- a/docs/lessons.md
++++ b/docs/lessons.md
+@@ -20,6 +20,10 @@ Format: `YYYY-MM-DD — Rule — *(context: what went wrong)*`
+ - 2026-05-24 — `Config::query_timeout` now flows from `SURREAL_QUERY_TIMEOUT_MS` (default 10s) into every `connect()` site. Application `operation_deadline_ms` is now a backstop, not the primary mechanism.
+ - 2026-05-24 — `RetryAction { Retry, Reconnect, FailFast }` replaces `is_retriable_error: bool`. `Reconnect` is reserved for transport-level loss; server-busy / lock-timeout / serialization errors backoff-and-retry on the same connection (the previous code churned a reconnect on each, hammering the contended path).
+ - 2026-05-24 — Embedded-mode in-flight semaphore (`SURREAL_EMBEDDED_MAX_INFLIGHT`, default 16 = RocksDB stripe count) caps concurrent ops at the application layer, turning storage-engine contention into honest backpressure instead of "lock timeout" / "serialization failure" error storms.
++- 2026-09-25 — An admission cap only exists if every operation passes through it. The embedded semaphore lived in `retry_operation`, whose only caller was `create_record`; the other ~44 storage methods bypassed it. Put admission on the handle every method must obtain (`DbLease`), not in an optional wrapper.
++- 2026-09-25 — A per-operation semaphore must be reentrant within a task when storage methods call each other (`add_memory` → `search_memories` → `get_all_memories`). Otherwise N tasks each holding one permit while waiting for a nested one deadlock at any N.
++- 2026-09-25 — `surrealdb::opt::Config::query_timeout` is honored only by the local (embedded) and gRPC engines; the `ws://` engine ignores it (verified in the 3.3.0 SDK source). Over WebSocket, bound long statements with a server-side `TIMEOUT` derived from the same setting, and never let that clause exceed the query timeout.
++- 2026-09-25 — Workload isolation in server mode needs an independently connected transport. `Surreal<Any>` clones share one WebSocket, so a "session pool" of clones cannot keep heavy writes from head-of-line-blocking reads.
+ 
+ ## Process / discipline
+ 
+@@ -39,6 +43,7 @@ Format: `YYYY-MM-DD — Rule — *(context: what went wrong)*`
+ - 2026-08-26 — Never stack a PR onto another PR's branch when the base will merge first. PR #9 targeted PR #8's branch; #8 merged to main, then #9 merged into an orphaned branch and GitHub reported "MERGED" while main had none of it. Target `main` and rebase, or the fix silently never ships.
+ - 2026-08-26 — When adding a typed field to a struct that derives Serde, derive the same Serde direction on the field type before the first compile. *(Context: `LocalEmbeddingBackend` was added to deserializable `Config` without `Deserialize`.)*
+ - 2026-08-26 — Do not run the aggregate `prometheus-rust-auditor audit` command in this repository: its pipeline generates a GitHub Actions workflow, which violates the local-only validation policy. Run the read-only enforcement, format, dependency, inventory, and partition checks individually.
++- 2026-09-25 — When `sccache rustc` wrappers sit at 0% CPU and `sccache --show-stats` reports cache timeouts, the build is stalled on the cache, not compiling. Stop it and rerun with `SCCACHE_DISABLE=1` (the bypass documented in `~/.cargo/config.toml`) instead of waiting.
+ - 2026-09-21 — Never launch `cargo fmt` and `cargo test` in parallel in this repository; they share one target directory, so even a read-only format check violates the single-writer build rule when paired with compilation.
+ - 2026-09-21 — A bounded reconciliation query can still fail systematically when it bypasses the available state index, and rescanning it after every commit makes backlog recovery quadratic. Query indexed states under separate deadlines and rescan once per dependency wave.
+ - 2026-08-26 — A copied SwiftPM executable is not self-contained when a C target ships resources: install `mlx-swift_Cmlx.bundle` beside the executable and smoke-test the copied path, because the build-tree binary can hide a missing `default.metallib` deployment.
+diff --git a/src/main.rs b/src/main.rs
+index 145f92d..b5a185f 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -365,23 +365,31 @@ fn load_surreal_config_without_embeddings() -> Result<surreal_memory::SurrealCon
+     })
+ }
+ 
++/// SDK connection config for the repair command, matching every other
++/// connect site: `SURREAL_QUERY_TIMEOUT_MS` bounds each query at the SDK.
++fn repair_sdk_config(retry: &surreal_memory::RetryConfig) -> surrealdb::opt::Config {
++    surrealdb::opt::Config::default()
++        .query_timeout(std::time::Duration::from_millis(retry.query_timeout_ms))
++}
++
+ async fn connect_surreal_for_repair(
+     config: &surreal_memory::SurrealConfig,
+ ) -> Result<Surreal<Any>> {
++    let sdk_config = repair_sdk_config(&config.retry);
+     let db = match &config.mode {
+         surreal_memory::storage::surreal::SurrealMode::Embedded => {
+             let path = config
+                 .embedded_path
+                 .as_ref()
+                 .context("Embedded path required for embedded repair mode")?;
+-            surrealdb::engine::any::connect(format!("rocksdb://{}", path)).await?
++            surrealdb::engine::any::connect((format!("rocksdb://{}", path), sdk_config)).await?
+         }
+         surreal_memory::storage::surreal::SurrealMode::Server => {
+             let endpoint = config
+                 .endpoint
+                 .as_ref()
+                 .context("SURREAL_ENDPOINT is required for server repair mode")?;
+-            surrealdb::engine::any::connect(endpoint).await?
++            surrealdb::engine::any::connect((endpoint.clone(), sdk_config)).await?
+         }
+     };
+ 
+@@ -730,6 +738,28 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn test_repair_config_passes_query_timeout_to_sdk() {
++        let _lock = ENV_LOCK.lock().unwrap();
++
++        unsafe {
++            std::env::set_var("SURREAL_QUERY_TIMEOUT_MS", "1234");
++        }
++        let config = load_surreal_config_without_embeddings().unwrap();
++        unsafe {
++            std::env::remove_var("SURREAL_QUERY_TIMEOUT_MS");
++        }
++
++        assert_eq!(config.retry.query_timeout_ms, 1234);
++        // `surrealdb::opt::Config` exposes no getter; its Debug output is the
++        // only observable of the value handed to `connect`.
++        let sdk_config = format!("{:?}", repair_sdk_config(&config.retry));
++        assert!(
++            sdk_config.contains("query_timeout: Some(1.234s)"),
++            "repair connect must carry SURREAL_QUERY_TIMEOUT_MS, got {sdk_config}"
++        );
++    }
++
+     #[test]
+     fn test_parse_command_defaults_to_serve() {
+         assert_eq!(parse_command(Vec::<String>::new()).unwrap(), Command::Serve);
