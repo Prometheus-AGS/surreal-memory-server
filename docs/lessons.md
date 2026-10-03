@@ -68,3 +68,4 @@ Format: `YYYY-MM-DD — Rule — *(context: what went wrong)*`
 - 2026-03-17 — For CLI/agent consumers, `user_id = "anonymous"` so scope filtering uses `agent_id`.
 - 2026-10-03 — Derive state subsets (e.g. non-terminal operation states) from the enum and pin them with an exhaustive-match test; a hand-written string list silently dropped `planned`/`indexed` and stranded operations forever (#30).
 - 2026-10-03 — Measure a hypothesised fix with a harness before shipping it: "replace only when the probe fails" (#36) looked right on paper but doubled the error rate on the ledger load harness, because every ledger query shares one WebSocket.
+- 2026-10-03 — `prometheus-services.sh --exclude` takes the label without `ai.prometheus.`; with the full label the flag is ignored and every service plist is re-rendered from whichever checkout runs the script. Render only from the checkout the services are installed from.

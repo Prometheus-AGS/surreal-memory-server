@@ -1,4 +1,7 @@
 # Surreal Memory Server - Test Results
+
+> **Historical snapshot (2026-03-28, SurrealDB 3.0.0).** The project now
+> targets SurrealDB 3.3.0; these results have not been re-run against it.
 **Date:** 2026-03-28
 **Server Version:** 0.1.0
 

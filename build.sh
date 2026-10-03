@@ -4,7 +4,7 @@ set -euo pipefail
 echo "🔨 Building Rust Memory MCP Server for Apple Silicon (M1/M2/M3)"
 echo ""
 
-FEATURE_FLAGS="${FEATURE_FLAGS:-embedded,metal,local-embeddings}"
+FEATURE_FLAGS="${FEATURE_FLAGS:-embedded,metal,local-embeddings,palace}"
 export FEATURE_FLAGS
 export RUSTFLAGS="-Dwarnings ${RUSTFLAGS:-}"
 
