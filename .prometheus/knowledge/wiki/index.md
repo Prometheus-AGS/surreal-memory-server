@@ -1,3 +1,7 @@
+---
+okf_version: "0.2"
+---
+
 # Wiki Index
 
 ## Reference
@@ -9,9 +13,11 @@
 * [Karpathy session 01292e86f284](/karpathy-session-01292e86f284184b.md)
 * [Karpathy session 014e7215387c](/karpathy-session-014e7215387c6674.md)
 * [Karpathy session 03c96ad58967](/karpathy-session-03c96ad58967ab5b.md)
+* [Karpathy session 05992cb798be](/karpathy-session-05992cb798beeaf2.md)
 * [Karpathy session 062286e443bc](/karpathy-session-062286e443bc7a4f.md)
 * [Karpathy session 0a9628b22f42](/karpathy-session-0a9628b22f420723.md)
 * [Karpathy session 10a925228401](/karpathy-session-10a9252284019f78.md)
+* [Karpathy session 11727f47603e](/karpathy-session-11727f47603e9bbf.md)
 * [Karpathy session 122bf45c7791](/karpathy-session-122bf45c77914c89.md)
 * [Karpathy session 1387d1c08515](/karpathy-session-1387d1c085152039.md)
 * [Karpathy session 142d9605ef62](/karpathy-session-142d9605ef62e88b.md)
@@ -41,11 +47,13 @@
 * [Karpathy session 45aa5754db64](/karpathy-session-45aa5754db648111.md)
 * [Karpathy session 478041a78f5c](/karpathy-session-478041a78f5c6e73.md)
 * [Karpathy session 4870b45d7eb4](/karpathy-session-4870b45d7eb44b43.md)
+* [Karpathy session 4b0c482991ec](/karpathy-session-4b0c482991ec06c3.md)
 * [Karpathy session 4c63a2f145fe](/karpathy-session-4c63a2f145fe4b7f.md)
 * [Karpathy session 51010c0fbabc](/karpathy-session-51010c0fbabcb565.md)
 * [Karpathy session 51f9c4e235dd](/karpathy-session-51f9c4e235dd261b.md)
 * [Karpathy session 5671779b000d](/karpathy-session-5671779b000d7dc8.md)
 * [Karpathy session 571571132bf4](/karpathy-session-571571132bf4fd79.md)
+* [Karpathy session 582287ce6567](/karpathy-session-582287ce65676de4.md)
 * [Karpathy session 58538425fc1e](/karpathy-session-58538425fc1e4728.md)
 * [Karpathy session 585eaae338b1](/karpathy-session-585eaae338b196a4.md)
 * [Karpathy session 5993598d7e1f](/karpathy-session-5993598d7e1ffdf1.md)
@@ -86,12 +94,14 @@
 * [Karpathy session a4581bc55ccc](/karpathy-session-a4581bc55ccc4c93.md)
 * [Karpathy session a492bfe2b1be](/karpathy-session-a492bfe2b1be0945.md)
 * [Karpathy session a7b38d4d6fc8](/karpathy-session-a7b38d4d6fc8c973.md)
+* [Karpathy session a8b9f5a30cc6](/karpathy-session-a8b9f5a30cc60341.md)
 * [Karpathy session a8f9767fa17c](/karpathy-session-a8f9767fa17c3ef2.md)
 * [Karpathy session a9af8f907daf](/karpathy-session-a9af8f907daf546a.md)
 * [Karpathy session aabf70e2c2eb](/karpathy-session-aabf70e2c2ebc6af.md)
 * [Karpathy session afc4a0041407](/karpathy-session-afc4a00414078ae5.md)
 * [Karpathy session b0c38d215786](/karpathy-session-b0c38d2157869110.md)
 * [Karpathy session b44648c611a2](/karpathy-session-b44648c611a23a62.md)
+* [Karpathy session b72dd9b60145](/karpathy-session-b72dd9b601457184.md)
 * [Karpathy session b97e16d40f49](/karpathy-session-b97e16d40f497b74.md)
 * [Karpathy session baddab8370bc](/karpathy-session-baddab8370bcfd09.md)
 * [Karpathy session bf111008ef4f](/karpathy-session-bf111008ef4f2261.md)
