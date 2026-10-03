@@ -86,12 +86,6 @@ struct ChildState {
     generation: u64,
 }
 
-/// Internal classification for request failures. Retriable failures are
-/// transport or protocol desynchronizations where the supervisor has already
-/// restarted the executor child, so issuing the request again is safe —
-/// embedding is a pure function with no side effects. Non-retriable failures
-/// are executor-reported errors or supervisor invariants that a retry cannot
-/// fix.
 /// Holds the child for one request. A caller's future can be dropped
 /// between writing a request and reading its terminal reply (an HTTP client
 /// disconnecting cancels its handler). The child then finishes the abandoned
@@ -124,6 +118,12 @@ impl Drop for InFlightRequest<'_> {
     }
 }
 
+/// Internal classification for request failures. Retriable failures are
+/// transport or protocol desynchronizations where the supervisor has already
+/// restarted the executor child, so issuing the request again is safe —
+/// embedding is a pure function with no side effects. Non-retriable failures
+/// are executor-reported errors or supervisor invariants that a retry cannot
+/// fix.
 struct RequestFailure {
     retriable: bool,
     error: anyhow::Error,
