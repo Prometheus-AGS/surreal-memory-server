@@ -13,6 +13,7 @@ New write integrations use:
 - `GET /api/v2/operations/{operation_id}/events?after=N` — replay and follow ordered SSE state events;
 - `POST /api/v2/operations/{operation_id}/retry` — re-drive a non-terminal operation now instead of waiting for the 60 s reconciliation sweep;
 - `POST /api/v2/operations/{operation_id}/reject` — dead-letter a non-terminal operation with `{"reason": "..."}` (refused for `indexed` operations and for the one being processed);
+- `GET /api/v2/operations/stats` — per-state counts, paused total, and the oldest unfinished operation with its age (alert on `oldest_nonterminal.age_seconds`);
 - `GET /health` — process liveness;
 - `GET /ready` — ledger, storage, coordinator, tokenizer, executor, and search readiness.
 

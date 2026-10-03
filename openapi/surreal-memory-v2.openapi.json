@@ -74,6 +74,17 @@
         }
       }
     },
+    "/api/v2/operations/stats": {
+      "get": {
+        "operationId": "getOperationStats",
+        "summary": "Ledger backlog and the oldest unfinished operation",
+        "description": "Counts operations per state, the non-terminal and paused totals, and the oldest non-terminal operation with its age. Alert on oldest_nonterminal.age_seconds rather than on the presence of accepted records.",
+        "responses": {
+          "200": { "description": "Current ledger statistics.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationStats" } } } },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
     "/api/v2/operations/{operation_id}": {
       "parameters": [ { "$ref": "#/components/parameters/OperationId" } ],
       "get": {
@@ -175,6 +186,7 @@
       },
       "OperationEvent": { "type": "object", "required": ["operation_id", "sequence", "from_state", "to_state", "detail", "executor_generation", "occurred_at"], "properties": { "operation_id": { "type": "string" }, "sequence": { "type": "integer", "format": "uint64" }, "from_state": { "type": ["string", "null"] }, "to_state": { "type": "string" }, "detail": { "type": ["object", "array", "string", "number", "boolean", "null"] }, "executor_generation": { "type": "integer", "format": "uint64" }, "occurred_at": { "type": "string", "format": "date-time" } }, "additionalProperties": false },
       "Error": { "type": "object", "required": ["error"], "properties": { "error": { "type": "string" } }, "additionalProperties": false },
+      "OperationStats": { "type": "object", "required": ["counts", "nonterminal", "paused", "oldest_nonterminal"], "properties": { "counts": { "type": "object", "additionalProperties": { "type": "integer", "format": "uint64" }, "description": "Operation count per state; states with no operations are omitted." }, "nonterminal": { "type": "integer", "format": "uint64" }, "paused": { "type": "integer", "format": "uint64", "description": "Non-terminal operations whose last processing attempt failed." }, "oldest_nonterminal": { "oneOf": [ { "type": "null" }, { "type": "object", "required": ["operation_id", "state", "created_at", "updated_at", "age_seconds"], "properties": { "operation_id": { "type": "string" }, "state": { "$ref": "#/components/schemas/OperationState" }, "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }, "age_seconds": { "type": "integer", "format": "uint64" } }, "additionalProperties": false } ] } }, "additionalProperties": false },
       "RejectRequest": { "type": "object", "required": ["reason"], "properties": { "reason": { "type": "string", "minLength": 1, "maxLength": 2000, "description": "Why the operation is being dead-lettered; stored as the receipt error." } }, "additionalProperties": false }
     },
     "responses": {
