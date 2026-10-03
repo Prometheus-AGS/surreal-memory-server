@@ -66,3 +66,4 @@ Format: `YYYY-MM-DD — Rule — *(context: what went wrong)*`
 - 2026-03-17 — One `cargo check` per change set. Do not re-run "to be sure."
 - 2026-03-17 — Test changes against the real consumer (UAR), not a toy test.
 - 2026-03-17 — For CLI/agent consumers, `user_id = "anonymous"` so scope filtering uses `agent_id`.
+- 2026-10-03 — Derive state subsets (e.g. non-terminal operation states) from the enum and pin them with an exhaustive-match test; a hand-written string list silently dropped `planned`/`indexed` and stranded operations forever (#30).

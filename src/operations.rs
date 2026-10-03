@@ -187,7 +187,17 @@ struct DbOperationId {
 
 const LIST_OPERATION_IDS_BY_STATE_QUERY: &str =
     "SELECT operation_id FROM memory_operation WHERE state = $state ORDER BY operation_id ASC";
-const NONTERMINAL_OPERATION_STATES: [&str; 4] = ["accepted", "validated", "blocked", "processing"];
+const NONTERMINAL_OPERATION_STATES: [OperationState; 6] = [
+    OperationState::Accepted,
+    OperationState::Validated,
+    OperationState::Blocked,
+    OperationState::Planned,
+    OperationState::Processing,
+    OperationState::Indexed,
+];
+/// How often the coordinator re-drives every non-terminal operation, so an
+/// operation paused by a transient failure resumes without a restart.
+const OPERATION_RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Deserialize, SurrealValue)]
 struct DbOperationReceipt {
@@ -399,13 +409,21 @@ impl OperationService {
         embedding_service: Arc<dyn EmbeddingService>,
         query_timeout: Duration,
     ) -> Self {
-        Self::start_with_capacities(storage, embedding_service, query_timeout, 256, 1024)
+        Self::start_with_capacities(
+            storage,
+            embedding_service,
+            query_timeout,
+            OPERATION_RECONCILE_INTERVAL,
+            256,
+            1024,
+        )
     }
 
     fn start_with_capacities(
         storage: Arc<dyn MemoryStorage>,
         embedding_service: Arc<dyn EmbeddingService>,
         query_timeout: Duration,
+        reconcile_interval: Duration,
         wake_capacity: usize,
         event_capacity: usize,
     ) -> Self {
@@ -439,7 +457,7 @@ impl OperationService {
             tokio::spawn(async move { journal.record_executor_events(executor_events).await });
         }
         let coordinator = service.clone();
-        tokio::spawn(async move { coordinator.run(wake_rx).await });
+        tokio::spawn(async move { coordinator.run(wake_rx, reconcile_interval).await });
         service
     }
 
@@ -675,7 +693,7 @@ impl OperationService {
                     "reconciliation discovery",
                     connection.generation,
                     db.query(LIST_OPERATION_IDS_BY_STATE_QUERY)
-                        .bind(("state", state)),
+                        .bind(("state", state.as_str())),
                 )
                 .await?
                 .check()?
@@ -1060,7 +1078,7 @@ impl OperationService {
         Ok(count)
     }
 
-    async fn run(self, mut wake_rx: mpsc::Receiver<String>) {
+    async fn run(self, mut wake_rx: mpsc::Receiver<String>, reconcile_interval: Duration) {
         let (reconciliation, retried) =
             retry_recovered_ledger_once(|| self.reconcile_nonterminal()).await;
         match reconciliation {
@@ -1074,13 +1092,29 @@ impl OperationService {
             Err(error) => tracing::error!(%error, "operation startup reconciliation failed"),
         }
 
-        while let Some(operation_id) = wake_rx.recv().await {
-            self.drain_pending(vec![operation_id]).await;
+        let mut sweep = tokio::time::interval_at(
+            tokio::time::Instant::now() + reconcile_interval,
+            reconcile_interval,
+        );
+        sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                wake = wake_rx.recv() => match wake {
+                    Some(operation_id) => self.drain_pending(vec![operation_id]).await,
+                    None => return,
+                },
+                _ = sweep.tick() => {
+                    if let Err(error) = self.reconcile_nonterminal().await {
+                        tracing::error!(%error, "periodic operation reconciliation failed");
+                    }
+                }
+            }
         }
     }
 
     async fn process(&self, operation_id: &str) -> Result<()> {
         let Some(operation) = self.get_db(operation_id).await? else {
+            tracing::warn!(%operation_id, "operation record not found; skipping");
             return Ok(());
         };
         let mut state = parse_state(&operation.state)?;
@@ -2542,6 +2576,147 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reconciliation_discovers_every_nonterminal_state() {
+        // Exhaustive on purpose: a new variant must be classified here before
+        // it compiles, so discovery can never silently skip a state again.
+        fn every_state() -> [OperationState; 8] {
+            let all = [
+                OperationState::Accepted,
+                OperationState::Validated,
+                OperationState::Blocked,
+                OperationState::Planned,
+                OperationState::Processing,
+                OperationState::Indexed,
+                OperationState::Committed,
+                OperationState::Rejected,
+            ];
+            for state in all {
+                match state {
+                    OperationState::Accepted
+                    | OperationState::Validated
+                    | OperationState::Blocked
+                    | OperationState::Planned
+                    | OperationState::Processing
+                    | OperationState::Indexed
+                    | OperationState::Committed
+                    | OperationState::Rejected => {}
+                }
+            }
+            all
+        }
+        let expected: Vec<_> = every_state()
+            .into_iter()
+            .filter(|state| !state.is_terminal())
+            .collect();
+        assert_eq!(NONTERMINAL_OPERATION_STATES.to_vec(), expected);
+    }
+
+    async fn submit_add_memory(service: &OperationService, operation_id: &str) {
+        let payload = json!({"content": operation_id, "user_id": "test"});
+        service
+            .submit(OperationRequest {
+                operation_id: operation_id.to_owned(),
+                schema_version: OPERATION_SCHEMA_VERSION,
+                kind: "add_memory".to_owned(),
+                dependencies: Vec::new(),
+                payload_hash: payload_hash(&payload).unwrap(),
+                payload,
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_resumes_planned_and_indexed_operations() {
+        let first_embedding_service: Arc<dyn EmbeddingService> =
+            Arc::new(PlannedEmbedder::completing());
+        let storage = Arc::new(
+            SurrealStorage::new_mem(Arc::clone(&first_embedding_service))
+                .await
+                .expect("in-memory SurrealStorage"),
+        );
+        let first = OperationService::start(
+            Arc::clone(&storage) as Arc<dyn MemoryStorage>,
+            first_embedding_service,
+        );
+        for id in ["stranded-planned", "stranded-indexed"] {
+            submit_add_memory(&first, id).await;
+            wait_for_service_state(&first, id, OperationState::Committed, false).await;
+        }
+
+        // Reproduce the stranded receipts from #30: one interrupted after
+        // planning with unfinished parts, one interrupted after indexing.
+        let db = storage.db().unwrap();
+        db.query(
+            "UPDATE memory_operation SET state = 'planned' WHERE operation_id = 'stranded-planned';\n\
+             UPDATE memory_operation_part SET state = 'planned', embedding = NONE WHERE operation_id = 'stranded-planned' AND part_index >= 1;\n\
+             UPDATE memory_operation SET state = 'indexed' WHERE operation_id = 'stranded-indexed';",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        let second_embedder = Arc::new(PlannedEmbedder::completing());
+        let second_embedding_service: Arc<dyn EmbeddingService> = second_embedder.clone();
+        let second = OperationService::start(
+            Arc::clone(&storage) as Arc<dyn MemoryStorage>,
+            second_embedding_service,
+        );
+        for id in ["stranded-planned", "stranded-indexed"] {
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                wait_for_service_state(&second, id, OperationState::Committed, false),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{id} was not reconciled at startup"));
+            let rows: Vec<Value> = db
+                .query("SELECT id FROM memory WHERE id = type::record('memory', $key)")
+                .bind(("key", record_key(id)))
+                .await
+                .unwrap()
+                .check()
+                .unwrap()
+                .take(0)
+                .unwrap();
+            assert_eq!(rows.len(), 1, "{id} keeps one logical memory");
+        }
+        assert_eq!(
+            second_embedder.calls.load(Ordering::SeqCst),
+            2,
+            "only the two unfinished parts are embedded again"
+        );
+    }
+
+    #[tokio::test]
+    async fn paused_operation_is_retried_without_restart() {
+        let embedding_service: Arc<dyn EmbeddingService> = Arc::new(PlannedEmbedder::failing_at(1));
+        let storage = Arc::new(
+            SurrealStorage::new_mem(Arc::clone(&embedding_service))
+                .await
+                .expect("in-memory SurrealStorage"),
+        );
+        let service = OperationService::start_with_capacities(
+            Arc::clone(&storage) as Arc<dyn MemoryStorage>,
+            embedding_service,
+            Duration::from_secs(10),
+            Duration::from_millis(200),
+            16,
+            64,
+        );
+        submit_add_memory(&service, "paused-once").await;
+        wait_for_service_state(&service, "paused-once", OperationState::Processing, true).await;
+
+        let receipt = tokio::time::timeout(
+            Duration::from_secs(10),
+            wait_for_service_state(&service, "paused-once", OperationState::Committed, false),
+        )
+        .await
+        .expect("a paused operation must resume without a restart");
+        assert!(receipt.error.is_none());
+    }
+
     #[tokio::test]
     async fn startup_reconciliation_exceeds_the_wake_channel_capacity() {
         let embedder: Arc<dyn EmbeddingService> = Arc::new(NoOpEmbedder);
@@ -2554,6 +2729,7 @@ mod tests {
             Arc::clone(&storage) as Arc<dyn MemoryStorage>,
             embedder,
             Duration::from_secs(10),
+            OPERATION_RECONCILE_INTERVAL,
             4,
             16,
         );
@@ -2593,6 +2769,7 @@ mod tests {
             Arc::clone(&storage) as Arc<dyn MemoryStorage>,
             embedder,
             Duration::from_secs(10),
+            OPERATION_RECONCILE_INTERVAL,
             4,
             16,
         );
@@ -2681,6 +2858,7 @@ mod tests {
             storage as Arc<dyn MemoryStorage>,
             embedder,
             Duration::from_secs(10),
+            OPERATION_RECONCILE_INTERVAL,
             16,
             4,
         );
