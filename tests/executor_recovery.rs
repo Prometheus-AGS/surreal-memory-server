@@ -226,6 +226,60 @@ async fn watchdog_restarts_only_a_child_without_progress() {
 }
 
 #[tokio::test]
+async fn a_cancelled_request_does_not_desynchronize_the_next_one() {
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_surreal-memory-server"));
+    let executor = SupervisedEmbeddingService::with_child_env(
+        executable,
+        2,
+        Duration::from_secs(30),
+        vec![
+            ("SURREAL_EXECUTOR_FIXTURE".to_owned(), "1".to_owned()),
+            (
+                "SURREAL_EXECUTOR_SLOW_ON".to_owned(),
+                "slow-but-responsive".to_owned(),
+            ),
+        ],
+    );
+    // Warm the child so the cancelled request is the only one in flight.
+    executor
+        .embed_for_operation("cancel-fixture", 0, "warm")
+        .await
+        .unwrap();
+    let before = executor.executor_snapshot().unwrap();
+
+    // A REST client disconnecting drops the handler future mid-request. The
+    // child keeps working and later writes a reply for the abandoned id.
+    let cancelled = tokio::time::timeout(
+        Duration::from_millis(300),
+        executor.embed_for_operation("cancel-fixture", 1, "slow-but-responsive"),
+    )
+    .await;
+    assert!(
+        cancelled.is_err(),
+        "the slow request must still be in flight"
+    );
+
+    // Operation-scoped calls get no retry, so a stale reply would fail this
+    // call with "returned a mismatched request id".
+    executor
+        .embed_for_operation("cancel-fixture", 2, "after cancel")
+        .await
+        .expect("the next request must not read the cancelled request's reply");
+
+    let after = executor.executor_snapshot().unwrap();
+    assert_eq!(after.exit_count, before.exit_count + 1);
+    assert!(
+        after
+            .last_exit
+            .as_deref()
+            .is_some_and(|exit| exit.contains("cancelled")),
+        "unexpected last exit: {:?}",
+        after.last_exit
+    );
+    executor.terminate_idle_executor().await.unwrap();
+}
+
+#[tokio::test]
 async fn server_restart_advances_the_persisted_executor_generation() {
     let marker_dir = std::env::temp_dir().join(format!(
         "surreal-executor-generation-{}",
