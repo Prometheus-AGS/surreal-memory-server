@@ -975,10 +975,7 @@ impl OperationService {
                         || stored.token_end != expected.token_end as u64
                 })
             {
-                return Err(PermanentFailure(format!(
-                    "deterministic token plan changed for operation '{operation_id}'"
-                ))
-                .into());
+                anyhow::bail!("deterministic token plan changed for operation '{operation_id}'");
             }
             return Ok(());
         }
@@ -1186,6 +1183,8 @@ impl OperationService {
             .await
         {
             tracing::error!(%operation_id, error = %transition_error, "permanent-failure rejection failed");
+            // Keep the failure visible on the receipt; the sweep retries.
+            self.record_processing_error(operation_id, error).await;
         }
     }
 
@@ -1202,7 +1201,9 @@ impl OperationService {
                 receipt.state.as_str()
             )));
         }
-        let _ = self.wake_tx.send(operation_id.to_owned()).await;
+        // Never block the HTTP caller on a full wake queue: the periodic
+        // reconciliation sweep picks the operation up regardless.
+        let _ = self.wake_tx.try_send(operation_id.to_owned());
         Ok(receipt)
     }
 
@@ -1234,7 +1235,17 @@ impl OperationService {
                 receipt.state.as_str()
             )));
         }
-        if receipt.state == OperationState::Indexed {
+        // `store_indexed_memory` runs before the Indexed transition, so a
+        // failure between them leaves a stored memory under a Processing
+        // receipt. Rejecting then would report stored content as discarded.
+        let memory_stored = receipt.kind == "add_memory"
+            && self
+                .storage
+                .get_memory(&record_key(operation_id))
+                .await
+                .map_err(OperatorError::Storage)?
+                .is_some();
+        if receipt.state == OperationState::Indexed || memory_stored {
             return Err(OperatorError::Conflict(format!(
                 "operation '{operation_id}' is indexed: its memory is already stored; retry it to commit instead"
             )));
@@ -3242,6 +3253,88 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn reject_refuses_the_operation_the_coordinator_is_processing() {
+        let fixture = operator_fixture(Arc::new(NoOpEmbedder), NO_SWEEP).await;
+        submit_blocked(&fixture.service, "in-flight").await;
+
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut coordinator = fixture.service.clone();
+        coordinator.process_override = Some({
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            Arc::new(move |_| {
+                let entered = Arc::clone(&entered);
+                let release = Arc::clone(&release);
+                Box::pin(async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    Ok(())
+                })
+            })
+        });
+        let drain = tokio::spawn(async move {
+            coordinator
+                .drain_pending(vec!["in-flight".to_owned()])
+                .await;
+        });
+        entered.notified().await;
+
+        let error = fixture
+            .service
+            .reject("in-flight", "too soon")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, OperatorError::Conflict(message) if message.contains("being processed")),
+            "{error:?}"
+        );
+
+        release.notify_one();
+        drain.await.unwrap();
+        let receipt = fixture
+            .service
+            .reject("in-flight", "now idle")
+            .await
+            .unwrap();
+        assert_eq!(receipt.state, OperationState::Rejected);
+    }
+
+    #[tokio::test]
+    async fn reject_refuses_an_operation_whose_memory_is_already_stored() {
+        let fixture = operator_fixture(Arc::new(PlannedEmbedder::completing()), NO_SWEEP).await;
+        submit_add_memory(&fixture.service, "stored-not-indexed").await;
+        wait_for_service_state(
+            &fixture.service,
+            "stored-not-indexed",
+            OperationState::Committed,
+            false,
+        )
+        .await;
+        // The memory exists but the receipt never reached Indexed: the
+        // transition after `store_indexed_memory` failed and paused it.
+        fixture
+            .storage
+            .db()
+            .unwrap()
+            .query("UPDATE memory_operation SET state = 'processing' WHERE operation_id = 'stored-not-indexed'")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let error = fixture
+            .service
+            .reject("stored-not-indexed", "late")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, OperatorError::Conflict(message) if message.contains("already stored")),
+            "{error:?}"
+        );
     }
 
     #[tokio::test]

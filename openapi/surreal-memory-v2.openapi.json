@@ -120,7 +120,7 @@
       "post": {
         "operationId": "rejectOperation",
         "summary": "Dead-letter a non-terminal operation",
-        "description": "Moves the operation to rejected with the given reason so clients stop redelivering it. Refused for indexed operations (the memory is already stored; retry instead) and for the operation the coordinator is processing at that moment.",
+        "description": "Moves the operation to rejected with the given reason so clients stop redelivering it. Refused when the operation's memory is already stored (indexed, or stored before its receipt advanced; retry it to commit instead) and for the operation the coordinator is processing at that moment, which can be minutes for a long embedding; retry the reject afterwards.",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RejectRequest" } } } },
         "responses": {
           "200": { "description": "The rejected receipt.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationReceipt" } } } },
