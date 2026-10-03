@@ -6,7 +6,7 @@
 //! never used to infer whether an operation succeeded.
 
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{BTreeMap, HashSet, VecDeque},
     convert::Infallible,
     future::{Future, IntoFuture},
     pin::Pin,
@@ -141,6 +141,28 @@ pub struct OperationReceipt {
     pub updated_at: String,
 }
 
+/// Ledger health at a glance: how much work is pending and how long the
+/// oldest unfinished operation has waited. Clients alert on
+/// `oldest_nonterminal.age_seconds` instead of on any accepted record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperationStats {
+    /// Operation count per state; states with no operations are omitted.
+    pub counts: BTreeMap<String, u64>,
+    pub nonterminal: u64,
+    /// Non-terminal operations whose last processing attempt failed.
+    pub paused: u64,
+    pub oldest_nonterminal: Option<OldestOperation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OldestOperation {
+    pub operation_id: String,
+    pub state: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub age_seconds: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationEvent {
     pub operation_id: String,
@@ -184,6 +206,30 @@ struct DbOperation {
 struct DbOperationId {
     operation_id: String,
 }
+
+#[derive(Debug, Deserialize, SurrealValue)]
+struct DbStateCount {
+    state: String,
+    count: u64,
+}
+
+#[derive(Debug, Deserialize, SurrealValue)]
+struct DbCount {
+    count: u64,
+}
+
+#[derive(Debug, Deserialize, SurrealValue)]
+struct DbOldestOperation {
+    operation_id: String,
+    state: String,
+    created_at: Datetime,
+    updated_at: Datetime,
+}
+
+const OPERATION_STATS_QUERY: &str = "\
+    SELECT state, count() AS count FROM memory_operation GROUP BY state;\n\
+    SELECT count() AS count FROM memory_operation WHERE state IN $nonterminal AND error != NONE GROUP ALL;\n\
+    SELECT operation_id, state, created_at, updated_at FROM memory_operation WHERE state IN $nonterminal ORDER BY created_at ASC LIMIT 1;";
 
 const LIST_OPERATION_IDS_BY_STATE_QUERY: &str =
     "SELECT operation_id FROM memory_operation WHERE state = $state ORDER BY operation_id ASC";
@@ -806,6 +852,53 @@ impl OperationService {
             .check()?
             .take(0)?;
         rows.pop().map(TryInto::try_into).transpose()
+    }
+
+    pub async fn stats(&self) -> Result<OperationStats> {
+        let nonterminal: Vec<&'static str> = NONTERMINAL_OPERATION_STATES
+            .iter()
+            .map(|state| state.as_str())
+            .collect();
+        let connection = self.ledger_connection().await?;
+        let mut response = self
+            .await_database(
+                "stats",
+                connection.generation,
+                connection
+                    .db
+                    .query(OPERATION_STATS_QUERY)
+                    .bind(("nonterminal", nonterminal)),
+            )
+            .await?;
+        let state_counts: Vec<DbStateCount> = response.take(0)?;
+        let paused: Vec<DbCount> = response.take(1)?;
+        let oldest: Vec<DbOldestOperation> = response.take(2)?;
+
+        let counts: BTreeMap<String, u64> = state_counts
+            .into_iter()
+            .map(|row| (row.state, row.count))
+            .collect();
+        let nonterminal = NONTERMINAL_OPERATION_STATES
+            .iter()
+            .filter_map(|state| counts.get(state.as_str()))
+            .sum();
+        let now = Utc::now();
+        let oldest_nonterminal = oldest.into_iter().next().map(|row| {
+            let created_at: chrono::DateTime<Utc> = row.created_at.into();
+            OldestOperation {
+                operation_id: row.operation_id,
+                state: row.state,
+                created_at: created_at.to_rfc3339(),
+                updated_at: chrono::DateTime::<Utc>::from(row.updated_at).to_rfc3339(),
+                age_seconds: (now - created_at).num_seconds().max(0) as u64,
+            }
+        });
+        Ok(OperationStats {
+            counts,
+            nonterminal,
+            paused: paused.first().map_or(0, |row| row.count),
+            oldest_nonterminal,
+        })
     }
 
     async fn get_db(&self, operation_id: &str) -> Result<Option<DbOperation>> {
@@ -1881,6 +1974,7 @@ struct EventsQuery {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", post(submit_operation))
+        .route("/stats", get(operation_stats))
         .route("/{id}", get(get_operation))
         .route("/{id}/events", get(operation_events))
         .route("/{id}/retry", post(retry_operation))
@@ -1963,6 +2057,19 @@ async fn submit_operation(
             }),
         )),
     }
+}
+
+async fn operation_stats(
+    State(state): State<AppState>,
+) -> Result<Json<OperationStats>, ApiFailure> {
+    state.operations.stats().await.map(Json).map_err(|error| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiError {
+                error: error.to_string(),
+            }),
+        )
+    })
 }
 
 async fn get_operation(
@@ -3513,6 +3620,98 @@ mod tests {
         }
         assert!(spec["components"]["schemas"]["RejectRequest"].is_object());
         assert!(spec["components"]["responses"]["OperatorConflict"].is_object());
+    }
+
+    async fn get_stats(router: &Router) -> (StatusCode, Value) {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/operations/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn stats_report_pending_work_paused_operations_and_the_oldest() {
+        let fixture = operator_fixture(Arc::new(PlannedEmbedder::failing_at(1)), NO_SWEEP).await;
+        submit_blocked(&fixture.service, "stats-blocked").await;
+        submit_add_memory(&fixture.service, "stats-paused").await;
+        wait_for_service_state(
+            &fixture.service,
+            "stats-paused",
+            OperationState::Processing,
+            true,
+        )
+        .await;
+        let payload =
+            json!({"name": "stats-done", "description": null, "agent_id": null, "user_id": "test"});
+        fixture
+            .service
+            .submit(OperationRequest {
+                operation_id: "stats-done".to_owned(),
+                schema_version: OPERATION_SCHEMA_VERSION,
+                kind: "create_task_stream".to_owned(),
+                dependencies: Vec::new(),
+                payload_hash: payload_hash(&payload).unwrap(),
+                payload,
+            })
+            .await
+            .unwrap();
+        wait_for_service_state(
+            &fixture.service,
+            "stats-done",
+            OperationState::Committed,
+            false,
+        )
+        .await;
+
+        let (status, stats) = get_stats(&fixture.router).await;
+        assert_eq!(status, StatusCode::OK, "{stats}");
+        assert_eq!(stats["counts"]["blocked"], 1);
+        assert_eq!(stats["counts"]["processing"], 1);
+        assert_eq!(stats["counts"]["committed"], 1);
+        assert_eq!(stats["nonterminal"], 2);
+        assert_eq!(stats["paused"], 1);
+        assert_eq!(stats["oldest_nonterminal"]["operation_id"], "stats-blocked");
+        assert_eq!(stats["oldest_nonterminal"]["state"], "blocked");
+        assert!(
+            stats["oldest_nonterminal"]["age_seconds"]
+                .as_u64()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn stats_route_is_not_captured_as_an_operation_id() {
+        let fixture = operator_fixture(Arc::new(NoOpEmbedder), NO_SWEEP).await;
+        let (status, stats) = get_stats(&fixture.router).await;
+        assert_eq!(status, StatusCode::OK, "{stats}");
+        assert_eq!(stats["nonterminal"], 0);
+        assert_eq!(stats["paused"], 0);
+        assert!(stats["oldest_nonterminal"].is_null());
+        assert_eq!(stats["counts"], json!({}));
+    }
+
+    #[test]
+    fn openapi_documents_operation_stats() {
+        let spec = openapi_spec();
+        let responses = &spec["paths"]["/api/v2/operations/stats"]["get"]["responses"];
+        assert!(responses["200"].is_object());
+        assert!(responses["503"].is_object());
+        let schema = &spec["components"]["schemas"]["OperationStats"];
+        for field in ["counts", "nonterminal", "paused", "oldest_nonterminal"] {
+            assert!(
+                schema["properties"][field].is_object(),
+                "{field} is documented"
+            );
+        }
     }
 
     #[tokio::test]
