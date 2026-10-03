@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Surreal Memory Durable Operations API",
-    "version": "1.8.0",
+    "version": "1.9.0",
     "description": "Receipt-driven ingestion for deterministic, replayable memory and task operations. POST acceptance is the durability boundary; terminal success is proven only by a committed receipt."
   },
   "servers": [
@@ -16,7 +16,7 @@
         "responses": {
           "200": {
             "description": "The HTTP process is live; this does not prove ingestion readiness.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Health" }, "example": { "service": "surreal-memory-server", "status": "ok", "version": "1.8.0" } } }
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Health" }, "example": { "service": "surreal-memory-server", "status": "ok", "version": "1.9.0" } } }
           }
         }
       }
@@ -100,6 +100,36 @@
           "503": { "$ref": "#/components/responses/Unavailable" }
         }
       }
+    },
+    "/api/v2/operations/{operation_id}/retry": {
+      "parameters": [ { "$ref": "#/components/parameters/OperationId" } ],
+      "post": {
+        "operationId": "retryOperation",
+        "summary": "Re-drive a non-terminal operation now",
+        "description": "Wakes the coordinator for this operation instead of waiting for the periodic reconciliation sweep. Safe to repeat; returns the receipt as of the request.",
+        "responses": {
+          "202": { "description": "The operation was queued for processing.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationReceipt" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/OperatorConflict" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v2/operations/{operation_id}/reject": {
+      "parameters": [ { "$ref": "#/components/parameters/OperationId" } ],
+      "post": {
+        "operationId": "rejectOperation",
+        "summary": "Dead-letter a non-terminal operation",
+        "description": "Moves the operation to rejected with the given reason so clients stop redelivering it. Refused for indexed operations (the memory is already stored; retry instead) and for the operation the coordinator is processing at that moment.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RejectRequest" } } } },
+        "responses": {
+          "200": { "description": "The rejected receipt.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationReceipt" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/OperatorConflict" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
     }
   },
   "components": {
@@ -144,11 +174,13 @@
         }, "additionalProperties": false
       },
       "OperationEvent": { "type": "object", "required": ["operation_id", "sequence", "from_state", "to_state", "detail", "executor_generation", "occurred_at"], "properties": { "operation_id": { "type": "string" }, "sequence": { "type": "integer", "format": "uint64" }, "from_state": { "type": ["string", "null"] }, "to_state": { "type": "string" }, "detail": { "type": ["object", "array", "string", "number", "boolean", "null"] }, "executor_generation": { "type": "integer", "format": "uint64" }, "occurred_at": { "type": "string", "format": "date-time" } }, "additionalProperties": false },
-      "Error": { "type": "object", "required": ["error"], "properties": { "error": { "type": "string" } }, "additionalProperties": false }
+      "Error": { "type": "object", "required": ["error"], "properties": { "error": { "type": "string" } }, "additionalProperties": false },
+      "RejectRequest": { "type": "object", "required": ["reason"], "properties": { "reason": { "type": "string", "minLength": 1, "maxLength": 2000, "description": "Why the operation is being dead-lettered; stored as the receipt error." } }, "additionalProperties": false }
     },
     "responses": {
       "BadRequest": { "description": "Malformed JSON, unsupported schema/kind, empty dependency, invalid kind payload, or payload hash mismatch.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "payload_hash mismatch: request supplied 0000..., canonical payload is a026d7fd..." } } } },
       "Conflict": { "description": "The operation ID already belongs to a different payload hash.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "operation_id 'memory-release-20260803' already exists with payload_hash a026d7fd122070a74973fa27e3ba92d438ba60e7fa84fd7fd3c8d769e3339a09" } } } },
+      "OperatorConflict": { "description": "The operation is terminal, indexed (reject only), or being processed right now.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "operation 'memory-release-20260803' is already committed" } } } },
       "NotFound": { "description": "No durable receipt exists for the operation ID.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "operation 'missing-operation' not found" } } } },
       "Unavailable": { "description": "The ledger/storage layer cannot complete the request.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "operation ledger unavailable" } } } }
     },
@@ -163,6 +195,9 @@
     "same-id-same-hash": "Repeat POST after response loss; 200 returns the stored receipt and never duplicates logical work.",
     "same-id-different-hash": "Repeat the operation ID with another canonical payload hash; 409 preserves the original receipt.",
     "response-loss": "Discard POST response, then GET by operation_id until committed or rejected.",
-    "long-logical-memory": "Persist tokenizer-planned parts and per-part embeddings; restart resumes only unfinished parts and commits one logical memory."
+    "long-logical-memory": "Persist tokenizer-planned parts and per-part embeddings; restart resumes only unfinished parts and commits one logical memory.",
+    "operator-retry": "POST /retry re-drives a paused operation immediately; terminal operations return 409.",
+    "operator-reject": "POST /reject dead-letters a non-terminal, non-indexed operation; reconciliation never processes it again.",
+    "permanent-failure": "A failure retrying cannot fix (invalid payload, empty plan, changed deterministic plan) rejects the operation instead of pausing it."
   }
 }
