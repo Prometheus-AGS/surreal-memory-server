@@ -370,11 +370,64 @@ struct LedgerDeadlineExceeded {
     recovered: bool,
 }
 
+/// The ledger connection itself failed (transport loss, or a session that
+/// lost its namespace/database selection), as opposed to a slow query.
+#[derive(Debug, thiserror::Error)]
+#[error("operation database {stage} lost its connection: {source}")]
+struct LedgerConnectionLost {
+    stage: &'static str,
+    recovered: bool,
+    source: surrealdb::Error,
+}
+
+/// Errors that mean the ledger session is unusable. A fresh connection
+/// always re-runs signin and `use_ns`/`use_db`, so replacing it recovers.
+fn is_ledger_connection_error(error: &surrealdb::Error) -> bool {
+    error.is_connection()
+        || matches!(
+            error.validation_details(),
+            Some(
+                surrealdb::types::ValidationError::NamespaceEmpty
+                    | surrealdb::types::ValidationError::DatabaseEmpty
+            )
+        )
+}
+
+/// A ledger result that may still carry per-statement errors. Checking it
+/// inside `await_database` matters: a session that lost its namespace fails
+/// each statement ("Specify a namespace to use"), not the request itself, so
+/// an unchecked response would hide that failure from the classifier.
+trait LedgerResponse: Sized {
+    fn checked(self) -> std::result::Result<Self, surrealdb::Error>;
+}
+
+impl LedgerResponse for surrealdb::IndexedResults {
+    fn checked(self) -> std::result::Result<Self, surrealdb::Error> {
+        self.check()
+    }
+}
+
+impl<T> LedgerResponse for Option<T> {
+    fn checked(self) -> std::result::Result<Self, surrealdb::Error> {
+        Ok(self)
+    }
+}
+
+#[cfg(test)]
+impl LedgerResponse for () {
+    fn checked(self) -> std::result::Result<Self, surrealdb::Error> {
+        Ok(self)
+    }
+}
+
 fn is_recovered_ledger_deadline(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause
             .downcast_ref::<LedgerDeadlineExceeded>()
             .is_some_and(|deadline| deadline.recovered)
+            || cause
+                .downcast_ref::<LedgerConnectionLost>()
+                .is_some_and(|lost| lost.recovered)
     })
 }
 
@@ -482,22 +535,76 @@ impl OperationService {
         Ok(connection)
     }
 
-    async fn replace_ledger_connection(&self, stale_generation: u64) -> Result<()> {
-        let _replacement = self.connection_replacement.lock().await;
+    /// Publish the next ledger generation. Returns `Ok(false)` without
+    /// waiting when another task is already replacing the connection: a
+    /// waiter would only spend its own deadline on someone else's connect,
+    /// which is how one slow connect used to time out every queued caller.
+    async fn replace_ledger_connection(&self, stale_generation: u64) -> Result<bool> {
+        let Ok(_replacement) = self.connection_replacement.try_lock() else {
+            return Ok(false);
+        };
         if self
             .ledger_connection
             .load_full()
             .is_some_and(|connection| connection.generation != stale_generation)
         {
-            return Ok(());
+            return Ok(true);
         }
         let db = (self.ledger_connector)().await?;
+        let generation = stale_generation.saturating_add(1);
         self.ledger_connection
-            .store(Some(Arc::new(LedgerConnection {
-                generation: stale_generation.saturating_add(1),
-                db,
-            })));
-        Ok(())
+            .store(Some(Arc::new(LedgerConnection { generation, db })));
+        tracing::warn!(generation, "operation database connection replaced");
+        Ok(true)
+    }
+
+    /// Replace a dead ledger connection, bounded by the query deadline.
+    /// Returns whether a usable generation is now published.
+    async fn recover_ledger_connection(&self, stage: &'static str, generation: u64) -> bool {
+        let replacement_timeout = self.query_timeout.max(Duration::from_secs(1));
+        match tokio::time::timeout(
+            replacement_timeout,
+            self.replace_ledger_connection(generation),
+        )
+        .await
+        {
+            Ok(Ok(replaced)) => replaced,
+            Ok(Err(error)) => {
+                tracing::error!(%error, stage, "operation database connection replacement failed");
+                false
+            }
+            Err(_) => {
+                tracing::error!(
+                    stage,
+                    timeout_ms = replacement_timeout.as_millis(),
+                    "operation database connection replacement timed out"
+                );
+                false
+            }
+        }
+    }
+
+    /// Replace the connection when `error` shows the session itself is
+    /// unusable; any other error is returned unchanged.
+    async fn classify_ledger_error(
+        &self,
+        stage: &'static str,
+        generation: u64,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        match error.downcast::<surrealdb::Error>() {
+            Ok(source) if is_ledger_connection_error(&source) => {
+                let recovered = self.recover_ledger_connection(stage, generation).await;
+                LedgerConnectionLost {
+                    stage,
+                    recovered,
+                    source,
+                }
+                .into()
+            }
+            Ok(source) => source.into(),
+            Err(error) => error,
+        }
     }
 
     async fn await_database<T, E, F>(
@@ -507,33 +614,22 @@ impl OperationService {
         future: F,
     ) -> Result<T>
     where
+        T: LedgerResponse,
         F: IntoFuture<Output = std::result::Result<T, E>>,
         anyhow::Error: From<E>,
     {
         match tokio::time::timeout(self.query_timeout, future.into_future()).await {
-            Ok(result) => result.map_err(anyhow::Error::from),
+            Ok(Ok(value)) => match value.checked() {
+                Ok(value) => Ok(value),
+                Err(error) => Err(self
+                    .classify_ledger_error(stage, generation, error.into())
+                    .await),
+            },
+            Ok(Err(error)) => Err(self
+                .classify_ledger_error(stage, generation, error.into())
+                .await),
             Err(_) => {
-                let replacement_timeout = self.query_timeout.max(Duration::from_secs(1));
-                let replacement = tokio::time::timeout(
-                    replacement_timeout,
-                    self.replace_ledger_connection(generation),
-                )
-                .await;
-                let recovered = match replacement {
-                    Ok(Ok(())) => true,
-                    Ok(Err(error)) => {
-                        tracing::error!(%error, stage, "operation database connection replacement failed");
-                        false
-                    }
-                    Err(_) => {
-                        tracing::error!(
-                            stage,
-                            timeout_ms = replacement_timeout.as_millis(),
-                            "operation database connection replacement timed out"
-                        );
-                        false
-                    }
-                };
+                let recovered = self.recover_ledger_connection(stage, generation).await;
                 Err(LedgerDeadlineExceeded {
                     stage,
                     timeout_ms: self.query_timeout.as_millis(),
@@ -943,12 +1039,13 @@ impl OperationService {
     }
 
     async fn persist_executor_event(&self, event: ExecutorEvent) -> Result<()> {
+        // Only the durable coordinator issues operation-scoped executor
+        // requests, so the ledger row exists; the event key carries the
+        // operation id. Skipping a receipt lookup per event halves the
+        // journal's load on the ledger connection during inference.
         let Some(operation_id) = event.operation_id else {
             return Ok(());
         };
-        if self.get(&operation_id).await?.is_none() {
-            return Ok(());
-        }
         let kind = serde_json::to_value(&event.kind)?
             .as_str()
             .context("executor event kind must serialize as a string")?
@@ -1939,6 +2036,21 @@ mod tests {
         assert_eq!(service.ledger_connection().await.unwrap().generation, 1);
     }
 
+    fn counting_connector(
+        connect_calls: &Arc<AtomicUsize>,
+        replacement: Option<Surreal<Any>>,
+    ) -> LedgerConnector {
+        let connect_calls = Arc::clone(connect_calls);
+        Arc::new(move || {
+            let connect_calls = Arc::clone(&connect_calls);
+            let replacement = replacement.clone();
+            Box::pin(async move {
+                connect_calls.fetch_add(1, Ordering::SeqCst);
+                replacement.context("fixture replacement failed")
+            })
+        })
+    }
+
     #[tokio::test]
     async fn replacement_failure_is_not_a_recovered_ledger_deadline() {
         let embedder: Arc<dyn EmbeddingService> = Arc::new(NoOpEmbedder);
@@ -1947,25 +2059,14 @@ mod tests {
                 .await
                 .expect("in-memory SurrealStorage"),
         );
-        let database = storage.db().unwrap();
         let connect_calls = Arc::new(AtomicUsize::new(0));
-        let ledger_connector: LedgerConnector = {
-            let connect_calls = Arc::clone(&connect_calls);
-            Arc::new(move || {
-                let connect_calls = Arc::clone(&connect_calls);
-                Box::pin(async move {
-                    connect_calls.fetch_add(1, Ordering::SeqCst);
-                    anyhow::bail!("fixture replacement failed")
-                })
-            })
-        };
         let service = service_without_coordinator(
             Arc::clone(&storage),
             embedder,
-            ledger_connector,
+            counting_connector(&connect_calls, None),
             Some(LedgerConnection {
                 generation: 0,
-                db: database,
+                db: storage.db().unwrap(),
             }),
             Duration::from_millis(1),
         );
@@ -1986,6 +2087,48 @@ mod tests {
         assert!(!is_recovered_ledger_deadline(&error));
         assert_eq!(connect_calls.load(Ordering::SeqCst), 1);
         assert_eq!(service.ledger_connection().await.unwrap().generation, 0);
+    }
+
+    #[tokio::test]
+    async fn session_without_namespace_is_replaced_and_retried() {
+        let embedder: Arc<dyn EmbeddingService> = Arc::new(NoOpEmbedder);
+        let storage = Arc::new(
+            SurrealStorage::new_mem(Arc::clone(&embedder))
+                .await
+                .expect("in-memory SurrealStorage"),
+        );
+        // A connected session that never ran `use_ns`/`use_db` reproduces
+        // the "Specify a namespace to use" failure from #35.
+        let unselected_path =
+            std::env::temp_dir().join(format!("ledger-unselected-{}", uuid::Uuid::new_v4()));
+        let unselected =
+            surrealdb::engine::any::connect(format!("rocksdb://{}", unselected_path.display()))
+                .await
+                .unwrap();
+        let connect_calls = Arc::new(AtomicUsize::new(0));
+        let service = service_without_coordinator(
+            Arc::clone(&storage),
+            embedder,
+            counting_connector(&connect_calls, Some(storage.db().unwrap())),
+            Some(LedgerConnection {
+                generation: 0,
+                db: unselected,
+            }),
+            Duration::from_secs(5),
+        );
+
+        let error = service.get("missing").await.unwrap_err();
+
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.is::<LedgerConnectionLost>()),
+            "unexpected error: {error:#}"
+        );
+        assert!(is_recovered_ledger_deadline(&error));
+        assert_eq!(connect_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(service.ledger_connection().await.unwrap().generation, 1);
+        assert!(service.get("missing").await.unwrap().is_none());
     }
 
     #[tokio::test]

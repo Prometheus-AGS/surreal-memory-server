@@ -1,5 +1,5 @@
 use std::{
-    net::{Ipv4Addr, SocketAddrV4, TcpListener},
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener},
     process::{Child, Command, Stdio},
     sync::Arc,
     time::Duration,
@@ -406,4 +406,158 @@ async fn startup_reconciliation_processes_a_dependency_in_a_later_drain_wave() {
 
     assert_eq!(receipts[0]["operation_id"], "a-dependent");
     assert_eq!(receipts[1]["operation_id"], "z-prerequisite");
+}
+
+fn spawn_persistent_server(address: SocketAddrV4, path: &std::path::Path) -> ServerGuard {
+    let child = Command::new("surreal")
+        .args([
+            "start",
+            "--no-banner",
+            "--unauthenticated",
+            "--allow-all",
+            "--bind",
+            &address.to_string(),
+            &format!("rocksdb:{}", path.display()),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("installed surreal CLI starts the persistent fixture");
+    ServerGuard(child)
+}
+
+async fn wait_reachable(address: SocketAddrV4) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if tokio::net::TcpStream::connect(address).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("persistent surreal fixture becomes reachable");
+}
+
+fn task_stream_request(operation_id: &str) -> Value {
+    let payload = json!({
+        "name": operation_id,
+        "description": "ledger restart fixture",
+        "agent_id": null,
+        "user_id": "test"
+    });
+    let payload_hash = Sha256::digest(serde_json::to_vec(&payload).unwrap())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    json!({
+        "operation_id": operation_id,
+        "schema_version": 2,
+        "kind": "create_task_stream",
+        "dependencies": [],
+        "payload_hash": payload_hash,
+        "payload": payload
+    })
+}
+
+/// Submit an operation and poll its receipt until it commits. Transient
+/// errors while the database restarts are tolerated, but a session that
+/// lost its namespace selection (#35) must never surface.
+async fn submit_until_committed(router: &axum::Router, operation_id: &str) {
+    let request_body = task_stream_request(operation_id);
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let mut submitted = false;
+        loop {
+            let response = if submitted {
+                router
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri(format!("/api/v2/operations/{operation_id}"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+            } else {
+                router
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/api/v2/operations")
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .body(Body::from(serde_json::to_vec(&request_body).unwrap()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+            };
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(
+                !text.contains("Specify a namespace") && !text.contains("Specify a database"),
+                "ledger session lost its namespace selection: {text}"
+            );
+            if status.is_success() {
+                submitted = true;
+                let body: Value = serde_json::from_slice(&bytes).unwrap();
+                if body["state"] == "committed" {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{operation_id} did not commit"));
+}
+
+#[tokio::test]
+async fn ledger_survives_a_database_restart_without_losing_its_namespace() {
+    let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let SocketAddr::V4(address) = listener.local_addr().unwrap() else {
+        unreachable!("bound an IPv4 address")
+    };
+    drop(listener);
+    let data = std::env::temp_dir().join(format!("ledger-restart-{}", uuid::Uuid::new_v4()));
+    let server = spawn_persistent_server(address, &data);
+    wait_reachable(address).await;
+
+    let embedder: Arc<dyn EmbeddingService> = Arc::new(NoOpEmbedder);
+    let storage = Arc::new(
+        SurrealStorage::new(
+            &SurrealConfig {
+                auth_level: Default::default(),
+                mode: SurrealMode::Server,
+                endpoint: Some(format!("ws://{address}")),
+                embedded_path: None,
+                username: None,
+                password: None,
+                namespace: format!("restart_{}", uuid::Uuid::new_v4().simple()),
+                database: "operations".to_owned(),
+                retry: RetryConfig {
+                    max_connect_retries: 0,
+                    query_timeout_ms: 10_000,
+                    ..RetryConfig::default()
+                },
+            },
+            Arc::clone(&embedder),
+        )
+        .await
+        .expect("server-mode SurrealStorage"),
+    );
+    let router = api::build_router_with_query_timeout(
+        Arc::clone(&storage) as Arc<dyn MemoryStorage>,
+        embedder,
+        Duration::from_secs(2),
+    );
+    submit_until_committed(&router, "before-restart").await;
+
+    drop(server);
+    let _server = spawn_persistent_server(address, &data);
+    wait_reachable(address).await;
+
+    submit_until_committed(&router, "after-restart").await;
 }
