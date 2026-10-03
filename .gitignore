@@ -53,3 +53,7 @@ website/.docusaurus/
 /compass-out/
 /.compass/cache/
 /.compass/*.log
+
+# Per-machine state (local permissions, live KBD progress); keep out of the public repo
+.claude/settings.local.json
+.kbd-orchestrator/phases/surrealdb-connection-architecture/progress.json
