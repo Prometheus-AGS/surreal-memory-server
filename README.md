@@ -11,10 +11,14 @@ New write integrations use:
 - `POST /api/v2/operations` — accept a caller ID, canonical payload hash, dependencies, kind, and payload;
 - `GET /api/v2/operations/{operation_id}` — reconcile the authoritative receipt;
 - `GET /api/v2/operations/{operation_id}/events?after=N` — replay and follow ordered SSE state events;
+- `POST /api/v2/operations/{operation_id}/retry` — re-drive a non-terminal operation now instead of waiting for the 60 s reconciliation sweep;
+- `POST /api/v2/operations/{operation_id}/reject` — dead-letter a non-terminal operation with `{"reason": "..."}` (refused for `indexed` operations and for the one being processed);
 - `GET /health` — process liveness;
 - `GET /ready` — ledger, storage, coordinator, tokenizer, executor, and search readiness.
 
 `202` means a new operation is durably accepted. `200` on a repeated POST means exact same-ID/same-hash replay. `409` protects an existing ID from a different payload. Only `committed` or `rejected` receipts are terminal.
+
+Paused operations are retried automatically every 60 s. Failures that retrying cannot fix (invalid payload, empty plan, changed deterministic plan) reject the operation instead of pausing it.
 
 Long memories are planned with the active tokenizer. Parts and executor progress are persisted, so restart reuses the plan and resumes only unfinished parts before committing one logical memory.
 

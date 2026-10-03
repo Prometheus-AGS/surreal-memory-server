@@ -341,6 +341,10 @@ pub struct OperationService {
     ledger_connector: LedgerConnector,
     ledger_connection: Arc<ArcSwapOption<LedgerConnection>>,
     connection_replacement: Arc<tokio::sync::Mutex<()>>,
+    /// The operation the coordinator is processing right now. An operator
+    /// reject holds this lock across its transition and refuses the
+    /// in-flight operation, so it never races the coordinator's own writes.
+    in_flight: Arc<tokio::sync::Mutex<Option<String>>>,
     wake_tx: mpsc::Sender<String>,
     events_tx: broadcast::Sender<OperationEvent>,
     #[cfg(test)]
@@ -418,6 +422,41 @@ impl LedgerResponse for () {
     fn checked(self) -> std::result::Result<Self, surrealdb::Error> {
         Ok(self)
     }
+}
+
+/// A failure that retrying cannot fix (malformed payload, a planner that
+/// returns nothing, a changed deterministic plan). The coordinator rejects
+/// the operation instead of pausing it for the periodic sweep forever.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct PermanentFailure(String);
+
+fn is_permanent_failure(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.is::<PermanentFailure>())
+}
+
+/// A transition was attempted on an operation that is already committed or
+/// rejected; terminal receipts are immutable.
+#[derive(Debug, thiserror::Error)]
+#[error("operation '{operation_id}' is already {state}")]
+struct OperationAlreadyTerminal {
+    operation_id: String,
+    state: &'static str,
+}
+
+fn is_already_terminal(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.is::<OperationAlreadyTerminal>())
+}
+
+/// Why an operator retry or reject was refused.
+#[derive(Debug)]
+pub enum OperatorError {
+    NotFound,
+    Conflict(String),
+    Invalid(String),
+    Storage(anyhow::Error),
 }
 
 fn is_recovered_ledger_deadline(error: &anyhow::Error) -> bool {
@@ -500,6 +539,7 @@ impl OperationService {
             ledger_connector,
             ledger_connection: Arc::new(ArcSwapOption::empty()),
             connection_replacement: Arc::new(tokio::sync::Mutex::new(())),
+            in_flight: Arc::new(tokio::sync::Mutex::new(None)),
             wake_tx,
             events_tx,
             #[cfg(test)]
@@ -833,6 +873,14 @@ impl OperationService {
             .get_db(operation_id)
             .await?
             .with_context(|| format!("operation '{operation_id}' not found"))?;
+        let current_state = parse_state(&current.state)?;
+        if current_state.is_terminal() {
+            return Err(OperationAlreadyTerminal {
+                operation_id: operation_id.to_owned(),
+                state: current_state.as_str(),
+            }
+            .into());
+        }
         let from = current.state.clone();
         let sequence = current.progress_seq + 1;
         let now = Datetime::default();
@@ -998,6 +1046,11 @@ impl OperationService {
             Ok(Some(receipt)) if !receipt.state.is_terminal() => receipt,
             _ => return,
         };
+        // The periodic sweep retries paused operations; a failure that
+        // repeats unchanged must not append a new ledger event every sweep.
+        if current.error.as_deref() == Some(message.as_str()) {
+            return;
+        }
         let _ = self
             .transition(
                 operation_id,
@@ -1115,6 +1168,108 @@ impl OperationService {
         self.process(operation_id).await
     }
 
+    async fn reject_permanent_failure(&self, operation_id: &str, error: &anyhow::Error) {
+        let message = bounded_error(&format!("{error:#}"));
+        tracing::warn!(%operation_id, error = %message, "operation rejected: permanent failure");
+        if let Err(transition_error) = self
+            .transition(
+                operation_id,
+                OperationState::Rejected,
+                Vec::new(),
+                None,
+                Some(message.clone()),
+                Some(json!({"outcome":"rejected","reason":"permanent_failure","error":message})),
+            )
+            .await
+        {
+            tracing::error!(%operation_id, error = %transition_error, "permanent-failure rejection failed");
+            // Keep the failure visible on the receipt; the sweep retries.
+            self.record_processing_error(operation_id, error).await;
+        }
+    }
+
+    /// Wake a non-terminal operation now instead of waiting for the sweep.
+    pub async fn retry(&self, operation_id: &str) -> Result<OperationReceipt, OperatorError> {
+        let receipt = self
+            .get(operation_id)
+            .await
+            .map_err(OperatorError::Storage)?
+            .ok_or(OperatorError::NotFound)?;
+        if receipt.state.is_terminal() {
+            return Err(OperatorError::Conflict(format!(
+                "operation '{operation_id}' is already {}",
+                receipt.state.as_str()
+            )));
+        }
+        // Never block the HTTP caller on a full wake queue: the periodic
+        // reconciliation sweep picks the operation up regardless.
+        let _ = self.wake_tx.try_send(operation_id.to_owned());
+        Ok(receipt)
+    }
+
+    /// Dead-letter a non-terminal operation with an operator-supplied reason.
+    pub async fn reject(
+        &self,
+        operation_id: &str,
+        reason: &str,
+    ) -> Result<OperationReceipt, OperatorError> {
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return Err(OperatorError::Invalid("reason cannot be empty".to_owned()));
+        }
+        let reason = bounded_error(reason);
+        let in_flight = self.in_flight.lock().await;
+        if in_flight.as_deref() == Some(operation_id) {
+            return Err(OperatorError::Conflict(format!(
+                "operation '{operation_id}' is being processed; retry the reject shortly"
+            )));
+        }
+        let receipt = self
+            .get(operation_id)
+            .await
+            .map_err(OperatorError::Storage)?
+            .ok_or(OperatorError::NotFound)?;
+        if receipt.state.is_terminal() {
+            return Err(OperatorError::Conflict(format!(
+                "operation '{operation_id}' is already {}",
+                receipt.state.as_str()
+            )));
+        }
+        // `store_indexed_memory` runs before the Indexed transition, so a
+        // failure between them leaves a stored memory under a Processing
+        // receipt. Rejecting then would report stored content as discarded.
+        let memory_stored = receipt.kind == "add_memory"
+            && self
+                .storage
+                .get_memory(&record_key(operation_id))
+                .await
+                .map_err(OperatorError::Storage)?
+                .is_some();
+        if receipt.state == OperationState::Indexed || memory_stored {
+            return Err(OperatorError::Conflict(format!(
+                "operation '{operation_id}' is indexed: its memory is already stored; retry it to commit instead"
+            )));
+        }
+        let rejected = self
+            .transition(
+                operation_id,
+                OperationState::Rejected,
+                Vec::new(),
+                None,
+                Some(reason.clone()),
+                Some(json!({"outcome":"rejected","by":"operator","reason":reason})),
+            )
+            .await;
+        drop(in_flight);
+        rejected.map_err(|error| {
+            if is_already_terminal(&error) {
+                OperatorError::Conflict(error.to_string())
+            } else {
+                OperatorError::Storage(error)
+            }
+        })
+    }
+
     async fn drain_pending(&self, initial: Vec<String>) {
         let mut pending = VecDeque::from(initial);
         let mut queued = pending.iter().cloned().collect::<HashSet<_>>();
@@ -1124,7 +1279,19 @@ impl OperationService {
         loop {
             while let Some(operation_id) = pending.pop_front() {
                 queued.remove(&operation_id);
-                if let Err(error) = self.process_pending(&operation_id).await {
+                *self.in_flight.lock().await = Some(operation_id.clone());
+                let processed = self.process_pending(&operation_id).await;
+                *self.in_flight.lock().await = None;
+                if let Err(error) = processed {
+                    if is_already_terminal(&error) {
+                        // An operator rejected it between waves.
+                        tracing::info!(%operation_id, %error, "operation already terminal");
+                        continue;
+                    }
+                    if is_permanent_failure(&error) {
+                        self.reject_permanent_failure(&operation_id, &error).await;
+                        continue;
+                    }
                     if is_recovered_ledger_deadline(&error)
                         && retried.insert(operation_id.clone())
                         && queued.insert(operation_id.clone())
@@ -1322,7 +1489,7 @@ impl OperationService {
         mut state: OperationState,
     ) -> Result<()> {
         let request: AddMemoryRequest = serde_json::from_value(operation.payload.clone())
-            .context("invalid add_memory payload")?;
+            .map_err(|error| PermanentFailure(format!("invalid add_memory payload: {error}")))?;
         self.embedding_service
             .prepare_operation(
                 &operation.operation_id,
@@ -1345,7 +1512,9 @@ impl OperationService {
                 .await?;
             let plan = planned?;
             if plan.is_empty() {
-                anyhow::bail!("embedding planner returned no parts");
+                return Err(
+                    PermanentFailure("embedding planner returned no parts".to_owned()).into(),
+                );
             }
             self.persist_plan(&operation.operation_id, &plan).await?;
             stored_parts = self.operation_parts(&operation.operation_id).await?;
@@ -1474,8 +1643,9 @@ impl OperationService {
         match operation.kind.as_str() {
             "create_task_stream" => {
                 let payload: CreateTaskStreamPayload =
-                    serde_json::from_value(operation.payload.clone())
-                        .context("invalid create_task_stream payload")?;
+                    serde_json::from_value(operation.payload.clone()).map_err(|error| {
+                        PermanentFailure(format!("invalid create_task_stream payload: {error}"))
+                    })?;
                 if let Some(existing) = self
                     .storage
                     .get_task_stream(
@@ -1500,7 +1670,9 @@ impl OperationService {
             }
             "add_task_step" => {
                 let payload: AddTaskStepPayload = serde_json::from_value(operation.payload.clone())
-                    .context("invalid add_task_step payload")?;
+                    .map_err(|error| {
+                        PermanentFailure(format!("invalid add_task_step payload: {error}"))
+                    })?;
                 Ok(serde_json::to_value(
                     self.storage
                         .add_task_step(
@@ -1519,8 +1691,9 @@ impl OperationService {
             }
             "complete_step" => {
                 let payload: CompleteStepPayload =
-                    serde_json::from_value(operation.payload.clone())
-                        .context("invalid complete_step payload")?;
+                    serde_json::from_value(operation.payload.clone()).map_err(|error| {
+                        PermanentFailure(format!("invalid complete_step payload: {error}"))
+                    })?;
                 Ok(serde_json::to_value(
                     self.storage
                         .complete_step(&payload.idempotency_key, payload.result)
@@ -1710,6 +1883,54 @@ pub fn router() -> Router<AppState> {
         .route("/", post(submit_operation))
         .route("/{id}", get(get_operation))
         .route("/{id}/events", get(operation_events))
+        .route("/{id}/retry", post(retry_operation))
+        .route("/{id}/reject", post(reject_operation))
+}
+
+#[derive(Debug, Deserialize)]
+struct RejectRequest {
+    reason: String,
+}
+
+fn operator_failure(operation_id: &str, error: OperatorError) -> ApiFailure {
+    match error {
+        OperatorError::NotFound => not_found(format!("operation '{operation_id}' not found")),
+        OperatorError::Invalid(message) => bad_request(message),
+        OperatorError::Conflict(message) => {
+            (StatusCode::CONFLICT, Json(ApiError { error: message }))
+        }
+        OperatorError::Storage(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiError {
+                error: error.to_string(),
+            }),
+        ),
+    }
+}
+
+async fn retry_operation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<OperationReceipt>), ApiFailure> {
+    let receipt = state
+        .operations
+        .retry(&id)
+        .await
+        .map_err(|error| operator_failure(&id, error))?;
+    Ok((StatusCode::ACCEPTED, Json(receipt)))
+}
+
+async fn reject_operation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<RejectRequest>,
+) -> Result<Json<OperationReceipt>, ApiFailure> {
+    let receipt = state
+        .operations
+        .reject(&id, &request.reason)
+        .await
+        .map_err(|error| operator_failure(&id, error))?;
+    Ok(Json(receipt))
 }
 
 async fn submit_operation(
@@ -1928,6 +2149,7 @@ mod tests {
             ledger_connector,
             ledger_connection: Arc::new(ArcSwapOption::new(initial_connection.map(Arc::new))),
             connection_replacement: Arc::new(tokio::sync::Mutex::new(())),
+            in_flight: Arc::new(tokio::sync::Mutex::new(None)),
             wake_tx,
             events_tx,
             process_override: None,
@@ -2368,7 +2590,7 @@ mod tests {
     fn openapi_examples_match_serialized_request_and_receipt_contracts() {
         let spec = openapi_spec();
         assert_eq!(spec["openapi"], "3.1.0");
-        assert_eq!(spec["info"]["version"], "1.8.0");
+        assert_eq!(spec["info"]["version"], "1.9.0");
 
         let request_value = spec["components"]["examples"]["AddMemoryRequest"]["value"].clone();
         let request: OperationRequest =
@@ -2858,6 +3080,439 @@ mod tests {
         .await
         .expect("a paused operation must resume without a restart");
         assert!(receipt.error.is_none());
+    }
+
+    const NO_SWEEP: Duration = Duration::from_secs(3600);
+
+    struct OperatorFixture {
+        router: Router,
+        service: OperationService,
+        storage: Arc<SurrealStorage>,
+    }
+
+    async fn operator_fixture(
+        embedder: Arc<dyn EmbeddingService>,
+        reconcile_interval: Duration,
+    ) -> OperatorFixture {
+        let storage = Arc::new(
+            SurrealStorage::new_mem(Arc::clone(&embedder))
+                .await
+                .expect("in-memory SurrealStorage"),
+        );
+        let service = OperationService::start_with_capacities(
+            Arc::clone(&storage) as Arc<dyn MemoryStorage>,
+            Arc::clone(&embedder),
+            Duration::from_secs(10),
+            reconcile_interval,
+            16,
+            64,
+        );
+        let state = AppState {
+            storage: Arc::clone(&storage) as Arc<dyn MemoryStorage>,
+            embedding_service: embedder,
+            operations: service.clone(),
+        };
+        OperatorFixture {
+            router: Router::new()
+                .nest("/api/v2/operations", router())
+                .with_state(state),
+            service,
+            storage,
+        }
+    }
+
+    async fn operator_post(router: &Router, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+        let request = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(match body {
+                Some(body) => Body::from(serde_json::to_vec(&body).unwrap()),
+                None => Body::empty(),
+            })
+            .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    async fn submit_blocked(service: &OperationService, operation_id: &str) {
+        let payload = json!({
+            "name": operation_id,
+            "description": "operator fixture",
+            "agent_id": null,
+            "user_id": "test"
+        });
+        service
+            .submit(OperationRequest {
+                operation_id: operation_id.to_owned(),
+                schema_version: OPERATION_SCHEMA_VERSION,
+                kind: "create_task_stream".to_owned(),
+                dependencies: vec!["never-submitted".to_owned()],
+                payload_hash: payload_hash(&payload).unwrap(),
+                payload,
+            })
+            .await
+            .unwrap();
+        wait_for_service_state(service, operation_id, OperationState::Blocked, false).await;
+    }
+
+    #[tokio::test]
+    async fn retry_endpoint_re_drives_a_paused_operation_without_the_sweep() {
+        let fixture = operator_fixture(Arc::new(PlannedEmbedder::failing_at(1)), NO_SWEEP).await;
+        submit_add_memory(&fixture.service, "retry-me").await;
+        wait_for_service_state(
+            &fixture.service,
+            "retry-me",
+            OperationState::Processing,
+            true,
+        )
+        .await;
+
+        let (status, receipt) =
+            operator_post(&fixture.router, "/api/v2/operations/retry-me/retry", None).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(receipt["operation_id"], "retry-me");
+
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            wait_for_service_state(
+                &fixture.service,
+                "retry-me",
+                OperationState::Committed,
+                false,
+            ),
+        )
+        .await
+        .expect("retry must re-drive the paused operation immediately");
+
+        let (status, _) =
+            operator_post(&fixture.router, "/api/v2/operations/retry-me/retry", None).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a committed operation cannot be retried"
+        );
+        let (status, _) =
+            operator_post(&fixture.router, "/api/v2/operations/missing/retry", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn reject_endpoint_dead_letters_an_operation_that_reconciliation_then_skips() {
+        let fixture = operator_fixture(Arc::new(NoOpEmbedder), NO_SWEEP).await;
+        submit_blocked(&fixture.service, "dead-letter").await;
+
+        let (status, body) = operator_post(
+            &fixture.router,
+            "/api/v2/operations/dead-letter/reject",
+            Some(json!({"reason": "  "})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        let (status, receipt) = operator_post(
+            &fixture.router,
+            "/api/v2/operations/dead-letter/reject",
+            Some(json!({"reason": "prerequisite was abandoned"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{receipt}");
+        assert_eq!(receipt["state"], "rejected");
+        assert_eq!(receipt["error"], "prerequisite was abandoned");
+
+        assert_eq!(fixture.service.reconcile_nonterminal().await.unwrap(), 0);
+        let events = fixture
+            .service
+            .events_after("dead-letter", 0)
+            .await
+            .unwrap();
+        let last = events.last().unwrap();
+        assert_eq!(last.to_state, "rejected");
+        assert_eq!(last.detail.as_ref().unwrap()["by"], "operator");
+
+        let (status, _) = operator_post(
+            &fixture.router,
+            "/api/v2/operations/dead-letter/reject",
+            Some(json!({"reason": "again"})),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a rejected operation stays rejected"
+        );
+        let (status, _) = operator_post(
+            &fixture.router,
+            "/api/v2/operations/missing/reject",
+            Some(json!({"reason": "x"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn reject_refuses_the_operation_the_coordinator_is_processing() {
+        let fixture = operator_fixture(Arc::new(NoOpEmbedder), NO_SWEEP).await;
+        submit_blocked(&fixture.service, "in-flight").await;
+
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut coordinator = fixture.service.clone();
+        coordinator.process_override = Some({
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            Arc::new(move |_| {
+                let entered = Arc::clone(&entered);
+                let release = Arc::clone(&release);
+                Box::pin(async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    Ok(())
+                })
+            })
+        });
+        let drain = tokio::spawn(async move {
+            coordinator
+                .drain_pending(vec!["in-flight".to_owned()])
+                .await;
+        });
+        entered.notified().await;
+
+        let error = fixture
+            .service
+            .reject("in-flight", "too soon")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, OperatorError::Conflict(message) if message.contains("being processed")),
+            "{error:?}"
+        );
+
+        release.notify_one();
+        drain.await.unwrap();
+        let receipt = fixture
+            .service
+            .reject("in-flight", "now idle")
+            .await
+            .unwrap();
+        assert_eq!(receipt.state, OperationState::Rejected);
+    }
+
+    #[tokio::test]
+    async fn reject_refuses_an_operation_whose_memory_is_already_stored() {
+        let fixture = operator_fixture(Arc::new(PlannedEmbedder::completing()), NO_SWEEP).await;
+        submit_add_memory(&fixture.service, "stored-not-indexed").await;
+        wait_for_service_state(
+            &fixture.service,
+            "stored-not-indexed",
+            OperationState::Committed,
+            false,
+        )
+        .await;
+        // The memory exists but the receipt never reached Indexed: the
+        // transition after `store_indexed_memory` failed and paused it.
+        fixture
+            .storage
+            .db()
+            .unwrap()
+            .query("UPDATE memory_operation SET state = 'processing' WHERE operation_id = 'stored-not-indexed'")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let error = fixture
+            .service
+            .reject("stored-not-indexed", "late")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, OperatorError::Conflict(message) if message.contains("already stored")),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reject_refuses_an_indexed_operation() {
+        let fixture = operator_fixture(Arc::new(PlannedEmbedder::completing()), NO_SWEEP).await;
+        submit_add_memory(&fixture.service, "already-stored").await;
+        wait_for_service_state(
+            &fixture.service,
+            "already-stored",
+            OperationState::Committed,
+            false,
+        )
+        .await;
+        fixture
+            .storage
+            .db()
+            .unwrap()
+            .query("UPDATE memory_operation SET state = 'indexed' WHERE operation_id = 'already-stored'")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let (status, body) = operator_post(
+            &fixture.router,
+            "/api/v2/operations/already-stored/reject",
+            Some(json!({"reason": "too late"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            body["error"].as_str().unwrap().contains("indexed"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn transition_refuses_to_move_a_terminal_operation() {
+        let fixture = operator_fixture(Arc::new(NoOpEmbedder), NO_SWEEP).await;
+        submit_blocked(&fixture.service, "terminal").await;
+        fixture.service.reject("terminal", "fixture").await.unwrap();
+
+        let error = fixture
+            .service
+            .transition(
+                "terminal",
+                OperationState::Committed,
+                Vec::new(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(is_already_terminal(&error), "{error:#}");
+        assert_eq!(
+            fixture
+                .service
+                .get("terminal")
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            OperationState::Rejected
+        );
+    }
+
+    #[tokio::test]
+    async fn a_permanent_failure_rejects_instead_of_pausing() {
+        let embedder: Arc<dyn EmbeddingService> = Arc::new(PlannedEmbedder::completing());
+        let storage = Arc::new(
+            SurrealStorage::new_mem(Arc::clone(&embedder))
+                .await
+                .expect("in-memory SurrealStorage"),
+        );
+        // Record the operation without a coordinator, then corrupt its stored
+        // payload past validation: resuming from `planned` skips the
+        // accept-time payload check, so processing hits the parse failure.
+        let recorder = service_without_coordinator(
+            Arc::clone(&storage),
+            Arc::clone(&embedder),
+            counting_connector(&Arc::new(AtomicUsize::new(0)), Some(storage.db().unwrap())),
+            Some(LedgerConnection {
+                generation: 0,
+                db: storage.db().unwrap(),
+            }),
+            Duration::from_secs(10),
+        );
+        submit_add_memory(&recorder, "corrupt").await;
+        storage
+            .db()
+            .unwrap()
+            .query("UPDATE memory_operation SET state = 'planned', payload = { content: 7 } WHERE operation_id = 'corrupt'")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let service = OperationService::start_with_capacities(
+            Arc::clone(&storage) as Arc<dyn MemoryStorage>,
+            embedder,
+            Duration::from_secs(10),
+            NO_SWEEP,
+            16,
+            64,
+        );
+        let receipt = tokio::time::timeout(
+            Duration::from_secs(10),
+            wait_for_service_state(&service, "corrupt", OperationState::Rejected, false),
+        )
+        .await
+        .expect("a permanent failure must reject the operation");
+        assert!(
+            receipt
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("invalid add_memory payload")),
+            "{receipt:?}"
+        );
+        let last = service
+            .events_after("corrupt", 0)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(last.detail.unwrap()["reason"], "permanent_failure");
+    }
+
+    #[tokio::test]
+    async fn a_repeated_identical_failure_records_one_paused_event() {
+        let fixture = operator_fixture(Arc::new(NoOpEmbedder), NO_SWEEP).await;
+        submit_blocked(&fixture.service, "repeat").await;
+        let before = fixture
+            .service
+            .events_after("repeat", 0)
+            .await
+            .unwrap()
+            .len();
+
+        let error = anyhow::anyhow!("operation database part lookup timed out after 10000ms");
+        fixture
+            .service
+            .record_processing_error("repeat", &error)
+            .await;
+        fixture
+            .service
+            .record_processing_error("repeat", &error)
+            .await;
+
+        let after = fixture
+            .service
+            .events_after("repeat", 0)
+            .await
+            .unwrap()
+            .len();
+        assert_eq!(after, before + 1);
+    }
+
+    #[test]
+    fn openapi_documents_operator_retry_and_reject() {
+        let spec = openapi_spec();
+        let retry = &spec["paths"]["/api/v2/operations/{operation_id}/retry"]["post"]["responses"];
+        for status in ["202", "404", "409", "503"] {
+            assert!(
+                retry[status].is_object(),
+                "retry {status} response is documented"
+            );
+        }
+        let reject =
+            &spec["paths"]["/api/v2/operations/{operation_id}/reject"]["post"]["responses"];
+        for status in ["200", "400", "404", "409", "503"] {
+            assert!(
+                reject[status].is_object(),
+                "reject {status} response is documented"
+            );
+        }
+        assert!(spec["components"]["schemas"]["RejectRequest"].is_object());
+        assert!(spec["components"]["responses"]["OperatorConflict"].is_object());
     }
 
     #[tokio::test]
