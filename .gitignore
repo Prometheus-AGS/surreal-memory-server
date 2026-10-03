@@ -57,3 +57,6 @@ website/.docusaurus/
 # Per-machine state (local permissions, live KBD progress); keep out of the public repo
 .claude/settings.local.json
 .kbd-orchestrator/phases/surrealdb-connection-architecture/progress.json
+.kbd-orchestrator/phases/surrealdb-connection-architecture/children/surrealdb-3x-connection-model/progress.json
+# surreal sql CLI REPL history
+history.txt
