@@ -92,6 +92,38 @@ struct ChildState {
 /// embedding is a pure function with no side effects. Non-retriable failures
 /// are executor-reported errors or supervisor invariants that a retry cannot
 /// fix.
+/// Holds the child for one request. A caller's future can be dropped
+/// between writing a request and reading its terminal reply (an HTTP client
+/// disconnecting cancels its handler). The child then finishes the abandoned
+/// request and its late `progress`/`completed` lines stay in the pipe, so the
+/// next request would read another request's reply. A request line can also
+/// be cut short mid-write. Neither stream can be trusted again, so dropping
+/// an armed guard retires the child (`kill_on_drop`); the next request spawns
+/// a fresh generation instead of failing on a mismatched request id.
+struct InFlightRequest<'a> {
+    service: &'a SupervisedEmbeddingService,
+    state: tokio::sync::MutexGuard<'a, Option<ChildState>>,
+    operation_id: Option<&'a str>,
+    armed: bool,
+}
+
+impl Drop for InFlightRequest<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Some(child) = self.state.take() {
+            self.service.ready.store(false, Ordering::SeqCst);
+            self.service.emit(
+                self.operation_id,
+                child.generation,
+                ExecutorEventKind::Exited,
+                Some("executor request cancelled mid-flight; child retired".to_owned()),
+            );
+        }
+    }
+}
+
 struct RequestFailure {
     retriable: bool,
     error: anyhow::Error,
@@ -492,21 +524,45 @@ impl SupervisedEmbeddingService {
         let encoded = serde_json::to_vec(&request)
             .context("serialize executor request")
             .map_err(RequestFailure::fatal)?;
-        let mut state = self.state.lock().await;
+        let mut in_flight = InFlightRequest {
+            service: self,
+            state: self.state.lock().await,
+            operation_id,
+            armed: true,
+        };
+        let result = self
+            .exchange(&mut in_flight.state, operation_id, request_id, &encoded)
+            .await;
+        // The exchange ran to a terminal reply or already restarted the child;
+        // either way the stream is aligned for the next request.
+        in_flight.armed = false;
+        result
+    }
+
+    /// Write one request and read until its terminal reply. Not safe to
+    /// cancel on its own: `request_once` wraps it in an `InFlightRequest`
+    /// that retires the child if this future is dropped part-way.
+    async fn exchange(
+        &self,
+        state: &mut Option<ChildState>,
+        operation_id: Option<&str>,
+        request_id: u64,
+        encoded: &[u8],
+    ) -> std::result::Result<ExecutorResult, RequestFailure> {
         if state.is_none() {
             *state = Some(self.spawn_child().await.map_err(RequestFailure::fatal)?);
         }
         let child = state.as_mut().expect("executor child initialized");
         let generation = child.generation;
         if let Err(error) = async {
-            child.stdin.write_all(&encoded).await?;
+            child.stdin.write_all(encoded).await?;
             child.stdin.write_all(b"\n").await?;
             child.stdin.flush().await
         }
         .await
         {
             self.restart_child(
-                &mut state,
+                state,
                 operation_id,
                 ExecutorEventKind::Exited,
                 format!("executor request write failed: {error}"),
@@ -523,7 +579,7 @@ impl SupervisedEmbeddingService {
             match read {
                 Err(_) => {
                     self.restart_child(
-                        &mut state,
+                        state,
                         operation_id,
                         ExecutorEventKind::Nonresponsive,
                         "executor progress watchdog observed no progress".to_owned(),
@@ -535,7 +591,7 @@ impl SupervisedEmbeddingService {
                 }
                 Ok(Err(error)) => {
                     self.restart_child(
-                        &mut state,
+                        state,
                         operation_id,
                         ExecutorEventKind::Exited,
                         format!("executor response read failed: {error}"),
@@ -547,7 +603,7 @@ impl SupervisedEmbeddingService {
                 }
                 Ok(Ok(0)) => {
                     self.restart_child(
-                        &mut state,
+                        state,
                         operation_id,
                         ExecutorEventKind::Exited,
                         "executor response stream closed".to_owned(),
@@ -566,7 +622,7 @@ impl SupervisedEmbeddingService {
                     // An undecodable line means the child is no longer
                     // speaking the protocol; do not trust the stream again.
                     self.restart_child(
-                        &mut state,
+                        state,
                         operation_id,
                         ExecutorEventKind::Exited,
                         format!("decode executor response failed: {error}"),
@@ -615,7 +671,7 @@ impl SupervisedEmbeddingService {
                     // Restart the child so the next request starts from a
                     // clean protocol state instead of failing forever.
                     self.restart_child(
-                        &mut state,
+                        state,
                         operation_id,
                         ExecutorEventKind::Exited,
                         format!(
