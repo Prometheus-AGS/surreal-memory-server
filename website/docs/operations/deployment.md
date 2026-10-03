@@ -61,6 +61,13 @@ endpoints have no authentication.
 
 Points worth getting right:
 
+- `ProcessType` must be `Standard` for both agents, never `Background`.
+  launchd runs Background jobs at darwin background priority (scheduler
+  priority 4, throttled disk and network I/O). On a loaded host that turned
+  one-row SurrealDB queries into p99 6–15 s stalls and caused the 10 s
+  operation-ledger timeouts in #36; at Standard the same queries take
+  ~16–25 ms. Check with `launchctl print gui/$(id -u)/<label> | grep "spawn type"`:
+  it must not say `background`.
 - `KeepAlive` plus `ThrottleInterval` so a crash loop does not hammer the host.
 - `MODEL_CACHE_DIR` must name the HuggingFace home; `hub` is appended when
   resolved.
