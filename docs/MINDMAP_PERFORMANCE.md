@@ -64,7 +64,7 @@ This means the mindmap has grown too large. Split it into smaller mindmaps or re
 | 1000  | 1500  | **5-30s**     | ~500KB    |
 | 2000+ | 3000+ | **timeout**   | >1MB      |
 
-*Benchmarks on Docker with SurrealDB 3.0.5, RocksDB backend*
+*Historical benchmarks on Docker with SurrealDB 3.0.5, RocksDB backend; not yet re-measured on 3.3.0.*
 
 ## Related Issues
 

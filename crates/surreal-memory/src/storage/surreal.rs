@@ -3482,7 +3482,8 @@ fn chrono_node_id() -> String {
 impl SurrealStorage {
     /// Creates a `SurrealStorage` backed by an **embedded RocksDB in a unique temp directory**.
     /// Each call uses a nanosecond-timestamped path so parallel tests don't collide.
-    /// `mem://` is unavailable in surrealdb 3.0.0 (`kv-mem` requires surrealmx ≥ 0.17).
+    /// `mem://` is unavailable because this crate does not enable surrealdb's
+    /// `kv-mem` feature (connecting reports "Unsupported scheme: memory").
     pub async fn new_mem(
         embedding_service: Arc<dyn crate::embeddings::EmbeddingService>,
     ) -> Result<Self> {
