@@ -147,7 +147,7 @@ async fn search_memories_matches_exact_ranking_across_scopes() {
 
     // Hybrid search stays inside the requested scope.
     let hybrid = storage
-        .hybrid_search_memories(QUERY, Some("u1"), Some("a2"), None, 3, 0.6, 0.4)
+        .hybrid_search_memories(QUERY, Some("u1"), Some("a2"), None, None, 3, 0.6, 0.4)
         .await
         .expect("hybrid search");
     assert!(!hybrid.is_empty(), "hybrid search returned nothing");
