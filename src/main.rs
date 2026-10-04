@@ -619,9 +619,14 @@ async fn run_api_server(
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .context("Failed to bind REST API port")?;
-    axum::serve(listener, router)
-        .await
-        .context("REST API server error")
+    // Connect-info gives handlers the peer address; the rekey_agent_id
+    // operation is refused unless the peer is loopback.
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .context("REST API server error")
 }
 
 #[cfg(test)]

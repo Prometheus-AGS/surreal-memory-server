@@ -159,7 +159,7 @@
         }, "additionalProperties": false
       },
       "ReadinessCapabilities": { "type": "object", "required": ["ledger", "storage", "coordinator", "tokenizer", "model_executor", "search_index"], "properties": { "ledger": { "type": "boolean" }, "storage": { "type": "boolean" }, "coordinator": { "type": "boolean" }, "tokenizer": { "type": "boolean" }, "model_executor": { "type": "boolean" }, "search_index": { "type": "boolean" } }, "additionalProperties": false },
-      "OperationKind": { "type": "string", "enum": ["add_memory", "create_task_stream", "add_task_step", "complete_step"] },
+      "OperationKind": { "type": "string", "enum": ["add_memory", "create_task_stream", "add_task_step", "complete_step", "rekey_agent_id"], "description": "rekey_agent_id re-keys unattributed records (agent_id NONE, NULL or empty) and is accepted only from a loopback peer (403 otherwise)." },
       "OperationState": { "type": "string", "enum": ["accepted", "validated", "blocked", "planned", "processing", "indexed", "committed", "rejected"] },
       "OperationRequest": {
         "type": "object", "required": ["operation_id", "schema_version", "kind", "payload_hash", "payload"],

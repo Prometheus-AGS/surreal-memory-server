@@ -1,6 +1,6 @@
 //! SurrealDB-backed implementation of `MemoryStorage`.
 
-use super::MemoryStorage;
+use super::{MemoryStorage, RekeyReport};
 #[cfg(feature = "palace")]
 use crate::palace::{HitSource, PalaceContext, PalaceStatus, PalaceStorage, UnifiedHit};
 use crate::{
@@ -2093,12 +2093,14 @@ impl MemoryStorage for SurrealStorage {
         user_id: Option<&str>,
         agent_id: Option<&str>,
         session_id: Option<&str>,
-        _categories: Option<&[String]>,
+        categories: Option<&[String]>,
         limit: usize,
     ) -> Result<Vec<Memory>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        // An empty list means "no category filter", not "match nothing".
+        let categories = categories.filter(|list| !list.is_empty());
         let query_emb = self.embed_text(query).await?;
 
         // Nearest neighbours come from the HNSW index with the scope conditions
@@ -2115,6 +2117,9 @@ impl MemoryStorage for SurrealStorage {
         }
         if session_id.is_some() {
             parts.push("session_id = $session_id");
+        }
+        if categories.is_some() {
+            parts.push("categories CONTAINSANY $categories");
         }
         let knn = format!(
             "embedding <|{limit},{ef}|> $query_emb",
@@ -2133,6 +2138,9 @@ impl MemoryStorage for SurrealStorage {
         }
         if let Some(v) = session_id {
             q = q.bind(("session_id", v.to_string()));
+        }
+        if let Some(list) = categories {
+            q = q.bind(("categories", list.to_vec()));
         }
         let candidates = Self::decode_memories(q.await?.take(0)?)?;
 
@@ -2524,13 +2532,16 @@ impl MemoryStorage for SurrealStorage {
         user_id: Option<&str>,
         agent_id: Option<&str>,
         session_id: Option<&str>,
+        categories: Option<&[String]>,
         limit: usize,
         vector_weight: f32,
         bm25_weight: f32,
     ) -> Result<Vec<Memory>> {
-        // Vector branch (uses HNSW index)
+        let categories = categories.filter(|list| !list.is_empty());
+        // Vector branch (uses HNSW index); the category filter applies to both
+        // branches so a filtered search never merges in unfiltered BM25 rows.
         let vec_results = self
-            .search_memories(query, user_id, agent_id, session_id, None, limit * 2)
+            .search_memories(query, user_id, agent_id, session_id, categories, limit * 2)
             .await?;
 
         // BM25 full-text branch
@@ -2543,6 +2554,9 @@ impl MemoryStorage for SurrealStorage {
         }
         if session_id.is_some() {
             scope_parts.push("session_id = $sid".into());
+        }
+        if categories.is_some() {
+            scope_parts.push("categories CONTAINSANY $cats".into());
         }
 
         let db = self.live_db()?;
@@ -2561,6 +2575,9 @@ impl MemoryStorage for SurrealStorage {
         }
         if let Some(v) = session_id {
             q = q.bind(("sid", v.to_string()));
+        }
+        if let Some(list) = categories {
+            q = q.bind(("cats", list.to_vec()));
         }
         let bm25_results: Vec<DbMemory> = q.await?.take(0).unwrap_or_default();
         let bm25_results = Self::decode_memories(bm25_results)?;
@@ -2595,6 +2612,83 @@ impl MemoryStorage for SurrealStorage {
         let mut merged: Vec<(Memory, f32)> = scores.into_values().collect();
         merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         Ok(merged.into_iter().take(limit).map(|(m, _)| m).collect())
+    }
+
+    async fn rekey_unattributed_agent_id(
+        &self,
+        to_agent_id: &str,
+        user_id: Option<&str>,
+        dry_run: bool,
+    ) -> Result<RekeyReport> {
+        let to_agent_id = to_agent_id.trim();
+        if to_agent_id.is_empty() {
+            anyhow::bail!("to_agent_id cannot be empty");
+        }
+        // NONE (absent), NULL and "" are all "unattributed": option<string>
+        // fields may hold either of the first two depending on how the row was
+        // written, and task streams store an absent id as "" (migration v18).
+        let unattributed = "(agent_id IS NONE OR agent_id = NULL OR agent_id = '')";
+        let user_clause = if user_id.is_some() {
+            " AND user_id = $uid"
+        } else {
+            ""
+        };
+        let db = self.live_db()?;
+
+        let mut memory_query = db.query(format!(
+            "SELECT VALUE id FROM memory WHERE {unattributed}{user_clause}"
+        ));
+        if let Some(v) = user_id {
+            memory_query = memory_query.bind(("uid", v.to_string()));
+        }
+        let memory_ids: Vec<surrealdb::types::RecordId> = memory_query.await?.take(0)?;
+
+        let mut stream_query = db.query(format!(
+            "SELECT VALUE id FROM task_stream WHERE {unattributed}{user_clause}"
+        ));
+        if let Some(v) = user_id {
+            stream_query = stream_query.bind(("uid", v.to_string()));
+        }
+        let stream_ids: Vec<surrealdb::types::RecordId> = stream_query.await?.take(0)?;
+
+        let mut report = RekeyReport {
+            dry_run,
+            to_agent_id: to_agent_id.to_owned(),
+            user_id: user_id.map(str::to_owned),
+            memories: memory_ids.len() as u64,
+            task_streams: stream_ids.len() as u64,
+            task_stream_conflicts: 0,
+        };
+        if dry_run {
+            return Ok(report);
+        }
+        if !memory_ids.is_empty() {
+            db.query("UPDATE $ids SET agent_id = $to")
+                .bind(("ids", memory_ids))
+                .bind(("to", to_agent_id.to_owned()))
+                .await?
+                .check()?;
+        }
+        // One statement per stream: a unique-index collision on one row must
+        // not abort the rest.
+        let mut moved = 0u64;
+        for id in stream_ids {
+            let outcome = db
+                .query("UPDATE $id SET agent_id = $to")
+                .bind(("id", id))
+                .bind(("to", to_agent_id.to_owned()))
+                .await
+                .and_then(|response| response.check());
+            match outcome {
+                Ok(_) => moved += 1,
+                Err(error) if error.to_string().to_lowercase().contains("index") => {
+                    report.task_stream_conflicts += 1
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        report.task_streams = moved;
+        Ok(report)
     }
 
     // ── mem0 Advanced ─────────────────────────────────────────────────────────
@@ -3623,7 +3717,7 @@ impl PalaceStorage for SurrealStorage {
 
         // Run all three searches concurrently
         let memory_fut =
-            self.hybrid_search_memories(query, user_id, agent_id, session_id, n, 0.7, 0.3);
+            self.hybrid_search_memories(query, user_id, agent_id, session_id, None, n, 0.7, 0.3);
         let entity_fut = self.semantic_search(query, n, 0.0);
         let palace_ctx = self.palace_context().await?;
         let palace_fut = palace_ctx.search_drawers_structured(query, wing, None, n);

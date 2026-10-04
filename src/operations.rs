@@ -101,7 +101,11 @@ impl OperationRequest {
         }
         if !matches!(
             self.kind.as_str(),
-            "add_memory" | "create_task_stream" | "add_task_step" | "complete_step"
+            "add_memory"
+                | "create_task_stream"
+                | "add_task_step"
+                | "complete_step"
+                | REKEY_AGENT_ID_KIND
         ) {
             anyhow::bail!("unknown operation kind '{}'", self.kind);
         }
@@ -1793,6 +1797,21 @@ impl OperationService {
                         .await?,
                 )?)
             }
+            REKEY_AGENT_ID_KIND => {
+                let payload: RekeyAgentIdPayload =
+                    serde_json::from_value(operation.payload.clone()).map_err(|error| {
+                        PermanentFailure(format!("invalid rekey_agent_id payload: {error}"))
+                    })?;
+                Ok(serde_json::to_value(
+                    self.storage
+                        .rekey_unattributed_agent_id(
+                            &payload.to_agent_id,
+                            payload.user_id.as_deref(),
+                            payload.dry_run,
+                        )
+                        .await?,
+                )?)
+            }
             _ => unreachable!("validated operation kind"),
         }
     }
@@ -1880,6 +1899,39 @@ struct CompleteStepPayload {
     result: Option<String>,
 }
 
+/// Operation kind that re-keys unattributed records (`agent_id` NONE, NULL or
+/// "") to an explicit id. Loopback-only: see `submit_operation`.
+pub const REKEY_AGENT_ID_KIND: &str = "rekey_agent_id";
+
+#[derive(Debug, Deserialize)]
+struct RekeyAgentIdPayload {
+    to_agent_id: String,
+    #[serde(default)]
+    user_id: Option<String>,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// The connecting peer, when the server was started with connect-info
+/// (`into_make_service_with_connect_info`). Absent otherwise.
+pub(crate) struct PeerAddr(pub Option<std::net::SocketAddr>);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for PeerAddr {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(PeerAddr(
+            parts
+                .extensions
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|info| info.0),
+        ))
+    }
+}
+
 fn validate_payload(kind: &str, payload: &Value) -> Result<()> {
     match kind {
         "add_memory" => {
@@ -1902,6 +1954,14 @@ fn validate_payload(kind: &str, payload: &Value) -> Result<()> {
                 serde_json::from_value(payload.clone()).context("invalid complete_step payload")?;
             if request.idempotency_key.trim().is_empty() {
                 anyhow::bail!("idempotency_key cannot be empty");
+            }
+            Ok(())
+        }
+        REKEY_AGENT_ID_KIND => {
+            let request: RekeyAgentIdPayload = serde_json::from_value(payload.clone())
+                .context("invalid rekey_agent_id payload")?;
+            if request.to_agent_id.trim().is_empty() {
+                anyhow::bail!("to_agent_id cannot be empty");
             }
             Ok(())
         }
@@ -2029,8 +2089,22 @@ async fn reject_operation(
 
 async fn submit_operation(
     State(state): State<AppState>,
+    PeerAddr(peer): PeerAddr,
     Json(request): Json<OperationRequest>,
 ) -> Result<(StatusCode, Json<OperationReceipt>), ApiFailure> {
+    // Re-keying rewrites ownership across the whole store, so it is refused
+    // unless the request provably comes from this host. A server started
+    // without connect-info has no peer address and fails closed.
+    if request.kind == REKEY_AGENT_ID_KIND && !peer.is_some_and(|addr| addr.ip().is_loopback()) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ApiError {
+                error: format!(
+                    "{REKEY_AGENT_ID_KIND} is accepted only from a loopback peer; run it on the host"
+                ),
+            }),
+        ));
+    }
     match state.operations.submit(request).await {
         Ok((receipt, created)) => Ok((
             if created {
