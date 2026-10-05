@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Surreal Memory Durable Operations API",
-    "version": "1.10.0",
+    "version": "1.10.1",
     "description": "Receipt-driven ingestion for deterministic, replayable memory and task operations. POST acceptance is the durability boundary; terminal success is proven only by a committed receipt."
   },
   "servers": [
@@ -16,7 +16,7 @@
         "responses": {
           "200": {
             "description": "The HTTP process is live; this does not prove ingestion readiness.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Health" }, "example": { "service": "surreal-memory-server", "status": "ok", "version": "1.10.0" } } }
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Health" }, "example": { "service": "surreal-memory-server", "status": "ok", "version": "1.10.1" } } }
           }
         }
       }
@@ -186,7 +186,7 @@
       },
       "OperationEvent": { "type": "object", "required": ["operation_id", "sequence", "from_state", "to_state", "detail", "executor_generation", "occurred_at"], "properties": { "operation_id": { "type": "string" }, "sequence": { "type": "integer", "format": "uint64" }, "from_state": { "type": ["string", "null"] }, "to_state": { "type": "string" }, "detail": { "type": ["object", "array", "string", "number", "boolean", "null"] }, "executor_generation": { "type": "integer", "format": "uint64" }, "occurred_at": { "type": "string", "format": "date-time" } }, "additionalProperties": false },
       "Error": { "type": "object", "required": ["error"], "properties": { "error": { "type": "string" } }, "additionalProperties": false },
-      "OperationStats": { "type": "object", "required": ["counts", "nonterminal", "paused", "oldest_nonterminal"], "properties": { "counts": { "type": "object", "additionalProperties": { "type": "integer", "format": "uint64" }, "description": "Operation count per state; states with no operations are omitted." }, "nonterminal": { "type": "integer", "format": "uint64" }, "paused": { "type": "integer", "format": "uint64", "description": "Non-terminal operations whose last processing attempt failed." }, "oldest_nonterminal": { "oneOf": [ { "type": "null" }, { "type": "object", "required": ["operation_id", "state", "created_at", "updated_at", "age_seconds"], "properties": { "operation_id": { "type": "string" }, "state": { "$ref": "#/components/schemas/OperationState" }, "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }, "age_seconds": { "type": "integer", "format": "uint64" } }, "additionalProperties": false } ] } }, "additionalProperties": false },
+      "OperationStats": { "type": "object", "required": ["counts", "nonterminal", "paused", "oldest_nonterminal"], "properties": { "counts": { "type": "object", "additionalProperties": { "type": "integer", "format": "uint64" }, "description": "Operation count per state; states with no operations are omitted." }, "nonterminal": { "type": "integer", "format": "uint64" }, "paused": { "type": "integer", "format": "uint64", "description": "Non-terminal operations whose last processing attempt failed." }, "oldest_nonterminal": { "oneOf": [ { "type": "null" }, { "type": "object", "required": ["operation_id", "state", "created_at", "updated_at", "age_seconds"], "properties": { "operation_id": { "type": "string" }, "state": { "$ref": "#/components/schemas/OperationState" }, "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }, "age_seconds": { "type": "integer", "format": "uint64" } }, "additionalProperties": false } ] }, "query_embed_cache": { "type": "object", "description": "Search query-embedding cache counters. hits counts searches answered without computing an embedding; misses counts searches that computed one. capacity 0 means the cache is disabled (SURREAL_MEMORY_QUERY_EMBED_CACHE).", "required": ["capacity", "entries", "hits", "misses"], "properties": { "capacity": { "type": "integer", "format": "uint64" }, "entries": { "type": "integer", "format": "uint64" }, "hits": { "type": "integer", "format": "uint64" }, "misses": { "type": "integer", "format": "uint64" } }, "additionalProperties": false } }, "additionalProperties": false },
       "RejectRequest": { "type": "object", "required": ["reason"], "properties": { "reason": { "type": "string", "minLength": 1, "maxLength": 2000, "description": "Why the operation is being dead-lettered; stored as the receipt error." } }, "additionalProperties": false }
     },
     "responses": {

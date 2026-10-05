@@ -27,7 +27,7 @@ pub use mindmap::{ExportFormat, MapType, MindMap, MindMapEdge, MindMapNode};
 pub use model_profiles::{MODEL_PROFILES, ModelProfile, profile_for};
 pub use storage::{MemoryStorage, RekeyReport};
 pub use storage::auth::SurrealAuthLevel;
-pub use storage::surreal::{RetryConfig, SurrealConfig, SurrealStorage};
+pub use storage::surreal::{QueryEmbedCacheStats, RetryConfig, SurrealConfig, SurrealStorage};
 pub use task_step::{TaskStep, TaskStepStatus};
 pub use task_stream::{ContextWindow, TaskStream, TaskStreamStatus};
 
