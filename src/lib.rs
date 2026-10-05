@@ -6,6 +6,7 @@ pub mod config;
 pub mod contracts;
 pub mod embeddings;
 pub mod executor;
+pub mod hook;
 pub mod mcp;
 pub mod operations;
 pub mod storage;
