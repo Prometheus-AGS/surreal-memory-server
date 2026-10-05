@@ -1424,6 +1424,78 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
         Ok(embedding)
     }
 
+    /// Nearest-neighbour search for an embedding the caller already has. The
+    /// write paths' duplicate checks use this with the content embedding they
+    /// just computed, so they neither embed twice nor touch the query cache.
+    async fn search_memories_with_embedding(
+        &self,
+        query_emb: Vec<f32>,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+        session_id: Option<&str>,
+        categories: Option<&[String]>,
+        limit: usize,
+    ) -> Result<Vec<Memory>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let categories = categories.filter(|list| !list.is_empty());
+
+        // Nearest neighbours come from the HNSW index with the scope conditions
+        // applied during the search, so only `limit` rows cross the wire.
+        // Fetching the whole scope and ranking here made the response grow
+        // with the table until it passed the SDK's 64 MiB WebSocket message
+        // limit, which drops the socket and fails every in-flight request.
+        let mut parts: Vec<&str> = vec![];
+        if user_id.is_some() {
+            parts.push("user_id = $user_id");
+        }
+        if agent_id.is_some() {
+            parts.push("agent_id = $agent_id");
+        }
+        if session_id.is_some() {
+            parts.push("session_id = $session_id");
+        }
+        if categories.is_some() {
+            parts.push("categories CONTAINSANY $categories");
+        }
+        let knn = format!(
+            "embedding <|{limit},{ef}|> $query_emb",
+            ef = limit.max(KNN_MIN_EF)
+        );
+        parts.push(&knn);
+        let sql = format!("SELECT * FROM memory WHERE {}", parts.join(" AND "));
+
+        let db = self.live_db()?;
+        let mut q = db.query(sql).bind(("query_emb", query_emb.clone()));
+        if let Some(v) = user_id {
+            q = q.bind(("user_id", v.to_string()));
+        }
+        if let Some(v) = agent_id {
+            q = q.bind(("agent_id", v.to_string()));
+        }
+        if let Some(v) = session_id {
+            q = q.bind(("session_id", v.to_string()));
+        }
+        if let Some(list) = categories {
+            q = q.bind(("categories", list.to_vec()));
+        }
+        let candidates = Self::decode_memories(q.await?.take(0)?)?;
+
+        let mut scored: Vec<(f32, Memory)> = candidates
+            .into_iter()
+            .filter_map(|m| {
+                let emb = m.embedding.as_deref()?;
+                let sim = Self::cosine_similarity(&query_emb, emb);
+                Some((sim, m))
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
+        scored.truncate(limit);
+        Ok(scored.into_iter().map(|(_, m)| m).collect())
+    }
+
     /// Replace the query-embedding cache with one of `capacity` entries
     /// (0 disables it). Intended for construction time; the cache starts empty.
     #[must_use]
@@ -1969,8 +2041,8 @@ impl MemoryStorage for SurrealStorage {
 
         // Semantic deduplication at 0.92 threshold
         let candidates = self
-            .search_memories(
-                &memory.content,
+            .search_memories_with_embedding(
+                emb.clone(),
                 memory.user_id.as_deref(),
                 memory.agent_id.as_deref(),
                 memory.session_id.as_deref(),
@@ -2210,60 +2282,10 @@ impl MemoryStorage for SurrealStorage {
         // An empty list means "no category filter", not "match nothing".
         let categories = categories.filter(|list| !list.is_empty());
         let query_emb = self.embed_query(query).await?;
-
-        // Nearest neighbours come from the HNSW index with the scope conditions
-        // applied during the search, so only `limit` rows cross the wire.
-        // Fetching the whole scope and ranking here made the response grow
-        // with the table until it passed the SDK's 64 MiB WebSocket message
-        // limit, which drops the socket and fails every in-flight request.
-        let mut parts: Vec<&str> = vec![];
-        if user_id.is_some() {
-            parts.push("user_id = $user_id");
-        }
-        if agent_id.is_some() {
-            parts.push("agent_id = $agent_id");
-        }
-        if session_id.is_some() {
-            parts.push("session_id = $session_id");
-        }
-        if categories.is_some() {
-            parts.push("categories CONTAINSANY $categories");
-        }
-        let knn = format!(
-            "embedding <|{limit},{ef}|> $query_emb",
-            ef = limit.max(KNN_MIN_EF)
-        );
-        parts.push(&knn);
-        let sql = format!("SELECT * FROM memory WHERE {}", parts.join(" AND "));
-
-        let db = self.live_db()?;
-        let mut q = db.query(sql).bind(("query_emb", query_emb.clone()));
-        if let Some(v) = user_id {
-            q = q.bind(("user_id", v.to_string()));
-        }
-        if let Some(v) = agent_id {
-            q = q.bind(("agent_id", v.to_string()));
-        }
-        if let Some(v) = session_id {
-            q = q.bind(("session_id", v.to_string()));
-        }
-        if let Some(list) = categories {
-            q = q.bind(("categories", list.to_vec()));
-        }
-        let candidates = Self::decode_memories(q.await?.take(0)?)?;
-
-        let mut scored: Vec<(f32, Memory)> = candidates
-            .into_iter()
-            .filter_map(|m| {
-                let emb = m.embedding.as_deref()?;
-                let sim = Self::cosine_similarity(&query_emb, emb);
-                Some((sim, m))
-            })
-            .collect();
-
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
-        scored.truncate(limit);
-        Ok(scored.into_iter().map(|(_, m)| m).collect())
+        self.search_memories_with_embedding(
+            query_emb, user_id, agent_id, session_id, categories, limit,
+        )
+        .await
     }
 
     async fn get_memory_history(&self, memory_id: &str) -> Result<Vec<MemoryHistory>> {
@@ -2359,8 +2381,8 @@ impl MemoryStorage for SurrealStorage {
         // tokens are already counted in `total_tokens`, so we must NOT bump
         // the counter again.
         let candidates = self
-            .search_memories(
-                &memory.content,
+            .search_memories_with_embedding(
+                embedding.clone(),
                 memory.user_id.as_deref(),
                 memory.agent_id.as_deref(),
                 memory.session_id.as_deref(),
