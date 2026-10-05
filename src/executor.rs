@@ -56,6 +56,8 @@ enum ExecutorMessage {
         model_revision: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dimensions: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_namespace: Option<String>,
     },
     Progress {
         request_id: u64,
@@ -248,6 +250,9 @@ pub struct SupervisedEmbeddingService {
     events_tx: broadcast::Sender<ExecutorEvent>,
     child_env: Vec<(String, String)>,
     expected_identity: Option<ExecutorIdentity>,
+    /// First worker's verified identity, including its effective embedding
+    /// configuration. `None` is a legacy/unknown worker and disables caching.
+    cache_namespace: std::sync::OnceLock<Option<String>>,
 }
 
 impl SupervisedEmbeddingService {
@@ -297,6 +302,7 @@ impl SupervisedEmbeddingService {
             events_tx,
             child_env,
             expected_identity,
+            cache_namespace: std::sync::OnceLock::new(),
         }
     }
 
@@ -403,6 +409,7 @@ impl SupervisedEmbeddingService {
                         model_id,
                         model_revision,
                         dimensions,
+                        cache_namespace,
                     } => {
                         if let Some(expected) = &self.expected_identity {
                             expected.validate_ready(
@@ -412,6 +419,26 @@ impl SupervisedEmbeddingService {
                                 model_revision.as_deref(),
                                 dimensions,
                             )?;
+                        }
+                        let namespace = self.expected_identity.as_ref().and_then(|identity| {
+                            cache_namespace
+                                .filter(|value| !value.is_empty())
+                                .map(|namespace| {
+                                    serde_json::json!([
+                                        "supervised", EXECUTOR_PROTOCOL_VERSION,
+                                        &identity.backend, &identity.model_id,
+                                        &identity.model_revision, identity.dimensions, namespace
+                                    ])
+                                    .to_string()
+                                })
+                        });
+                        // A replacement child must use the same identity as the
+                        // first one, or existing query values would become stale.
+                        // Missing identity is also sticky: never infer it from width.
+                        if self.cache_namespace.get_or_init(|| namespace.clone()) != &namespace {
+                            anyhow::bail!(
+                                "executor cache identity changed; construct a new embedding service and cache"
+                            );
                         }
                     }
                     message => anyhow::bail!(
@@ -825,6 +852,10 @@ impl EmbeddingService for SupervisedEmbeddingService {
         }
     }
 
+    fn cache_namespace(&self) -> Option<&str> {
+        self.cache_namespace.get().and_then(|value| value.as_deref())
+    }
+
     fn dimensions(&self) -> usize {
         self.dimensions
     }
@@ -984,6 +1015,7 @@ pub async fn run_embedding_executor() -> Result<()> {
             model_id: Some(identity.model_id),
             model_revision: Some(identity.model_revision),
             dimensions: Some(identity.dimensions),
+            cache_namespace: service.cache_namespace().map(str::to_owned),
         },
     )
     .await?;

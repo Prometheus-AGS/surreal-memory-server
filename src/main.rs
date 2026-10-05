@@ -6,6 +6,7 @@ use surreal_memory_server::{
     config::{Config, LocalEmbeddingBackend},
     embeddings::{self, EmbeddingService, create_embedding_service},
     executor::{ExecutorIdentity, SupervisedEmbeddingService, run_embedding_executor},
+    hook::{self, HookEvent},
     mcp::MemoryMcpServer,
     storage::{MemoryStorage, create_storage},
     workers,
@@ -19,6 +20,8 @@ enum Command {
     Serve,
     RepairData { apply: bool },
     EmbeddingExecutor,
+    Hook(HookEvent),
+    Statusline,
     Version,
 }
 
@@ -80,6 +83,26 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Hook/statusline client mode runs BEFORE logging/storage/embedding
+    // initialization: it only talks to a running server over HTTP, must start
+    // fast, and must never break the harness — every failure is a stderr
+    // diagnostic plus exit 0.
+    match command {
+        Command::Hook(event) => {
+            if let Err(error) = hook::run_hook(event).await {
+                eprintln!("surreal-memory hook: {error:#}");
+            }
+            return Ok(());
+        }
+        Command::Statusline => {
+            if let Err(error) = hook::statusline().await {
+                eprintln!("surreal-memory statusline: {error:#}");
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
+
     init_logging();
     install_panic_hook();
 
@@ -91,7 +114,9 @@ async fn main() -> Result<()> {
         Command::EmbeddingExecutor => {
             return run_embedding_executor().await;
         }
-        Command::Version => unreachable!("version exits before runtime initialization"),
+        Command::Hook(_) | Command::Statusline | Command::Version => {
+            unreachable!("client-mode commands return before runtime initialization")
+        }
     }
 
     tracing::info!(
@@ -343,6 +368,19 @@ where
             Ok(Command::RepairData { apply })
         }
         "embedding-executor" => Ok(Command::EmbeddingExecutor),
+        "hook" => {
+            let event = match args.get(1).map(String::as_str) {
+                Some("session-start") if args.len() == 2 => HookEvent::SessionStart,
+                Some("pre-compact") if args.len() == 2 => HookEvent::PreCompact,
+                Some("session-end") if args.len() == 2 => HookEvent::SessionEnd,
+                _ => anyhow::bail!(
+                    "Usage: surreal-memory-server hook [session-start|pre-compact|session-end]"
+                ),
+            };
+            Ok(Command::Hook(event))
+        }
+        "statusline" if args.len() == 1 => Ok(Command::Statusline),
+        "statusline" => anyhow::bail!("Usage: surreal-memory-server statusline"),
         other => anyhow::bail!("Unknown command '{}'", other),
     }
 }
