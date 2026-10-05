@@ -17,11 +17,13 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde::{Serialize, de::DeserializeOwned};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::{cmp::Ordering, collections::HashMap, sync::Arc};
 use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
 use surrealdb::types::{Datetime, RecordId, RecordIdKey};
 use surrealdb_types::{QueryError, SurrealValue, Value};
+use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 /// Token budget constants per model family. Extend via config in Phase 3.
@@ -58,8 +60,75 @@ pub struct SurrealStorage {
     /// "serialization failure" into honest backpressure. `None` in
     /// server mode (the remote SurrealDB handles its own scheduling).
     embedded_semaphore: Option<Arc<tokio::sync::Semaphore>>,
+    /// Bounded cache of query embeddings. Only `search_memories` reads or
+    /// fills it; every write path embeds directly.
+    query_embed_cache: QueryEmbedCache,
     #[cfg(feature = "palace")]
     palace: tokio::sync::OnceCell<PalaceContext>,
+}
+
+/// Environment variable holding the query-embedding cache capacity.
+pub const QUERY_EMBED_CACHE_ENV: &str = "SURREAL_MEMORY_QUERY_EMBED_CACHE";
+/// Default number of cached query embeddings.
+const DEFAULT_QUERY_EMBED_CACHE_CAPACITY: usize = 512;
+
+/// Point-in-time counters of the query-embedding cache.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueryEmbedCacheStats {
+    /// Configured capacity; 0 means the cache is disabled.
+    pub capacity: usize,
+    /// Entries currently cached.
+    pub entries: usize,
+    /// Searches answered without computing an embedding.
+    pub hits: u64,
+    /// Searches that computed an embedding.
+    pub misses: u64,
+}
+
+/// Bounded query-embedding cache with hit/miss counters. `cache` is `None`
+/// when the capacity is 0.
+struct QueryEmbedCache {
+    capacity: usize,
+    cache: Option<quick_cache::sync::Cache<String, Vec<f32>>>,
+    hits: AtomicU64,
+    misses: AtomicU64,
+}
+
+impl QueryEmbedCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            cache: (capacity > 0).then(|| quick_cache::sync::Cache::new(capacity)),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+        }
+    }
+
+    fn from_env() -> Self {
+        let capacity = std::env::var(QUERY_EMBED_CACHE_ENV)
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(DEFAULT_QUERY_EMBED_CACHE_CAPACITY);
+        Self::new(capacity)
+    }
+
+    fn stats(&self) -> QueryEmbedCacheStats {
+        QueryEmbedCacheStats {
+            capacity: self.capacity,
+            entries: self.cache.as_ref().map_or(0, |cache| cache.len()),
+            hits: self.hits.load(AtomicOrdering::Relaxed),
+            misses: self.misses.load(AtomicOrdering::Relaxed),
+        }
+    }
+
+    /// NFC-normalise and collapse whitespace so trivially different spellings
+    /// of one query share an entry. The embedding identity (dimensions) leads
+    /// the key because one storage instance serves a single embedding service.
+    fn key(dimensions: usize, query: &str) -> String {
+        let normalised: String = query.nfc().collect();
+        let collapsed = normalised.split_whitespace().collect::<Vec<_>>().join(" ");
+        format!("{dimensions}\u{1f}{collapsed}")
+    }
 }
 
 // ── Retry Configuration ───────────────────────────────────────────────────────
@@ -739,6 +808,7 @@ impl SurrealStorage {
             connection_info,
             embedding_service,
             embedded_semaphore,
+            query_embed_cache: QueryEmbedCache::from_env(),
             #[cfg(feature = "palace")]
             palace: tokio::sync::OnceCell::new(),
         })
@@ -1327,6 +1397,43 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
 
     async fn embed_text(&self, text: &str) -> Result<Vec<f32>> {
         self.embedding_service.embed(text).await
+    }
+
+    /// Embed a search query through the bounded cache. Concurrent identical
+    /// misses share one embedding call. Used only by `search_memories`.
+    async fn embed_query(&self, query: &str) -> Result<Vec<f32>> {
+        let cache = &self.query_embed_cache;
+        let Some(store) = cache.cache.as_ref() else {
+            cache.misses.fetch_add(1, AtomicOrdering::Relaxed);
+            return self.embed_text(query).await;
+        };
+        let key = QueryEmbedCache::key(self.embedding_service.dimensions(), query);
+        let computed = AtomicBool::new(false);
+        let embedding = store
+            .get_or_insert_async(&key, async {
+                computed.store(true, AtomicOrdering::Relaxed);
+                self.embed_text(query).await
+            })
+            .await?;
+        if computed.load(AtomicOrdering::Relaxed) {
+            cache.misses.fetch_add(1, AtomicOrdering::Relaxed);
+        } else {
+            cache.hits.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+        Ok(embedding)
+    }
+
+    /// Replace the query-embedding cache with one of `capacity` entries
+    /// (0 disables it). Intended for construction time; the cache starts empty.
+    #[must_use]
+    pub fn with_query_embed_cache_capacity(mut self, capacity: usize) -> Self {
+        self.query_embed_cache = QueryEmbedCache::new(capacity);
+        self
+    }
+
+    /// Hit/miss counters of the query-embedding cache.
+    pub fn query_embed_cache_stats(&self) -> QueryEmbedCacheStats {
+        self.query_embed_cache.stats()
     }
 
     fn sanitize_explicit_record_content<P>(data: P) -> Value
@@ -2101,7 +2208,7 @@ impl MemoryStorage for SurrealStorage {
         }
         // An empty list means "no category filter", not "match nothing".
         let categories = categories.filter(|list| !list.is_empty());
-        let query_emb = self.embed_text(query).await?;
+        let query_emb = self.embed_query(query).await?;
 
         // Nearest neighbours come from the HNSW index with the scope conditions
         // applied during the search, so only `limit` rows cross the wire.
@@ -3612,6 +3719,7 @@ impl SurrealStorage {
             connection_info,
             embedding_service,
             embedded_semaphore,
+            query_embed_cache: QueryEmbedCache::from_env(),
             #[cfg(feature = "palace")]
             palace: tokio::sync::OnceCell::new(),
         })

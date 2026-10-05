@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use surreal_memory::{
-    EmbeddingService, MemoryStorage, SurrealStorage, TaskStep, TaskStream,
+    EmbeddingService, MemoryStorage, QueryEmbedCacheStats, SurrealStorage, TaskStep, TaskStream,
     embeddings::{EmbeddingPlanPart, ExecutorEvent, ExecutorEventKind, ExecutorSnapshot},
 };
 use surrealdb::types::{Datetime, RecordId};
@@ -156,6 +156,9 @@ pub struct OperationStats {
     /// Non-terminal operations whose last processing attempt failed.
     pub paused: u64,
     pub oldest_nonterminal: Option<OldestOperation>,
+    /// Hit/miss counters of the search query-embedding cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_embed_cache: Option<QueryEmbedCacheStats>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -902,6 +905,10 @@ impl OperationService {
             nonterminal,
             paused: paused.first().map_or(0, |row| row.count),
             oldest_nonterminal,
+            query_embed_cache: self
+                .surreal()
+                .ok()
+                .map(SurrealStorage::query_embed_cache_stats),
         })
     }
 

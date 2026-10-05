@@ -6350,6 +6350,7 @@ dependencies = [
  "dirs 6.0.0",
  "hf-hub 0.5.0",
  "mempalace-core",
+ "quick_cache",
  "rand 0.10.1",
  "reqwest 0.13.2",
  "serde",
@@ -6363,12 +6364,13 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "unicode-normalization",
  "uuid",
 ]
 
 [[package]]
 name = "surreal-memory-server"
-version = "1.10.0"
+version = "1.10.1"
 dependencies = [
  "anyhow",
  "arc-swap",
