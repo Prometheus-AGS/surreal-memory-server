@@ -1410,6 +1410,7 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
         let key = QueryEmbedCache::key(self.embedding_service.dimensions(), query);
         let computed = AtomicBool::new(false);
         let embedding = store
+            // get_or_insert_async runs get_value_or_guard_async: concurrent identical misses embed once.
             .get_or_insert_async(&key, async {
                 computed.store(true, AtomicOrdering::Relaxed);
                 self.embed_text(query).await
