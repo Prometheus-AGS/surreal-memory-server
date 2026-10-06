@@ -1,7 +1,7 @@
 //! Bridge from mempalace-core's `Embedder` to surreal-memory's `EmbeddingService`.
 //!
 //! `FastEmbedService` wraps a `mempalace_core::embedder::FastEmbedder` (384-dim
-//! all-MiniLM-L6-v2) and exposes it as an `EmbeddingService` so the rest of
+//! BAAI/bge-small-en-v1.5) and exposes it as an `EmbeddingService` so the rest of
 //! surreal-memory can use it for HNSW indexing and hybrid search.
 
 use crate::embeddings::{Embedding, EmbeddingService};
@@ -17,11 +17,12 @@ const FASTEMBED_INIT_TIMEOUT: Duration = Duration::from_secs(300);
 /// Wraps a mempalace-core `Embedder` as a surreal-memory `EmbeddingService`.
 pub struct FastEmbedService {
     inner: Arc<dyn mempalace_core::embedder::Embedder>,
+    cache_namespace: Option<&'static str>,
 }
 
 impl FastEmbedService {
-    /// Create a new service backed by the default FastEmbed model (all-MiniLM-L6-v2, 384 dims).
-    /// Downloads the model on first call (~25 MB) then caches it locally.
+    /// Create a new service backed by the default FastEmbed model (BAAI/bge-small-en-v1.5, 384 dims).
+    /// Downloads the model during initialization and caches it locally.
     ///
     /// The download is bounded by `FASTEMBED_INIT_TIMEOUT` so a cold cache or
     /// unreachable network fails fast with a typed error instead of hanging the
@@ -41,6 +42,13 @@ impl FastEmbedService {
         .context("Failed to initialize FastEmbed model")?;
         Ok(Self {
             inner: Arc::new(embedder),
+            // mempalace uses InitOptions::default(); the pinned fastembed 4.9.1
+            // default is BGESmallENV15, despite mempalace's MiniLM comments.
+            cache_namespace: Some(concat!(
+                "fastembed:4.9.1:BAAI/bge-small-en-v1.5:",
+                "Xenova/bge-small-en-v1.5/onnx/model.onnx:",
+                "default-init:max-length=512:cls:l2"
+            )),
         })
     }
 
@@ -48,6 +56,7 @@ impl FastEmbedService {
     pub fn noop() -> Self {
         Self {
             inner: Arc::new(mempalace_core::embedder::NoOpEmbedder),
+            cache_namespace: None,
         }
     }
 
@@ -66,6 +75,10 @@ impl EmbeddingService for FastEmbedService {
     async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Embedding>> {
         let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
         self.inner.embed_batch(&refs).await
+    }
+
+    fn cache_namespace(&self) -> Option<&str> {
+        self.cache_namespace
     }
 
     fn dimensions(&self) -> usize {

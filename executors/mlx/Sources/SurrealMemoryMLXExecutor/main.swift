@@ -65,12 +65,20 @@ enum SurrealMemoryMLXExecutorMain {
 
     private static func runProtocol(service: MLXEmbeddingService) async throws {
         let writer = OutputWriter()
+        // Report this worker's effective model and fixed inference settings.
+        // Cache paths and credentials are deliberately excluded.
+        let namespace = try JSONSerialization.data(withJSONObject: [
+            "mlx", service.settings.modelID, service.settings.modelRevision,
+            service.settings.dimensions,
+            "mean;normalize=true;applyLayerNorm=false;tokenizer-special-tokens",
+        ])
         try writer.write(
             .ready(
                 backend: "mlx",
                 modelID: service.settings.modelID,
                 modelRevision: service.settings.modelRevision,
-                dimensions: service.settings.dimensions
+                dimensions: service.settings.dimensions,
+                cacheNamespace: String(decoding: namespace, as: UTF8.self)
             )
         )
 

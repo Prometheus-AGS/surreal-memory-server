@@ -3790,7 +3790,7 @@ dependencies = [
 [[package]]
 name = "mempalace-core"
 version = "0.1.0"
-source = "git+https://github.com/GQAdonis/mempalace-rs.git?branch=main#f8a1b4c86ef28f8f8070142d600e650f187c538d"
+source = "git+https://github.com/GQAdonis/mempalace-rs.git?rev=f8a1b4c86ef28f8f8070142d600e650f187c538d#f8a1b4c86ef28f8f8070142d600e650f187c538d"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6370,7 +6370,7 @@ dependencies = [
 
 [[package]]
 name = "surreal-memory-server"
-version = "1.10.1"
+version = "1.10.2"
 dependencies = [
  "anyhow",
  "arc-swap",
