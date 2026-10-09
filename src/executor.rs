@@ -128,6 +128,11 @@ impl Drop for InFlightRequest<'_> {
 /// fix.
 struct RequestFailure {
     retriable: bool,
+    /// Replay on the restarted child even for operation-scoped callers, which
+    /// otherwise observe the failure and are resumed by the operations layer.
+    /// Only set when the failure happened inside the embedding computation, so
+    /// no ledger write can have been skipped or half-applied.
+    replay_for_operations: bool,
     error: anyhow::Error,
 }
 
@@ -135,6 +140,7 @@ impl RequestFailure {
     fn retriable(error: anyhow::Error) -> Self {
         Self {
             retriable: true,
+            replay_for_operations: false,
             error,
         }
     }
@@ -142,9 +148,27 @@ impl RequestFailure {
     fn fatal(error: anyhow::Error) -> Self {
         Self {
             retriable: false,
+            replay_for_operations: false,
             error,
         }
     }
+
+    fn replayable(error: anyhow::Error) -> Self {
+        Self {
+            retriable: true,
+            replay_for_operations: true,
+            error,
+        }
+    }
+}
+
+/// True when the child reports a Metal device fault. candle-metal-kernels
+/// unwraps pipeline compilation, so a transient `MTLCompilerService` outage
+/// panics while holding a lock and leaves it poisoned for the life of that
+/// process; every later embed then fails with "Metal error ... poisoned lock".
+/// Retrying on the same child cannot succeed.
+fn is_metal_device_fault(error: &str) -> bool {
+    error.contains("Metal error")
 }
 
 #[derive(Clone)]
@@ -250,6 +274,9 @@ pub struct SupervisedEmbeddingService {
     events_tx: broadcast::Sender<ExecutorEvent>,
     child_env: Vec<(String, String)>,
     expected_identity: Option<ExecutorIdentity>,
+    /// Set once a child reports a Metal device fault; every later child is
+    /// started with `LOCAL_EMBEDDING_DEVICE=cpu` so it cannot hit it again.
+    force_cpu: AtomicBool,
     /// First worker's verified identity, including its effective embedding
     /// configuration. `None` is a legacy/unknown worker and disables caching.
     cache_namespace: std::sync::OnceLock<Option<String>>,
@@ -302,6 +329,7 @@ impl SupervisedEmbeddingService {
             events_tx,
             child_env,
             expected_identity,
+            force_cpu: AtomicBool::new(false),
             cache_namespace: std::sync::OnceLock::new(),
         }
     }
@@ -366,6 +394,9 @@ impl SupervisedEmbeddingService {
             .kill_on_drop(true);
         for (name, value) in &self.child_env {
             command.env(name, value);
+        }
+        if self.force_cpu.load(Ordering::SeqCst) {
+            command.env("LOCAL_EMBEDDING_DEVICE", "cpu");
         }
         let mut child = command.spawn().with_context(|| {
             format!(
@@ -435,7 +466,11 @@ impl SupervisedEmbeddingService {
                         // A replacement child must use the same identity as the
                         // first one, or existing query values would become stale.
                         // Missing identity is also sticky: never infer it from width.
-                        if self.cache_namespace.get_or_init(|| namespace.clone()) != &namespace {
+                        // The one sanctioned change is the Metal-fault fallback to
+                        // cpu, after which `cache_namespace()` reports no identity.
+                        let identity_changed =
+                            self.cache_namespace.get_or_init(|| namespace.clone()) != &namespace;
+                        if identity_changed && !self.force_cpu.load(Ordering::SeqCst) {
                             anyhow::bail!(
                                 "executor cache identity changed; construct a new embedding service and cache"
                             );
@@ -515,11 +550,15 @@ impl SupervisedEmbeddingService {
         // desynchronization; request_once has already restarted the executor
         // child at that point, and embedding is side-effect free.
         // Operation-scoped callers are instead resumed by the operations
-        // layer through the durable ledger, so they must observe the failure.
+        // layer through the durable ledger, so they must observe the failure,
+        // except when the failure is replayable: a Metal device fault inside
+        // the embedding computation, where a CPU child can simply redo it.
         let retry_on_desync = operation_id.is_none();
         match self.request_once(operation_id, &command).await {
             Ok(result) => Ok(result),
-            Err(failure) if failure.retriable && retry_on_desync => {
+            Err(failure)
+                if failure.retriable && (retry_on_desync || failure.replay_for_operations) =>
+            {
                 self.emit(
                     operation_id,
                     self.current_generation.load(Ordering::SeqCst),
@@ -688,6 +727,19 @@ impl SupervisedEmbeddingService {
                         ExecutorEventKind::Error,
                         Some(error.clone()),
                     );
+                    if is_metal_device_fault(&error) {
+                        self.force_cpu.store(true, Ordering::SeqCst);
+                        self.restart_child(
+                            state,
+                            operation_id,
+                            ExecutorEventKind::Exited,
+                            format!("metal device fault; restarting on cpu: {error}"),
+                        )
+                        .await?;
+                        return Err(RequestFailure::replayable(anyhow::anyhow!(
+                            "embedding executor generation {generation} hit a Metal device fault and restarted on cpu: {error}"
+                        )));
+                    }
                     return Err(RequestFailure::fatal(anyhow::anyhow!(
                         "embedding executor failed: {error}"
                     )));
@@ -853,7 +905,15 @@ impl EmbeddingService for SupervisedEmbeddingService {
     }
 
     fn cache_namespace(&self) -> Option<&str> {
-        self.cache_namespace.get().and_then(|value| value.as_deref())
+        // After a Metal-fault fallback the effective device differs from the one
+        // the first child's namespace described, and a device change is a
+        // configuration change. Bypass the query cache until the service is rebuilt.
+        if self.force_cpu.load(Ordering::SeqCst) {
+            return None;
+        }
+        self.cache_namespace
+            .get()
+            .and_then(|value| value.as_deref())
     }
 
     fn dimensions(&self) -> usize {
@@ -948,7 +1008,7 @@ pub async fn run_embedding_executor() -> Result<()> {
 
     let (service, identity): (Arc<dyn EmbeddingService>, ExecutorIdentity) = if fixture {
         (
-            Arc::new(FixtureEmbeddingService),
+            Arc::new(FixtureEmbeddingService::new()),
             ExecutorIdentity {
                 backend: "fixture".to_owned(),
                 model_id: "fixture".to_owned(),
@@ -1093,12 +1153,29 @@ async fn write_message(
     Ok(())
 }
 
-struct FixtureEmbeddingService;
+struct FixtureEmbeddingService {
+    cache_namespace: String,
+}
+
+impl FixtureEmbeddingService {
+    /// Like Candle's namespace, the fixture's depends on the configured device.
+    fn new() -> Self {
+        let device = std::env::var("LOCAL_EMBEDDING_DEVICE").unwrap_or_default();
+        Self {
+            cache_namespace: serde_json::json!(["fixture", device]).to_string(),
+        }
+    }
+}
 
 #[async_trait]
 impl EmbeddingService for FixtureEmbeddingService {
+    fn cache_namespace(&self) -> Option<&str> {
+        Some(&self.cache_namespace)
+    }
+
     async fn embed(&self, text: &str) -> Result<Embedding> {
         exit_fixture_once(text)?;
+        metal_fault_fixture(text)?;
         if std::env::var("SURREAL_EXECUTOR_FREEZE_ON").as_deref() == Ok(text) {
             std::thread::sleep(Duration::from_secs(30));
         }
@@ -1138,6 +1215,20 @@ impl EmbeddingService for FixtureEmbeddingService {
     fn dimensions(&self) -> usize {
         2
     }
+}
+
+/// Reproduce candle's poisoned Metal lock for `SURREAL_EXECUTOR_METAL_FAULT_ON`
+/// text, but only while the child is not pinned to the CPU device.
+fn metal_fault_fixture(text: &str) -> Result<()> {
+    if std::env::var("SURREAL_EXECUTOR_METAL_FAULT_ON").as_deref() != Ok(text) {
+        return Ok(());
+    }
+    if std::env::var("LOCAL_EMBEDDING_DEVICE").as_deref() == Ok("cpu") {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "Model forward pass failed: Metal error Could not lock resource: poisoned lock: another task failed inside"
+    )
 }
 
 fn exit_fixture_once(text: &str) -> Result<()> {
