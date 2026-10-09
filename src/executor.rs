@@ -56,6 +56,8 @@ enum ExecutorMessage {
         model_revision: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dimensions: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_namespace: Option<String>,
     },
     Progress {
         request_id: u64,
@@ -275,6 +277,9 @@ pub struct SupervisedEmbeddingService {
     /// Set once a child reports a Metal device fault; every later child is
     /// started with `LOCAL_EMBEDDING_DEVICE=cpu` so it cannot hit it again.
     force_cpu: AtomicBool,
+    /// First worker's verified identity, including its effective embedding
+    /// configuration. `None` is a legacy/unknown worker and disables caching.
+    cache_namespace: std::sync::OnceLock<Option<String>>,
 }
 
 impl SupervisedEmbeddingService {
@@ -325,6 +330,7 @@ impl SupervisedEmbeddingService {
             child_env,
             expected_identity,
             force_cpu: AtomicBool::new(false),
+            cache_namespace: std::sync::OnceLock::new(),
         }
     }
 
@@ -434,6 +440,7 @@ impl SupervisedEmbeddingService {
                         model_id,
                         model_revision,
                         dimensions,
+                        cache_namespace,
                     } => {
                         if let Some(expected) = &self.expected_identity {
                             expected.validate_ready(
@@ -443,6 +450,30 @@ impl SupervisedEmbeddingService {
                                 model_revision.as_deref(),
                                 dimensions,
                             )?;
+                        }
+                        let namespace = self.expected_identity.as_ref().and_then(|identity| {
+                            cache_namespace
+                                .filter(|value| !value.is_empty())
+                                .map(|namespace| {
+                                    serde_json::json!([
+                                        "supervised", EXECUTOR_PROTOCOL_VERSION,
+                                        &identity.backend, &identity.model_id,
+                                        &identity.model_revision, identity.dimensions, namespace
+                                    ])
+                                    .to_string()
+                                })
+                        });
+                        // A replacement child must use the same identity as the
+                        // first one, or existing query values would become stale.
+                        // Missing identity is also sticky: never infer it from width.
+                        // The one sanctioned change is the Metal-fault fallback to
+                        // cpu, after which `cache_namespace()` reports no identity.
+                        let identity_changed =
+                            self.cache_namespace.get_or_init(|| namespace.clone()) != &namespace;
+                        if identity_changed && !self.force_cpu.load(Ordering::SeqCst) {
+                            anyhow::bail!(
+                                "executor cache identity changed; construct a new embedding service and cache"
+                            );
                         }
                     }
                     message => anyhow::bail!(
@@ -873,6 +904,18 @@ impl EmbeddingService for SupervisedEmbeddingService {
         }
     }
 
+    fn cache_namespace(&self) -> Option<&str> {
+        // After a Metal-fault fallback the effective device differs from the one
+        // the first child's namespace described, and a device change is a
+        // configuration change. Bypass the query cache until the service is rebuilt.
+        if self.force_cpu.load(Ordering::SeqCst) {
+            return None;
+        }
+        self.cache_namespace
+            .get()
+            .and_then(|value| value.as_deref())
+    }
+
     fn dimensions(&self) -> usize {
         self.dimensions
     }
@@ -965,7 +1008,7 @@ pub async fn run_embedding_executor() -> Result<()> {
 
     let (service, identity): (Arc<dyn EmbeddingService>, ExecutorIdentity) = if fixture {
         (
-            Arc::new(FixtureEmbeddingService),
+            Arc::new(FixtureEmbeddingService::new()),
             ExecutorIdentity {
                 backend: "fixture".to_owned(),
                 model_id: "fixture".to_owned(),
@@ -1032,6 +1075,7 @@ pub async fn run_embedding_executor() -> Result<()> {
             model_id: Some(identity.model_id),
             model_revision: Some(identity.model_revision),
             dimensions: Some(identity.dimensions),
+            cache_namespace: service.cache_namespace().map(str::to_owned),
         },
     )
     .await?;
@@ -1109,10 +1153,26 @@ async fn write_message(
     Ok(())
 }
 
-struct FixtureEmbeddingService;
+struct FixtureEmbeddingService {
+    cache_namespace: String,
+}
+
+impl FixtureEmbeddingService {
+    /// Like Candle's namespace, the fixture's depends on the configured device.
+    fn new() -> Self {
+        let device = std::env::var("LOCAL_EMBEDDING_DEVICE").unwrap_or_default();
+        Self {
+            cache_namespace: serde_json::json!(["fixture", device]).to_string(),
+        }
+    }
+}
 
 #[async_trait]
 impl EmbeddingService for FixtureEmbeddingService {
+    fn cache_namespace(&self) -> Option<&str> {
+        Some(&self.cache_namespace)
+    }
+
     async fn embed(&self, text: &str) -> Result<Embedding> {
         exit_fixture_once(text)?;
         metal_fault_fixture(text)?;

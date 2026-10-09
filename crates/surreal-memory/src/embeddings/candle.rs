@@ -34,6 +34,8 @@ pub struct CandleEmbeddings {
     model_revision: String,
     cache_dir: String,
     expected_dimensions: usize,
+    force_cpu: bool,
+    cache_namespace: String,
 }
 
 impl CandleEmbeddings {
@@ -50,11 +52,24 @@ impl CandleEmbeddings {
             expected_dimensions
         );
 
+        let model_revision = std::env::var("LOCAL_EMBEDDING_MODEL_REVISION")
+            .unwrap_or_else(|_| "main".to_string());
+        // Capture device configuration now, rather than rereading the environment
+        // on first inference after the cache identity has been published.
+        let force_cpu = force_cpu(std::env::var("LOCAL_EMBEDDING_DEVICE").ok().as_deref())?;
+        let cache_namespace = serde_json::json!([
+            "candle", model_id, &model_revision,
+            "bert;f32;attention-mask-mean;l2;tokenizer-special-tokens",
+            force_cpu, cfg!(feature = "cuda"), cfg!(feature = "metal"), expected_dimensions
+        ])
+        .to_string();
+
         Ok(Self {
             inner: OnceCell::new(),
             model_id: model_id.to_string(),
-            model_revision: std::env::var("LOCAL_EMBEDDING_MODEL_REVISION")
-                .unwrap_or_else(|_| "main".to_string()),
+            model_revision,
+            force_cpu,
+            cache_namespace,
             cache_dir: cache_dir.to_string(),
             expected_dimensions,
         })
@@ -94,7 +109,8 @@ impl CandleEmbeddings {
                 // and SIGKILL it mid-initialization — 24 such restarts across 23
                 // generations in production logs, each one immediately after the
                 // "Metal available, using GPU" line. Offload it.
-                let device = tokio::task::spawn_blocking(Self::get_device)
+                let force_cpu = self.force_cpu;
+                let device = tokio::task::spawn_blocking(move || Self::get_device(force_cpu))
                     .await
                     .context("Embedding device selection task panicked")?
                     .context("Failed to get compute device")?;
@@ -197,9 +213,8 @@ impl CandleEmbeddings {
         })
     }
 
-    fn get_device() -> Result<Device> {
-        let device_preference = std::env::var("LOCAL_EMBEDDING_DEVICE").ok();
-        if force_cpu(device_preference.as_deref())? {
+    fn get_device(force_cpu: bool) -> Result<Device> {
+        if force_cpu {
             tracing::warn!("LOCAL_EMBEDDING_DEVICE=cpu: using the explicit degraded CPU backend");
             return Ok(Device::Cpu);
         }
@@ -484,6 +499,10 @@ impl EmbeddingService for CandleEmbeddings {
         }
 
         Ok(results)
+    }
+
+    fn cache_namespace(&self) -> Option<&str> {
+        Some(&self.cache_namespace)
     }
 
     fn dimensions(&self) -> usize {

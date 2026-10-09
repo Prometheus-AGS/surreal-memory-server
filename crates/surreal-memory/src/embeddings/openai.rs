@@ -9,6 +9,7 @@ pub struct OpenAIEmbeddings {
     api_key: String,
     model: String,
     dimensions: usize,
+    cache_namespace: String,
 }
 
 #[derive(Serialize)]
@@ -38,7 +39,14 @@ impl OpenAIEmbeddings {
             _ => 1536,
         };
 
+        let cache_namespace = serde_json::json!([
+            "openai", &model,
+            "https://api.openai.com/v1/embeddings;dimensions=default", dimensions
+        ])
+        .to_string();
+
         Self {
+            cache_namespace,
             client: Client::new(),
             api_key,
             model,
@@ -83,6 +91,10 @@ impl EmbeddingService for OpenAIEmbeddings {
             .into_iter()
             .map(|d| d.embedding)
             .collect())
+    }
+
+    fn cache_namespace(&self) -> Option<&str> {
+        Some(&self.cache_namespace)
     }
 
     fn dimensions(&self) -> usize {

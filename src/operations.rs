@@ -156,7 +156,8 @@ pub struct OperationStats {
     /// Non-terminal operations whose last processing attempt failed.
     pub paused: u64,
     pub oldest_nonterminal: Option<OldestOperation>,
-    /// Hit/miss counters of the search query-embedding cache.
+    /// Query-embedding attempts begun and successful reuse. Present on every
+    /// successful supported-backend stats response; optional for wire compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_embed_cache: Option<QueryEmbedCacheStats>,
 }
@@ -862,6 +863,9 @@ impl OperationService {
     }
 
     pub async fn stats(&self) -> Result<OperationStats> {
+        // Reject an unsupported storage implementation before any ledger I/O.
+        // This is a backend requirement, not a transport failure or absent stats.
+        let surreal = self.surreal()?;
         let nonterminal: Vec<&'static str> = NONTERMINAL_OPERATION_STATES
             .iter()
             .map(|state| state.as_str())
@@ -905,10 +909,7 @@ impl OperationService {
             nonterminal,
             paused: paused.first().map_or(0, |row| row.count),
             oldest_nonterminal,
-            query_embed_cache: self
-                .surreal()
-                .ok()
-                .map(SurrealStorage::query_embed_cache_stats),
+            query_embed_cache: Some(surreal.query_embed_cache_stats()),
         })
     }
 

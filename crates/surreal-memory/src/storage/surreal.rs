@@ -79,9 +79,11 @@ pub struct QueryEmbedCacheStats {
     pub capacity: usize,
     /// Entries currently cached.
     pub entries: usize,
-    /// Searches answered without computing an embedding.
+    /// Successful query-embedding reuse, including coalesced waiters that did
+    /// not invoke the embedding producer. Independent of later search success.
     pub hits: u64,
-    /// Searches that computed an embedding.
+    /// Query-embedding producer attempts begun, including failures and attempts
+    /// cancelled after they began. Provider-internal retries are not counted.
     pub misses: u64,
 }
 
@@ -89,6 +91,7 @@ pub struct QueryEmbedCacheStats {
 /// when the capacity is 0.
 struct QueryEmbedCache {
     capacity: usize,
+    identity: std::sync::OnceLock<(String, usize)>,
     cache: Option<quick_cache::sync::Cache<String, Vec<f32>>>,
     hits: AtomicU64,
     misses: AtomicU64,
@@ -98,6 +101,7 @@ impl QueryEmbedCache {
     fn new(capacity: usize) -> Self {
         Self {
             capacity,
+            identity: std::sync::OnceLock::new(),
             cache: (capacity > 0).then(|| quick_cache::sync::Cache::new(capacity)),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
@@ -121,13 +125,26 @@ impl QueryEmbedCache {
         }
     }
 
-    /// NFC-normalise and collapse whitespace so trivially different spellings
-    /// of one query share an entry. The embedding identity (dimensions) leads
-    /// the key because one storage instance serves a single embedding service.
-    fn key(dimensions: usize, query: &str) -> String {
+    /// Freeze the first known provider identity for this cache's lifetime.
+    /// Unknown or changing providers bypass it; dimensions alone never identify
+    /// a model. Namespace length framing prevents delimiter collisions.
+    fn key(&self, service: &dyn EmbeddingService, query: &str) -> Option<String> {
+        let namespace = service
+            .cache_namespace()
+            .filter(|value| !value.is_empty())?;
+        let dimensions = service.dimensions();
+        let identity = self
+            .identity
+            .get_or_init(|| (namespace.to_owned(), dimensions));
+        if identity.0 != namespace || identity.1 != dimensions {
+            return None;
+        }
         let normalised: String = query.nfc().collect();
         let collapsed = normalised.split_whitespace().collect::<Vec<_>>().join(" ");
-        format!("{dimensions}\u{1f}{collapsed}")
+        Some(format!(
+            "{}:{namespace}{dimensions}\u{1f}{collapsed}",
+            namespace.len()
+        ))
     }
 }
 
@@ -1400,25 +1417,31 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
     }
 
     /// Embed a search query through the bounded cache. Concurrent identical
-    /// misses share one embedding call. Used only by `search_memories`.
+    /// cacheable queries share a successful embedding; a failed or cancelled
+    /// producer leaves no cached value and a waiter may become the next producer.
+    /// Used only by `search_memories`.
     async fn embed_query(&self, query: &str) -> Result<Vec<f32>> {
         let cache = &self.query_embed_cache;
-        let Some(store) = cache.cache.as_ref() else {
+        let Some((store, key)) = cache.cache.as_ref().and_then(|store| {
+            cache
+                .key(self.embedding_service.as_ref(), query)
+                .map(|key| (store, key))
+        }) else {
             cache.misses.fetch_add(1, AtomicOrdering::Relaxed);
             return self.embed_text(query).await;
         };
-        let key = QueryEmbedCache::key(self.embedding_service.dimensions(), query);
-        let computed = AtomicBool::new(false);
+        let attempted = AtomicBool::new(false);
         let embedding = store
-            // get_or_insert_async runs get_value_or_guard_async: concurrent identical misses embed once.
+            // This future is polled only by the caller holding the insertion
+            // guard. Count before awaiting so errors and cancellation retain
+            // their attempt; quick_cache inserts only successful values.
             .get_or_insert_async(&key, async {
-                computed.store(true, AtomicOrdering::Relaxed);
+                attempted.store(true, AtomicOrdering::Relaxed);
+                cache.misses.fetch_add(1, AtomicOrdering::Relaxed);
                 self.embed_text(query).await
             })
             .await?;
-        if computed.load(AtomicOrdering::Relaxed) {
-            cache.misses.fetch_add(1, AtomicOrdering::Relaxed);
-        } else {
+        if !attempted.load(AtomicOrdering::Relaxed) {
             cache.hits.fetch_add(1, AtomicOrdering::Relaxed);
         }
         Ok(embedding)

@@ -9,6 +9,7 @@ pub struct CohereEmbeddings {
     api_key: String,
     model: String,
     dimensions: usize,
+    cache_namespace: String,
 }
 
 #[derive(Serialize)]
@@ -37,7 +38,14 @@ impl CohereEmbeddings {
             _ => 1024,
         };
 
+        let cache_namespace = serde_json::json!([
+            "cohere", &model, "https://api.cohere.ai/v1/embed",
+            "input_type=search_document;embedding_types=float", dimensions
+        ])
+        .to_string();
+
         Self {
+            cache_namespace,
             client: Client::new(),
             api_key,
             model,
@@ -80,6 +88,10 @@ impl EmbeddingService for CohereEmbeddings {
             .context("Failed to parse Cohere response")?;
 
         Ok(cohere_response.embeddings.float)
+    }
+
+    fn cache_namespace(&self) -> Option<&str> {
+        Some(&self.cache_namespace)
     }
 
     fn dimensions(&self) -> usize {
