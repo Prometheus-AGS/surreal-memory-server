@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build documentation site
+    name: Package documentation for Pages
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -37,12 +37,9 @@ jobs:
       - name: Install dependencies
         run: npm --prefix website ci
 
-      - name: Type-check
-        run: npm --prefix website run typecheck
-
-      # `onBrokenLinks: 'throw'` means a stale cross-reference fails here rather
-      # than shipping a 404 to the published site.
-      - name: Build
+      # Permitted Pages packaging only. Validation and certification run locally
+      # before publication; no hosted typecheck, tests, lint or contract gates.
+      - name: Package Pages site
         run: npm --prefix website run build
 
       - name: Upload Pages artifact

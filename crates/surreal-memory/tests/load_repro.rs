@@ -132,6 +132,7 @@ async fn run_op(storage: &Arc<SurrealStorage>, op: Op, i: usize) -> Result<(), S
                 Some("anonymous"),
                 Some("load-repro-agent"),
                 None,
+                None,
                 10,
                 0.6,
                 0.4,

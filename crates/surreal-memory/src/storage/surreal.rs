@@ -1,6 +1,6 @@
 //! SurrealDB-backed implementation of `MemoryStorage`.
 
-use super::MemoryStorage;
+use super::{MemoryStorage, RekeyReport};
 #[cfg(feature = "palace")]
 use crate::palace::{HitSource, PalaceContext, PalaceStatus, PalaceStorage, UnifiedHit};
 use crate::{
@@ -17,11 +17,13 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde::{Serialize, de::DeserializeOwned};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::{cmp::Ordering, collections::HashMap, sync::Arc};
 use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
 use surrealdb::types::{Datetime, RecordId, RecordIdKey};
 use surrealdb_types::{QueryError, SurrealValue, Value};
+use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 /// Token budget constants per model family. Extend via config in Phase 3.
@@ -58,8 +60,92 @@ pub struct SurrealStorage {
     /// "serialization failure" into honest backpressure. `None` in
     /// server mode (the remote SurrealDB handles its own scheduling).
     embedded_semaphore: Option<Arc<tokio::sync::Semaphore>>,
+    /// Bounded cache of query embeddings. Only `search_memories` reads or
+    /// fills it; every write path embeds directly.
+    query_embed_cache: QueryEmbedCache,
     #[cfg(feature = "palace")]
     palace: tokio::sync::OnceCell<PalaceContext>,
+}
+
+/// Environment variable holding the query-embedding cache capacity.
+pub const QUERY_EMBED_CACHE_ENV: &str = "SURREAL_MEMORY_QUERY_EMBED_CACHE";
+/// Default number of cached query embeddings.
+const DEFAULT_QUERY_EMBED_CACHE_CAPACITY: usize = 512;
+
+/// Point-in-time counters of the query-embedding cache.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueryEmbedCacheStats {
+    /// Configured capacity; 0 means the cache is disabled.
+    pub capacity: usize,
+    /// Entries currently cached.
+    pub entries: usize,
+    /// Successful query-embedding reuse, including coalesced waiters that did
+    /// not invoke the embedding producer. Independent of later search success.
+    pub hits: u64,
+    /// Query-embedding producer attempts begun, including failures and attempts
+    /// cancelled after they began. Provider-internal retries are not counted.
+    pub misses: u64,
+}
+
+/// Bounded query-embedding cache with hit/miss counters. `cache` is `None`
+/// when the capacity is 0.
+struct QueryEmbedCache {
+    capacity: usize,
+    identity: std::sync::OnceLock<(String, usize)>,
+    cache: Option<quick_cache::sync::Cache<String, Vec<f32>>>,
+    hits: AtomicU64,
+    misses: AtomicU64,
+}
+
+impl QueryEmbedCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            identity: std::sync::OnceLock::new(),
+            cache: (capacity > 0).then(|| quick_cache::sync::Cache::new(capacity)),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+        }
+    }
+
+    fn from_env() -> Self {
+        let capacity = std::env::var(QUERY_EMBED_CACHE_ENV)
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(DEFAULT_QUERY_EMBED_CACHE_CAPACITY);
+        Self::new(capacity)
+    }
+
+    fn stats(&self) -> QueryEmbedCacheStats {
+        QueryEmbedCacheStats {
+            capacity: self.capacity,
+            entries: self.cache.as_ref().map_or(0, |cache| cache.len()),
+            hits: self.hits.load(AtomicOrdering::Relaxed),
+            misses: self.misses.load(AtomicOrdering::Relaxed),
+        }
+    }
+
+    /// Freeze the first known provider identity for this cache's lifetime.
+    /// Unknown or changing providers bypass it; dimensions alone never identify
+    /// a model. Namespace length framing prevents delimiter collisions.
+    fn key(&self, service: &dyn EmbeddingService, query: &str) -> Option<String> {
+        let namespace = service
+            .cache_namespace()
+            .filter(|value| !value.is_empty())?;
+        let dimensions = service.dimensions();
+        let identity = self
+            .identity
+            .get_or_init(|| (namespace.to_owned(), dimensions));
+        if identity.0 != namespace || identity.1 != dimensions {
+            return None;
+        }
+        let normalised: String = query.nfc().collect();
+        let collapsed = normalised.split_whitespace().collect::<Vec<_>>().join(" ");
+        Some(format!(
+            "{}:{namespace}{dimensions}\u{1f}{collapsed}",
+            namespace.len()
+        ))
+    }
 }
 
 // ── Retry Configuration ───────────────────────────────────────────────────────
@@ -739,6 +825,7 @@ impl SurrealStorage {
             connection_info,
             embedding_service,
             embedded_semaphore,
+            query_embed_cache: QueryEmbedCache::from_env(),
             #[cfg(feature = "palace")]
             palace: tokio::sync::OnceCell::new(),
         })
@@ -1329,6 +1416,122 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
         self.embedding_service.embed(text).await
     }
 
+    /// Embed a search query through the bounded cache. Concurrent identical
+    /// cacheable queries share a successful embedding; a failed or cancelled
+    /// producer leaves no cached value and a waiter may become the next producer.
+    /// Used only by `search_memories`.
+    async fn embed_query(&self, query: &str) -> Result<Vec<f32>> {
+        let cache = &self.query_embed_cache;
+        let Some((store, key)) = cache.cache.as_ref().and_then(|store| {
+            cache
+                .key(self.embedding_service.as_ref(), query)
+                .map(|key| (store, key))
+        }) else {
+            cache.misses.fetch_add(1, AtomicOrdering::Relaxed);
+            return self.embed_text(query).await;
+        };
+        let attempted = AtomicBool::new(false);
+        let embedding = store
+            // This future is polled only by the caller holding the insertion
+            // guard. Count before awaiting so errors and cancellation retain
+            // their attempt; quick_cache inserts only successful values.
+            .get_or_insert_async(&key, async {
+                attempted.store(true, AtomicOrdering::Relaxed);
+                cache.misses.fetch_add(1, AtomicOrdering::Relaxed);
+                self.embed_text(query).await
+            })
+            .await?;
+        if !attempted.load(AtomicOrdering::Relaxed) {
+            cache.hits.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+        Ok(embedding)
+    }
+
+    /// Nearest-neighbour search for an embedding the caller already has. The
+    /// write paths' duplicate checks use this with the content embedding they
+    /// just computed, so they neither embed twice nor touch the query cache.
+    async fn search_memories_with_embedding(
+        &self,
+        query_emb: Vec<f32>,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+        session_id: Option<&str>,
+        categories: Option<&[String]>,
+        limit: usize,
+    ) -> Result<Vec<Memory>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let categories = categories.filter(|list| !list.is_empty());
+
+        // Nearest neighbours come from the HNSW index with the scope conditions
+        // applied during the search, so only `limit` rows cross the wire.
+        // Fetching the whole scope and ranking here made the response grow
+        // with the table until it passed the SDK's 64 MiB WebSocket message
+        // limit, which drops the socket and fails every in-flight request.
+        let mut parts: Vec<&str> = vec![];
+        if user_id.is_some() {
+            parts.push("user_id = $user_id");
+        }
+        if agent_id.is_some() {
+            parts.push("agent_id = $agent_id");
+        }
+        if session_id.is_some() {
+            parts.push("session_id = $session_id");
+        }
+        if categories.is_some() {
+            parts.push("categories CONTAINSANY $categories");
+        }
+        let knn = format!(
+            "embedding <|{limit},{ef}|> $query_emb",
+            ef = limit.max(KNN_MIN_EF)
+        );
+        parts.push(&knn);
+        let sql = format!("SELECT * FROM memory WHERE {}", parts.join(" AND "));
+
+        let db = self.live_db()?;
+        let mut q = db.query(sql).bind(("query_emb", query_emb.clone()));
+        if let Some(v) = user_id {
+            q = q.bind(("user_id", v.to_string()));
+        }
+        if let Some(v) = agent_id {
+            q = q.bind(("agent_id", v.to_string()));
+        }
+        if let Some(v) = session_id {
+            q = q.bind(("session_id", v.to_string()));
+        }
+        if let Some(list) = categories {
+            q = q.bind(("categories", list.to_vec()));
+        }
+        let candidates = Self::decode_memories(q.await?.take(0)?)?;
+
+        let mut scored: Vec<(f32, Memory)> = candidates
+            .into_iter()
+            .filter_map(|m| {
+                let emb = m.embedding.as_deref()?;
+                let sim = Self::cosine_similarity(&query_emb, emb);
+                Some((sim, m))
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
+        scored.truncate(limit);
+        Ok(scored.into_iter().map(|(_, m)| m).collect())
+    }
+
+    /// Replace the query-embedding cache with one of `capacity` entries
+    /// (0 disables it). Intended for construction time; the cache starts empty.
+    #[must_use]
+    pub fn with_query_embed_cache_capacity(mut self, capacity: usize) -> Self {
+        self.query_embed_cache = QueryEmbedCache::new(capacity);
+        self
+    }
+
+    /// Hit/miss counters of the query-embedding cache.
+    pub fn query_embed_cache_stats(&self) -> QueryEmbedCacheStats {
+        self.query_embed_cache.stats()
+    }
+
     fn sanitize_explicit_record_content<P>(data: P) -> Value
     where
         P: SurrealValue,
@@ -1861,8 +2064,8 @@ impl MemoryStorage for SurrealStorage {
 
         // Semantic deduplication at 0.92 threshold
         let candidates = self
-            .search_memories(
-                &memory.content,
+            .search_memories_with_embedding(
+                emb.clone(),
                 memory.user_id.as_deref(),
                 memory.agent_id.as_deref(),
                 memory.session_id.as_deref(),
@@ -2093,61 +2296,19 @@ impl MemoryStorage for SurrealStorage {
         user_id: Option<&str>,
         agent_id: Option<&str>,
         session_id: Option<&str>,
-        _categories: Option<&[String]>,
+        categories: Option<&[String]>,
         limit: usize,
     ) -> Result<Vec<Memory>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let query_emb = self.embed_text(query).await?;
-
-        // Nearest neighbours come from the HNSW index with the scope conditions
-        // applied during the search, so only `limit` rows cross the wire.
-        // Fetching the whole scope and ranking here made the response grow
-        // with the table until it passed the SDK's 64 MiB WebSocket message
-        // limit, which drops the socket and fails every in-flight request.
-        let mut parts: Vec<&str> = vec![];
-        if user_id.is_some() {
-            parts.push("user_id = $user_id");
-        }
-        if agent_id.is_some() {
-            parts.push("agent_id = $agent_id");
-        }
-        if session_id.is_some() {
-            parts.push("session_id = $session_id");
-        }
-        let knn = format!(
-            "embedding <|{limit},{ef}|> $query_emb",
-            ef = limit.max(KNN_MIN_EF)
-        );
-        parts.push(&knn);
-        let sql = format!("SELECT * FROM memory WHERE {}", parts.join(" AND "));
-
-        let db = self.live_db()?;
-        let mut q = db.query(sql).bind(("query_emb", query_emb.clone()));
-        if let Some(v) = user_id {
-            q = q.bind(("user_id", v.to_string()));
-        }
-        if let Some(v) = agent_id {
-            q = q.bind(("agent_id", v.to_string()));
-        }
-        if let Some(v) = session_id {
-            q = q.bind(("session_id", v.to_string()));
-        }
-        let candidates = Self::decode_memories(q.await?.take(0)?)?;
-
-        let mut scored: Vec<(f32, Memory)> = candidates
-            .into_iter()
-            .filter_map(|m| {
-                let emb = m.embedding.as_deref()?;
-                let sim = Self::cosine_similarity(&query_emb, emb);
-                Some((sim, m))
-            })
-            .collect();
-
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
-        scored.truncate(limit);
-        Ok(scored.into_iter().map(|(_, m)| m).collect())
+        // An empty list means "no category filter", not "match nothing".
+        let categories = categories.filter(|list| !list.is_empty());
+        let query_emb = self.embed_query(query).await?;
+        self.search_memories_with_embedding(
+            query_emb, user_id, agent_id, session_id, categories, limit,
+        )
+        .await
     }
 
     async fn get_memory_history(&self, memory_id: &str) -> Result<Vec<MemoryHistory>> {
@@ -2243,8 +2404,8 @@ impl MemoryStorage for SurrealStorage {
         // tokens are already counted in `total_tokens`, so we must NOT bump
         // the counter again.
         let candidates = self
-            .search_memories(
-                &memory.content,
+            .search_memories_with_embedding(
+                embedding.clone(),
                 memory.user_id.as_deref(),
                 memory.agent_id.as_deref(),
                 memory.session_id.as_deref(),
@@ -2524,13 +2685,16 @@ impl MemoryStorage for SurrealStorage {
         user_id: Option<&str>,
         agent_id: Option<&str>,
         session_id: Option<&str>,
+        categories: Option<&[String]>,
         limit: usize,
         vector_weight: f32,
         bm25_weight: f32,
     ) -> Result<Vec<Memory>> {
-        // Vector branch (uses HNSW index)
+        let categories = categories.filter(|list| !list.is_empty());
+        // Vector branch (uses HNSW index); the category filter applies to both
+        // branches so a filtered search never merges in unfiltered BM25 rows.
         let vec_results = self
-            .search_memories(query, user_id, agent_id, session_id, None, limit * 2)
+            .search_memories(query, user_id, agent_id, session_id, categories, limit * 2)
             .await?;
 
         // BM25 full-text branch
@@ -2543,6 +2707,9 @@ impl MemoryStorage for SurrealStorage {
         }
         if session_id.is_some() {
             scope_parts.push("session_id = $sid".into());
+        }
+        if categories.is_some() {
+            scope_parts.push("categories CONTAINSANY $cats".into());
         }
 
         let db = self.live_db()?;
@@ -2561,6 +2728,9 @@ impl MemoryStorage for SurrealStorage {
         }
         if let Some(v) = session_id {
             q = q.bind(("sid", v.to_string()));
+        }
+        if let Some(list) = categories {
+            q = q.bind(("cats", list.to_vec()));
         }
         let bm25_results: Vec<DbMemory> = q.await?.take(0).unwrap_or_default();
         let bm25_results = Self::decode_memories(bm25_results)?;
@@ -2595,6 +2765,83 @@ impl MemoryStorage for SurrealStorage {
         let mut merged: Vec<(Memory, f32)> = scores.into_values().collect();
         merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         Ok(merged.into_iter().take(limit).map(|(m, _)| m).collect())
+    }
+
+    async fn rekey_unattributed_agent_id(
+        &self,
+        to_agent_id: &str,
+        user_id: Option<&str>,
+        dry_run: bool,
+    ) -> Result<RekeyReport> {
+        let to_agent_id = to_agent_id.trim();
+        if to_agent_id.is_empty() {
+            anyhow::bail!("to_agent_id cannot be empty");
+        }
+        // NONE (absent), NULL and "" are all "unattributed": option<string>
+        // fields may hold either of the first two depending on how the row was
+        // written, and task streams store an absent id as "" (migration v18).
+        let unattributed = "(agent_id IS NONE OR agent_id = NULL OR agent_id = '')";
+        let user_clause = if user_id.is_some() {
+            " AND user_id = $uid"
+        } else {
+            ""
+        };
+        let db = self.live_db()?;
+
+        let mut memory_query = db.query(format!(
+            "SELECT VALUE id FROM memory WHERE {unattributed}{user_clause}"
+        ));
+        if let Some(v) = user_id {
+            memory_query = memory_query.bind(("uid", v.to_string()));
+        }
+        let memory_ids: Vec<surrealdb::types::RecordId> = memory_query.await?.take(0)?;
+
+        let mut stream_query = db.query(format!(
+            "SELECT VALUE id FROM task_stream WHERE {unattributed}{user_clause}"
+        ));
+        if let Some(v) = user_id {
+            stream_query = stream_query.bind(("uid", v.to_string()));
+        }
+        let stream_ids: Vec<surrealdb::types::RecordId> = stream_query.await?.take(0)?;
+
+        let mut report = RekeyReport {
+            dry_run,
+            to_agent_id: to_agent_id.to_owned(),
+            user_id: user_id.map(str::to_owned),
+            memories: memory_ids.len() as u64,
+            task_streams: stream_ids.len() as u64,
+            task_stream_conflicts: 0,
+        };
+        if dry_run {
+            return Ok(report);
+        }
+        if !memory_ids.is_empty() {
+            db.query("UPDATE $ids SET agent_id = $to")
+                .bind(("ids", memory_ids))
+                .bind(("to", to_agent_id.to_owned()))
+                .await?
+                .check()?;
+        }
+        // One statement per stream: a unique-index collision on one row must
+        // not abort the rest.
+        let mut moved = 0u64;
+        for id in stream_ids {
+            let outcome = db
+                .query("UPDATE $id SET agent_id = $to")
+                .bind(("id", id))
+                .bind(("to", to_agent_id.to_owned()))
+                .await
+                .and_then(|response| response.check());
+            match outcome {
+                Ok(_) => moved += 1,
+                Err(error) if error.to_string().to_lowercase().contains("index") => {
+                    report.task_stream_conflicts += 1
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        report.task_streams = moved;
+        Ok(report)
     }
 
     // ── mem0 Advanced ─────────────────────────────────────────────────────────
@@ -3518,6 +3765,7 @@ impl SurrealStorage {
             connection_info,
             embedding_service,
             embedded_semaphore,
+            query_embed_cache: QueryEmbedCache::from_env(),
             #[cfg(feature = "palace")]
             palace: tokio::sync::OnceCell::new(),
         })
@@ -3623,7 +3871,7 @@ impl PalaceStorage for SurrealStorage {
 
         // Run all three searches concurrently
         let memory_fut =
-            self.hybrid_search_memories(query, user_id, agent_id, session_id, n, 0.7, 0.3);
+            self.hybrid_search_memories(query, user_id, agent_id, session_id, None, n, 0.7, 0.3);
         let entity_fut = self.semantic_search(query, n, 0.0);
         let palace_ctx = self.palace_context().await?;
         let palace_fut = palace_ctx.search_drawers_structured(query, wing, None, n);

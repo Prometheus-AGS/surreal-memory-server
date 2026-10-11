@@ -84,6 +84,9 @@ pub struct SearchMemoriesParams {
     #[schemars(description = "Maximum results to return (default 10)")]
     #[serde(default, deserialize_with = "crate::coerce::opt_number")]
     pub limit: Option<usize>,
+    #[schemars(description = "Include embedding vectors in results (default false)")]
+    #[serde(default)]
+    pub include_embeddings: bool,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -769,7 +772,11 @@ impl MemoryHandler {
             .await
             .map_err(Self::internal_error)?;
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&results).unwrap_or_default(),
+            serde_json::to_string_pretty(&crate::api::search::lean_memories(
+                &results,
+                params.include_embeddings,
+            ))
+            .unwrap_or_default(),
         )]))
     }
 
@@ -1187,6 +1194,12 @@ pub struct HybridSearchParams {
     pub user_id: Option<String>,
     pub agent_id: Option<String>,
     pub session_id: Option<String>,
+    /// Any-match category filter applied to both hybrid legs.
+    #[serde(default, deserialize_with = "crate::coerce::opt_string_vec")]
+    pub categories: Option<Vec<String>>,
+    /// Include embedding vectors in results (default false).
+    #[serde(default)]
+    pub include_embeddings: bool,
     #[serde(
         default = "hybrid_default_limit",
         deserialize_with = "crate::coerce::number"
@@ -1544,6 +1557,7 @@ impl MemoryHandler {
                 params.user_id.as_deref(),
                 params.agent_id.as_deref(),
                 params.session_id.as_deref(),
+                params.categories.as_deref(),
                 params.limit,
                 params.vector_weight,
                 params.bm25_weight,
@@ -1551,7 +1565,11 @@ impl MemoryHandler {
             .await
         {
             Ok(mems) => Ok(CallToolResult::success(vec![Content::text(
-                serde_json::to_string_pretty(&mems).unwrap_or_default(),
+                serde_json::to_string_pretty(&crate::api::search::lean_memories(
+                    &mems,
+                    params.include_embeddings,
+                ))
+                .unwrap_or_default(),
             )])),
             Err(e) => Err(Self::internal_error(e)),
         }

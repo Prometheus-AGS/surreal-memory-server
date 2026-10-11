@@ -65,7 +65,7 @@ pub enum EmbeddingProvider {
         model_id: String,
         model_path: Option<String>, // Cache directory
     },
-    /// FastEmbed via mempalace-core (all-MiniLM-L6-v2, 384 dims).
+    /// FastEmbed via mempalace-core (pinned default BGE-small-en-v1.5, 384 dims).
     /// Only available when compiled with the `palace` feature.
     #[cfg(feature = "palace")]
     Fast,
@@ -76,6 +76,17 @@ pub trait EmbeddingService: Send + Sync {
     async fn embed(&self, text: &str) -> Result<Embedding>;
     async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Embedding>>;
     fn dimensions(&self) -> usize;
+
+    /// Nonsecret provider/model/configuration identity for query caching.
+    ///
+    /// Return `None` when the effective model cannot be identified. A lazily
+    /// initialized provider may publish an identity once it knows its worker,
+    /// but a published identity must never change for this service's lifetime.
+    /// Model/configuration replacement requires a new service and cache.
+    /// Credentials and private cache paths must not be part of this identity.
+    fn cache_namespace(&self) -> Option<&str> {
+        None
+    }
 
     /// Plan model-safe inputs before inference. Remote providers whose model
     /// limits are enforced by their API retain a single logical part. Local

@@ -14,6 +14,24 @@ use crate::mindmap::{MindMap, MindMapEdge, MindMapNode};
 use crate::task_step::{TaskStep, TaskStepStatus};
 use crate::task_stream::{ContextWindow, TaskStream};
 
+/// Outcome of re-keying unattributed records to an explicit `agent_id`.
+///
+/// Unattributed means `agent_id` is absent (NONE), NULL, or the empty string
+/// (`DbTaskStream` stores an absent id as `""` since migration v18).
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RekeyReport {
+    pub dry_run: bool,
+    pub to_agent_id: String,
+    pub user_id: Option<String>,
+    /// Memories matched (dry run) or re-keyed.
+    pub memories: u64,
+    /// Task streams matched (dry run) or re-keyed.
+    pub task_streams: u64,
+    /// Task streams left unchanged because a stream with the same
+    /// (agent_id, user_id, name) already exists under the target id.
+    pub task_stream_conflicts: u64,
+}
+
 /// The unified storage interface for the surreal-memory platform.
 ///
 /// Implemented by `SurrealStorage`. All methods are `async` and return
@@ -83,10 +101,22 @@ pub trait MemoryStorage: Send + Sync {
         user_id: Option<&str>,
         agent_id: Option<&str>,
         session_id: Option<&str>,
+        categories: Option<&[String]>,
         limit: usize,
         vector_weight: f32,
         bm25_weight: f32,
     ) -> Result<Vec<Memory>>;
+
+    /// Re-key memories and task streams whose `agent_id` is unattributed
+    /// (NONE, NULL or "") to `to_agent_id`, optionally limited to one
+    /// `user_id`. With `dry_run` nothing is written and the counts report what
+    /// would change.
+    async fn rekey_unattributed_agent_id(
+        &self,
+        to_agent_id: &str,
+        user_id: Option<&str>,
+        dry_run: bool,
+    ) -> Result<RekeyReport>;
 
     /// Compress memories older than `older_than_days` into a single summary.
     async fn compress_memories(

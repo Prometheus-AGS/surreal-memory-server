@@ -114,7 +114,8 @@ public enum ExecutorMessage: Encodable, Sendable {
         backend: String,
         modelID: String,
         modelRevision: String,
-        dimensions: Int
+        dimensions: Int,
+        cacheNamespace: String? = nil
     )
     case progress(requestID: UInt64, phase: String)
     case completed(requestID: UInt64, result: ExecutorResult)
@@ -127,6 +128,7 @@ public enum ExecutorMessage: Encodable, Sendable {
         case modelID = "model_id"
         case modelRevision = "model_revision"
         case dimensions
+        case cacheNamespace = "cache_namespace"
         case requestID = "request_id"
         case phase
         case result
@@ -136,13 +138,14 @@ public enum ExecutorMessage: Encodable, Sendable {
     public func encode(to encoder: Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .ready(let backend, let modelID, let modelRevision, let dimensions):
+        case .ready(let backend, let modelID, let modelRevision, let dimensions, let cacheNamespace):
             try values.encode("ready", forKey: .message)
             try values.encode(executorProtocolVersion, forKey: .protocolVersion)
             try values.encode(backend, forKey: .backend)
             try values.encode(modelID, forKey: .modelID)
             try values.encode(modelRevision, forKey: .modelRevision)
             try values.encode(dimensions, forKey: .dimensions)
+            try values.encodeIfPresent(cacheNamespace, forKey: .cacheNamespace)
         case .progress(let requestID, let phase):
             try values.encode("progress", forKey: .message)
             try values.encode(requestID, forKey: .requestID)
