@@ -8,6 +8,7 @@
 //! - **Model profiles** — built-in token budget registry for GPT-4o, Claude, Gemini, and more
 //! - **Zero-loss migrations** — versioned schema evolution via `MigrationRunner`
 
+pub mod compression;
 pub mod embeddings;
 pub mod entity;
 pub mod memory;
