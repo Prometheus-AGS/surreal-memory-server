@@ -35,6 +35,8 @@ pub enum FaultPoint {
     Validation,
     Insertion,
     Activation,
+    /// One expired memory's deletion during a TTL sweep.
+    SweepDelete,
 }
 
 /// Everything a storage needs to run the pipeline. The default is the

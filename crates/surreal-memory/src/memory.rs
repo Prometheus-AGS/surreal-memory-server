@@ -151,7 +151,12 @@ pub struct Memory {
     pub access_count: u32,
     /// Last time this memory was returned in a search result.
     pub last_accessed_at: Option<Datetime>,
-    /// Optional TTL — memory is considered expired after this timestamp.
+    /// Optional TTL. A memory is *expired* when `valid_until` is strictly before
+    /// the operation's cutoff, so a memory whose `valid_until` equals the cutoff
+    /// is still live. Expired memories are excluded from every normal read
+    /// (get, list, search, task context, compression) whether or not a cleanup
+    /// sweep has run; the sweep only deletes them. Updating an expired memory is
+    /// refused rather than renewing it.
     pub valid_until: Option<Datetime>,
     /// Incremented on every update; used for history tracking.
     #[serde(default)]

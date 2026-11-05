@@ -69,14 +69,16 @@ pub struct SurrealStorage {
     palace: tokio::sync::OnceCell<PalaceContext>,
 }
 
-/// Rows archived into a summary (or otherwise retired) are not current
-/// knowledge. NONE means active, so legacy rows need no backfill.
-const ACTIVE_STATUS_SQL: &str = "(status IS NONE OR status = 'active')";
-
-/// A memory is a valid compression source only while it is active (not
-/// already archived into a summary or otherwise retired) and unexpired.
-const ELIGIBLE_SOURCE_SQL: &str = "(status IS NONE OR status = 'active') \
-     AND (valid_until IS NONE OR valid_until > time::now())";
+/// A memory is *live* when it is active (not archived into a summary or
+/// otherwise retired; NONE means active, so legacy rows need no backfill) and
+/// unexpired at the operation's cutoff. Needs `$now` bound.
+///
+/// Expired means `valid_until < $now`, so a memory whose `valid_until` equals
+/// the cutoff is still live (the rule the TTL sweep has always used). The
+/// predicate sits in the SQL `WHERE`, before any top-k or `LIMIT`, so expired
+/// rows can never take a slot from live ones.
+const LIVE_MEMORY_SQL: &str = "(status IS NONE OR status = 'active') \
+     AND (valid_until IS NONE OR valid_until >= $now)";
 
 /// Environment variable holding the query-embedding cache capacity.
 pub const QUERY_EMBED_CACHE_ENV: &str = "SURREAL_MEMORY_QUERY_EMBED_CACHE";
@@ -164,6 +166,7 @@ impl QueryEmbedCache {
 use std::time::Duration;
 
 mod derivation;
+mod expiry;
 
 /// Number of connect attempts allowed when reconnecting from inside an
 /// operation retry. Deliberately small — the operation deadline, not this
@@ -1512,7 +1515,7 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
         }
         // Archived (summarized) sources are not current knowledge; the summary
         // that replaced them is.
-        parts.push(ACTIVE_STATUS_SQL);
+        parts.push(LIVE_MEMORY_SQL);
         let knn = format!(
             "embedding <|{limit},{ef}|> $query_emb",
             ef = limit.max(KNN_MIN_EF)
@@ -1521,7 +1524,10 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
         let sql = format!("SELECT * FROM memory WHERE {}", parts.join(" AND "));
 
         let db = self.live_db()?;
-        let mut q = db.query(sql).bind(("query_emb", query_emb.clone()));
+        let mut q = db
+            .query(sql)
+            .bind(("query_emb", query_emb.clone()))
+            .bind(("now", self.cutoff()));
         if let Some(v) = user_id {
             q = q.bind(("user_id", v.to_string()));
         }
@@ -2166,23 +2172,16 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn get_memory(&self, id: &str) -> Result<Option<Memory>> {
-        let db = self.live_db()?;
-        let (table, key) = Self::parse_record_id_str(id, "memory")?;
-        let result: Vec<DbMemory> = db
-            .query("SELECT * FROM type::record($table, $key)")
-            .bind(("table", table))
-            .bind(("key", key))
+        let cutoff = self.cutoff();
+        Ok(self
+            .get_memory_including_expired(id)
             .await?
-            .take(0)?;
-        result
-            .into_iter()
-            .next()
-            .map(Self::decode_memory)
-            .transpose()
+            .filter(|memory| !Self::is_expired_at(memory, cutoff)))
     }
 
     async fn update_memory(&self, id: &str, content: String) -> Result<Memory> {
         let db = self.live_db()?;
+        let cutoff = self.cutoff();
         self.get_memory(id)
             .await?
             .with_context(|| format!("Memory '{}' not found", id))?;
@@ -2202,8 +2201,8 @@ impl MemoryStorage for SurrealStorage {
             check_statements(
                 db.query(
                     "BEGIN TRANSACTION;\n\
-                     LET $before = (SELECT content, version FROM ONLY type::record($table, $key));\n\
-                     IF $before = NONE { THROW 'memory not found' };\n\
+                     LET $before = (SELECT content, version, valid_until FROM ONLY type::record($table, $key));\n\
+                     IF $before = NONE OR ($before.valid_until != NONE AND $before.valid_until < $cutoff) { THROW 'memory not found' };\n\
                      UPDATE type::record($table, $key) \
                      SET content = $content, embedding = $emb, token_count = $tc, version = $before.version + 1, updated_at = $now;\n\
                      INSERT INTO memory_history { memory_id: type::record($table, $key), version: $before.version + 1, old_content: $before.content, new_content: $content, changed_at: $now, change_type: 'updated' };\n\
@@ -2214,6 +2213,7 @@ impl MemoryStorage for SurrealStorage {
                 .bind(("content", content.clone()))
                 .bind(("emb", new_emb.clone()))
                 .bind(("tc", token_count))
+                .bind(("cutoff", cutoff))
                 .bind(("now", now))
                 .await?,
             )
@@ -2234,7 +2234,7 @@ impl MemoryStorage for SurrealStorage {
         // reader can still observe the memory after `delete_memory` returned,
         // and a failure between them leaves a 'deleted' history row behind a
         // still-live memory.
-        if let Some(mem) = self.get_memory(id).await?
+        if let Some(mem) = self.get_memory_including_expired(id).await?
             && let Some(mem_id) = &mem.id
         {
             let now = Datetime::default();
@@ -2277,7 +2277,10 @@ impl MemoryStorage for SurrealStorage {
         agent_id: Option<&str>,
         session_id: Option<&str>,
     ) -> Result<u64> {
-        let memories = self.get_all_memories(user_id, agent_id, session_id).await?;
+        // Erasure covers expired rows too, so it lists physically.
+        let memories = self
+            .list_memories_scoped(user_id, agent_id, session_id, false)
+            .await?;
         let count = memories.len() as u64;
         for mem in memories {
             if let Some(id) = &mem.id {
@@ -2293,43 +2296,8 @@ impl MemoryStorage for SurrealStorage {
         agent_id: Option<&str>,
         session_id: Option<&str>,
     ) -> Result<Vec<Memory>> {
-        let mut query = String::from("SELECT * FROM memory WHERE ");
-
-        let uid = user_id.map(str::to_string);
-        let aid = agent_id.map(str::to_string);
-        let sid = session_id.map(str::to_string);
-
-        let mut parts: Vec<String> = vec![];
-        if uid.is_some() {
-            parts.push("user_id = $user_id".into());
-        }
-        if aid.is_some() {
-            parts.push("agent_id = $agent_id".into());
-        }
-        if sid.is_some() {
-            parts.push("session_id = $session_id".into());
-        }
-        if parts.is_empty() {
-            parts.push("true".into());
-        }
-
-        query.push_str(&parts.join(" AND "));
-
-        let db = self.live_db()?;
-
-        let mut q = db.query(query);
-        if let Some(v) = uid {
-            q = q.bind(("user_id", v));
-        }
-        if let Some(v) = aid {
-            q = q.bind(("agent_id", v));
-        }
-        if let Some(v) = sid {
-            q = q.bind(("session_id", v));
-        }
-
-        let results: Vec<DbMemory> = q.await?.take(0)?;
-        Self::decode_memories(results)
+        self.list_memories_scoped(user_id, agent_id, session_id, true)
+            .await
     }
 
     async fn search_memories(
@@ -2584,10 +2552,11 @@ impl MemoryStorage for SurrealStorage {
 
         let all_memories: Vec<DbMemory> = db
             .query(format!(
-                "SELECT * FROM memory WHERE task_stream_id = $sid AND {ACTIVE_STATUS_SQL} \
+                "SELECT * FROM memory WHERE task_stream_id = $sid AND {LIVE_MEMORY_SQL} \
                  ORDER BY importance DESC, created_at DESC"
             ))
             .bind(("sid", stream_id))
+            .bind(("now", self.cutoff()))
             .await?
             .take(0)?;
         let all_memories = Self::decode_memories(all_memories)?;
@@ -2743,8 +2712,7 @@ impl MemoryStorage for SurrealStorage {
             .await?;
 
         // BM25 full-text branch
-        let mut scope_parts: Vec<String> =
-            vec!["content @@ $query".into(), ACTIVE_STATUS_SQL.into()];
+        let mut scope_parts: Vec<String> = vec!["content @@ $query".into(), LIVE_MEMORY_SQL.into()];
         if user_id.is_some() {
             scope_parts.push("user_id = $uid".into());
         }
@@ -2761,11 +2729,15 @@ impl MemoryStorage for SurrealStorage {
         let db = self.live_db()?;
 
         let bm25_sql = format!(
-            "SELECT *, search::score(0) AS bm25_score FROM memory WHERE {} LIMIT {}",
+            "SELECT *, search::score(0) AS bm25_score FROM memory WHERE {} \
+             ORDER BY bm25_score DESC LIMIT {}",
             scope_parts.join(" AND "),
             limit * 2
         );
-        let mut q = db.query(&bm25_sql).bind(("query", query.to_string()));
+        let mut q = db
+            .query(&bm25_sql)
+            .bind(("query", query.to_string()))
+            .bind(("now", self.cutoff()));
         if let Some(v) = user_id {
             q = q.bind(("uid", v.to_string()));
         }
@@ -2778,7 +2750,7 @@ impl MemoryStorage for SurrealStorage {
         if let Some(list) = categories {
             q = q.bind(("cats", list.to_vec()));
         }
-        let bm25_results: Vec<DbMemory> = q.await?.take(0).unwrap_or_default();
+        let bm25_results: Vec<DbMemory> = q.await?.take(0)?;
         let bm25_results = Self::decode_memories(bm25_results)?;
 
         // Merge scores: weighted RRF-style normalisation
@@ -2904,7 +2876,7 @@ impl MemoryStorage for SurrealStorage {
         let mut conditions = vec![
             format!("created_at < time::now() - {}d", older_than_days),
             "task_stream_id IS NONE".to_string(),
-            ELIGIBLE_SOURCE_SQL.to_string(),
+            LIVE_MEMORY_SQL.to_string(),
         ];
         if user_id.is_some() {
             conditions.push("user_id = $uid".into());
@@ -2922,7 +2894,7 @@ impl MemoryStorage for SurrealStorage {
             "SELECT * FROM memory WHERE {} ORDER BY created_at ASC LIMIT 200",
             conditions.join(" AND ")
         );
-        let mut q = db.query(&sql);
+        let mut q = db.query(&sql).bind(("now", self.cutoff()));
         if let Some(v) = user_id {
             q = q.bind(("uid", v.to_string()));
         }
@@ -2932,7 +2904,7 @@ impl MemoryStorage for SurrealStorage {
         if let Some(v) = session_id {
             q = q.bind(("sid", v.to_string()));
         }
-        let old_memories: Vec<DbMemory> = q.await?.take(0).unwrap_or_default();
+        let old_memories: Vec<DbMemory> = q.await?.take(0)?;
         let old_memories = Self::decode_memories(old_memories)?;
 
         if old_memories.is_empty() {
@@ -2991,23 +2963,19 @@ impl MemoryStorage for SurrealStorage {
     }
 
     async fn expire_stale_memories(&self) -> Result<u64> {
-        let db = self.live_db()?;
-        let expired: Vec<DbMemory> = db
-            .query(
-                "SELECT * FROM memory WHERE valid_until IS NOT NONE AND valid_until < time::now()",
-            )
-            .await?
-            .take(0)
-            .unwrap_or_default();
-        let expired = Self::decode_memories(expired)?;
-        let count = expired.len() as u64;
-        for m in &expired {
-            if let Some(id) = &m.id {
-                let _ = self.delete_memory(&Self::record_id_to_string(id)).await;
-            }
+        let report = self.sweep_expired().await?;
+        if report.failed > 0 {
+            return Err(anyhow::Error::new(super::SweepIncomplete {
+                selected: report.selected,
+                removed: report.removed,
+                failed: report.failed,
+            }));
         }
-        tracing::info!("Expired {} stale memories", count);
-        Ok(count)
+        Ok(report.removed)
+    }
+
+    async fn expire_stale_memories_report(&self) -> Result<super::SweepReport> {
+        self.sweep_expired().await
     }
 
     // ── TaskSteps ────────────────────────────────────────────────────────────
@@ -3402,7 +3370,7 @@ impl MemoryStorage for SurrealStorage {
 
         // Fetch stream memories ordered oldest-first, scoped to this stream.
         let mut scope_parts: Vec<String> =
-            vec!["task_stream_id = $sid".into(), ELIGIBLE_SOURCE_SQL.into()];
+            vec!["task_stream_id = $sid".into(), LIVE_MEMORY_SQL.into()];
         if user_id.is_some() {
             scope_parts.push("user_id = $uid".into());
         }
@@ -3415,14 +3383,17 @@ impl MemoryStorage for SurrealStorage {
             "SELECT * FROM memory WHERE {} ORDER BY created_at ASC LIMIT 200",
             scope_parts.join(" AND ")
         );
-        let mut q = db.query(&sql).bind(("sid", stream_id.clone()));
+        let mut q = db
+            .query(&sql)
+            .bind(("sid", stream_id.clone()))
+            .bind(("now", self.cutoff()));
         if let Some(u) = user_id {
             q = q.bind(("uid", u.to_string()));
         }
         if let Some(a) = agent_id {
             q = q.bind(("aid", a.to_string()));
         }
-        let memories: Vec<DbMemory> = q.await?.take(0).unwrap_or_default();
+        let memories: Vec<DbMemory> = q.await?.take(0)?;
         let memories = Self::decode_memories(memories)?;
 
         if memories.len() < 4 {
