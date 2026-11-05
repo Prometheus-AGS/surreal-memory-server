@@ -40,7 +40,9 @@ services:
     container_name: surreal-memory-server
     restart: unless-stopped
     ports:
-      - "23001:3001"
+      # Published on the host loopback only; put a TLS proxy in front of it
+      # (see surreal-memory.nginx.conf) for any wider access.
+      - "127.0.0.1:23001:3001"
     environment:
       - SURREAL_MODE=server
       - SURREAL_ENDPOINT=ws://surrealdb:8000
@@ -51,6 +53,14 @@ services:
       - EMBEDDING_PROVIDER=openai
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - MCP_STDIO=false
+      # Verified-caller scope (issue #51). The container binds a non-loopback
+      # address, so the server refuses to start unless these are all set.
+      - API_HOST=0.0.0.0
+      - AUTH_MODE=jwt
+      - AUTH_JWT_ISSUER=${AUTH_JWT_ISSUER:?set AUTH_JWT_ISSUER to the Gate issuer}
+      - AUTH_JWT_AUDIENCE=${AUTH_JWT_AUDIENCE:?set AUTH_JWT_AUDIENCE}
+      - AUTH_JWT_ALGORITHM=${AUTH_JWT_ALGORITHM:?set AUTH_JWT_ALGORITHM (HS256, RS256, ES256 or EdDSA)}
+      - AUTH_JWT_KEY=${AUTH_JWT_KEY:?set AUTH_JWT_KEY (shared secret or public key PEM)}
     depends_on:
       - surrealdb
 

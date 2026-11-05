@@ -89,11 +89,42 @@ logged.
 | `SURREAL_EXECUTOR_STARTUP_MS` | `300000` | spawn → readiness |
 | `SURREAL_EXECUTOR_WATCHDOG_MS` | `30000` | per-request progress |
 
+## Authentication and tenancy
+
+`AUTH_MODE=local` (the default) serves an unauthenticated API for the trusted
+local client and is **refused at startup** unless `API_HOST` is a loopback
+address. `AUTH_MODE=jwt` is the shared-deployment mode: every route except
+`/health` and `/ready` requires a Gate-issued bearer token, and startup fails if
+any setting below is missing.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `AUTH_MODE` | `local` | `local` or `jwt` |
+| `AUTH_JWT_ISSUER` | – | required; must match the token `iss` |
+| `AUTH_JWT_AUDIENCE` | – | required; must match the token `aud` |
+| `AUTH_JWT_ALGORITHM` | – | required; `HS256`, `RS256`, `ES256` or `EdDSA` |
+| `AUTH_JWT_KEY` / `AUTH_JWT_KEY_FILE` | – | one is required; an HS256 secret (at least 32 bytes) or a public-key PEM |
+| `AUTH_JWT_MAX_AGE_SECS` | `300` | a token older than this is refused, so a revoked grant stops working within this window |
+
+Token claims: `iss`, `aud`, `sub`, `tenant` (`[a-z0-9_]{1,48}`), `iat`, `exp`,
+optional `ops` (`"operator"` allows retry, reject and re-key of durable
+operations) and optional `user_id` (restricts the credential to one user's
+memories, and to the `/api/v1/memory` and `/api/v1/search` routes only).
+
+**Isolation model: one database per tenant.** The tenant comes only from the
+verified token. In server mode it maps to the namespace
+`<SURREAL_NAMESPACE>_<tenant>` (the SurrealDB user needs rights to create
+namespaces); in embedded mode to the directory `<SURREAL_PATH>/tenants/<tenant>`.
+Operation IDs, receipts, events, stats and replay live in that tenant's database,
+so the same client operation ID in two tenants is two independent operations.
+MCP sessions (streamable HTTP and legacy SSE) are bound to the `(tenant, sub)`
+that opened them. The local stdio MCP transport remains the trusted local client.
+
 ## Server
 
 | Variable | Default | Notes |
 |---|---|---|
-| `API_HOST` | `0.0.0.0` | REST/MCP have no authentication; set `127.0.0.1` for host-local deployments |
+| `API_HOST` | `127.0.0.1` | Bind address. Anything other than loopback requires `AUTH_MODE=jwt` |
 | `API_PORT` | `3001` | |
 | `MCP_STDIO` | `true` | Set `false` for HTTP-only daemons |
 | `RUST_LOG` | `info` | |
