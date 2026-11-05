@@ -97,6 +97,12 @@ static MIGRATIONS: &[Migration] = &[
     Migration::sql(19, "task_step_table", MIGRATION_V19_SQL),
     Migration::sql(20, "durable_operation_ledger", MIGRATION_V20_SQL),
     Migration::sql(21, "embedding_executor_journal", MIGRATION_V21_SQL),
+    Migration::sql(22, "compression_derivations_and_claims", MIGRATION_V22_SQL),
+    Migration::sql(
+        23,
+        "compression_evidence_and_memory_status",
+        MIGRATION_V23_SQL,
+    ),
 ];
 
 // ── v1: Baseline entity + relation schema ─────────────────────────────────────
@@ -487,6 +493,106 @@ DEFINE INDEX IF NOT EXISTS memory_executor_event_identity
   ON memory_executor_event FIELDS operation_id, generation, progress_seq UNIQUE;
 ";
 
+// ── v22: Evidence-backed compression (derivations, claims, evidence, conflicts) ─
+//
+// `memory` only gains `option<>` fields: a populated SCHEMAFULL table in a
+// COMPATIBILITY 4 database rejects a non-optional field with a DEFAULT, and a
+// NONE `status` already means "active", so legacy rows need no backfill and
+// carry no invented trust. The new tables are empty, so defaults are safe there.
+
+const MIGRATION_V22_SQL: &str = "
+BEGIN TRANSACTION;
+DEFINE TABLE IF NOT EXISTS memory_derivation SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS key ON memory_derivation TYPE string;
+DEFINE FIELD IF NOT EXISTS task_stream ON memory_derivation TYPE option<record<task_stream>>;
+DEFINE FIELD IF NOT EXISTS user_id ON memory_derivation TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS agent_id ON memory_derivation TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS method ON memory_derivation TYPE string;
+DEFINE FIELD IF NOT EXISTS algorithm ON memory_derivation TYPE string;
+DEFINE FIELD IF NOT EXISTS model ON memory_derivation TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS prompt_version ON memory_derivation TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS config_version ON memory_derivation TYPE string;
+DEFINE FIELD IF NOT EXISTS contract_version ON memory_derivation TYPE int;
+DEFINE FIELD IF NOT EXISTS input_hash ON memory_derivation TYPE string;
+DEFINE FIELD IF NOT EXISTS source_count ON memory_derivation TYPE int;
+DEFINE FIELD IF NOT EXISTS tokens_before ON memory_derivation TYPE int;
+DEFINE FIELD IF NOT EXISTS tokens_after ON memory_derivation TYPE int;
+DEFINE FIELD IF NOT EXISTS outcome ON memory_derivation TYPE string;
+DEFINE FIELD IF NOT EXISTS reason ON memory_derivation TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS summary_memory ON memory_derivation TYPE option<record<memory>>;
+DEFINE FIELD IF NOT EXISTS generated_at ON memory_derivation TYPE datetime;
+DEFINE FIELD IF NOT EXISTS created_at ON memory_derivation TYPE datetime;
+DEFINE INDEX IF NOT EXISTS memory_derivation_key ON memory_derivation FIELDS key UNIQUE;
+
+DEFINE TABLE IF NOT EXISTS memory_claim SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS derivation ON memory_claim TYPE record<memory_derivation>;
+DEFINE FIELD IF NOT EXISTS summary_memory ON memory_claim TYPE option<record<memory>>;
+DEFINE FIELD IF NOT EXISTS kind ON memory_claim TYPE string;
+DEFINE FIELD IF NOT EXISTS text ON memory_claim TYPE string;
+DEFINE FIELD IF NOT EXISTS status ON memory_claim TYPE string;
+DEFINE FIELD IF NOT EXISTS reason ON memory_claim TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS evidence_strength ON memory_claim TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS corroboration ON memory_claim TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS applicability ON memory_claim TYPE option<object> FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS qualifiers ON memory_claim TYPE option<object> FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS user_id ON memory_claim TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS agent_id ON memory_claim TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS session_id ON memory_claim TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS observed_at ON memory_claim TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS recorded_at ON memory_claim TYPE datetime;
+DEFINE FIELD IF NOT EXISTS last_verified_at ON memory_claim TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS valid_until ON memory_claim TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS superseded_by ON memory_claim TYPE option<record<memory_claim>>;
+DEFINE FIELD IF NOT EXISTS created_at ON memory_claim TYPE datetime;
+DEFINE FIELD IF NOT EXISTS updated_at ON memory_claim TYPE datetime;
+DEFINE INDEX IF NOT EXISTS memory_claim_derivation ON memory_claim FIELDS derivation;
+DEFINE INDEX IF NOT EXISTS memory_claim_summary ON memory_claim FIELDS summary_memory;
+DEFINE INDEX IF NOT EXISTS memory_claim_status ON memory_claim FIELDS status;
+COMMIT TRANSACTION;
+";
+
+// ── v23: Claim evidence, conflicts, and the `memory` lifecycle fields ─────────
+//
+// Split from v22 so no single migration query carries enough statements to
+// hit the query timeout on a fsync-per-commit SurrealKV store. Both are one
+// transaction each, so a migration applies completely or not at all.
+
+const MIGRATION_V23_SQL: &str = "
+BEGIN TRANSACTION;
+DEFINE TABLE IF NOT EXISTS memory_claim_evidence SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS claim ON memory_claim_evidence TYPE record<memory_claim>;
+DEFINE FIELD IF NOT EXISTS source ON memory_claim_evidence TYPE record<memory>;
+DEFINE FIELD IF NOT EXISTS source_version ON memory_claim_evidence TYPE int;
+DEFINE FIELD IF NOT EXISTS quote ON memory_claim_evidence TYPE string;
+DEFINE FIELD IF NOT EXISTS origin ON memory_claim_evidence TYPE string;
+DEFINE FIELD IF NOT EXISTS root_source ON memory_claim_evidence TYPE record<memory>;
+DEFINE FIELD IF NOT EXISTS created_at ON memory_claim_evidence TYPE datetime;
+DEFINE INDEX IF NOT EXISTS memory_claim_evidence_claim ON memory_claim_evidence FIELDS claim;
+DEFINE INDEX IF NOT EXISTS memory_claim_evidence_source ON memory_claim_evidence FIELDS source;
+DEFINE INDEX IF NOT EXISTS memory_claim_evidence_root ON memory_claim_evidence FIELDS root_source;
+
+DEFINE TABLE IF NOT EXISTS memory_claim_conflict SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS claim_a ON memory_claim_conflict TYPE record<memory_claim>;
+DEFINE FIELD IF NOT EXISTS claim_b ON memory_claim_conflict TYPE record<memory_claim>;
+DEFINE FIELD IF NOT EXISTS status ON memory_claim_conflict TYPE string;
+DEFINE FIELD IF NOT EXISTS reason ON memory_claim_conflict TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS resolution_evidence ON memory_claim_conflict TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created_at ON memory_claim_conflict TYPE datetime;
+DEFINE FIELD IF NOT EXISTS updated_at ON memory_claim_conflict TYPE datetime;
+DEFINE INDEX IF NOT EXISTS memory_claim_conflict_pair ON memory_claim_conflict FIELDS claim_a, claim_b UNIQUE;
+
+DEFINE FIELD IF NOT EXISTS status ON memory TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS derived_into ON memory TYPE option<record<memory_derivation>>;
+
+-- v8 meant to make `metadata` FLEXIBLE, but v2 had already defined it as a plain
+-- `option<object>` and v8 used IF NOT EXISTS, so it never took effect: any memory
+-- with metadata keys was rejected. Summaries record their lineage in metadata, so
+-- repair it here. OVERWRITE only widens what the field accepts, which a populated
+-- COMPATIBILITY 4 table allows.
+DEFINE FIELD OVERWRITE metadata ON memory TYPE option<object> FLEXIBLE;
+COMMIT TRANSACTION;
+";
+
 #[derive(Debug, Clone)]
 pub struct RepairChange {
     pub table: &'static str,
@@ -830,9 +936,9 @@ mod tests {
     use super::{
         MIGRATION_V11_SQL, MIGRATION_V12_SQL, MIGRATION_V13_SQL, MIGRATION_V15_SQL,
         MIGRATION_V16_SQL, MIGRATION_V17_SQL, MIGRATION_V18_SQL, MIGRATION_V19_SQL,
-        MIGRATION_V20_SQL, MIGRATION_V21_SQL, MIGRATIONS, RawMemoryEnumRecord,
-        RawMindMapEnumRecord, RawTaskStreamEnumRecord, apply_migration, inspect_legacy_enum_data,
-        normalize_enum_value,
+        MIGRATION_V20_SQL, MIGRATION_V21_SQL, MIGRATION_V22_SQL, MIGRATION_V23_SQL, MIGRATIONS,
+        RawMemoryEnumRecord, RawMindMapEnumRecord, RawTaskStreamEnumRecord, apply_migration,
+        inspect_legacy_enum_data, normalize_enum_value,
     };
     use crate::{MapType, TaskStreamStatus};
     use surrealdb::Surreal;
@@ -843,9 +949,9 @@ mod tests {
     #[test]
     fn migration_v15_is_registered() {
         let last = MIGRATIONS.last().expect("at least one migration");
-        assert_eq!(last.version, 21);
-        assert_eq!(last.name, "embedding_executor_journal");
-        assert_eq!(last.sql, MIGRATION_V21_SQL);
+        assert_eq!(last.version, 23);
+        assert_eq!(last.name, "compression_evidence_and_memory_status");
+        assert_eq!(last.sql, MIGRATION_V23_SQL);
 
         let v18 = MIGRATIONS
             .iter()
@@ -951,6 +1057,44 @@ mod tests {
         ));
         assert!(MIGRATION_V20_SQL.contains("memory_operation_event_sequence"));
         assert!(MIGRATION_V20_SQL.contains("memory_operation_part_identity"));
+    }
+
+    #[test]
+    fn migrations_v22_v23_define_compression_tables_without_required_memory_fields() {
+        let both = format!("{MIGRATION_V22_SQL}\n{MIGRATION_V23_SQL}");
+        for table in [
+            "memory_derivation",
+            "memory_claim",
+            "memory_claim_evidence",
+            "memory_claim_conflict",
+        ] {
+            assert!(
+                both.contains(&format!("DEFINE TABLE IF NOT EXISTS {table} SCHEMAFULL")),
+                "{table} must be defined"
+            );
+        }
+        assert!(
+            MIGRATION_V22_SQL
+                .contains("memory_derivation_key ON memory_derivation FIELDS key UNIQUE")
+        );
+        // A populated COMPATIBILITY 4 table rejects a non-optional field with a
+        // DEFAULT, so the two `memory` additions must stay `option<...>`.
+        assert!(MIGRATION_V23_SQL.contains("status ON memory TYPE option<string>;"));
+        assert!(
+            MIGRATION_V23_SQL
+                .contains("derived_into ON memory TYPE option<record<memory_derivation>>;")
+        );
+        assert!(!both.contains("ON memory TYPE string"));
+        assert!(
+            MIGRATION_V23_SQL.contains(
+                "DEFINE FIELD OVERWRITE metadata ON memory TYPE option<object> FLEXIBLE;"
+            )
+        );
+        // Each migration is a single all-or-nothing transaction.
+        for sql in [MIGRATION_V22_SQL, MIGRATION_V23_SQL] {
+            assert!(sql.trim_start().starts_with("BEGIN TRANSACTION;"));
+            assert!(sql.trim_end().ends_with("COMMIT TRANSACTION;"));
+        }
     }
 
     #[test]

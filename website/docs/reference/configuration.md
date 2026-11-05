@@ -50,6 +50,38 @@ against SurrealDB **4.0.0** (SDK pin `=4.0.0`, server image `v4.0.0`).
 | `OPENAI_API_KEY` / `OPENAI_EMBEDDING_MODEL` | — | OpenAI provider |
 | `COHERE_API_KEY` / `COHERE_EMBEDDING_MODEL` | — | Cohere provider |
 
+## Compression (summarizer)
+
+`auto_summarize_task_stream` and `compress_memories` run an evidence-backed
+pipeline: a summarizer proposes claims that quote their source text, a
+deterministic gate checks every quote and the token budget, and the summary is
+published atomically. The sources are **archived, not deleted**, and stay
+readable by id as evidence. If nothing can be kept safely, the call returns no
+summary and changes nothing.
+
+By default the summarizer is **extractive**: it selects sentences, makes no
+network calls, and labels its output `extractive`. A model provider is opt-in:
+memory text leaves the process, so it needs explicit consent.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SUMMARIZER_PROVIDER` | `extractive` | `extractive` or `openai_compatible` |
+| `SUMMARIZER_EGRESS_ALLOWED` | unset | Must be `true` for any network provider; startup fails otherwise |
+| `SUMMARIZER_BASE_URL` | none | OpenAI-compatible base URL (for example a local gateway) |
+| `SUMMARIZER_MODEL` | none | Model name sent to the provider |
+| `SUMMARIZER_API_KEY` | none | Optional bearer token |
+| `SUMMARIZER_TIMEOUT_MS` | `20000` | Per-call time limit |
+| `SUMMARIZER_MAX_INPUT_TOKENS` | `32000` | Larger inputs are deferred |
+| `SUMMARIZER_MAX_OUTPUT_TOKENS` | `1500` | Rendered summary budget |
+| `SUMMARIZER_MIN_REDUCTION` | `0.2` | Required shrink (0.2 = at most 80% of the input) |
+| `SUMMARIZER_MAX_RETRIES` | `1` | Retries on 429/5xx/timeouts |
+| `SUMMARIZER_MAX_TOTAL_TOKENS` | `2000000` | Provider spend cap for the process; further calls fail closed |
+
+A summary never has a wider owner than its sources: sources with different
+`user_id`, `agent_id`, `session_id` or scope are not merged. Source text is
+sent as untrusted data, and neither source text nor provider responses are
+logged.
+
 ## Executor
 
 | Variable | Default | Covers |

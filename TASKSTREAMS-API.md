@@ -153,6 +153,15 @@ POST /api/v1/taskstreams/feature-development/summarize
 }
 ```
 
+**Behaviour.** The oldest half of the stream's active memories is compressed
+by the evidence-backed pipeline (see *Compression (summarizer)* in the
+configuration reference). The summary stays attached to the stream and lists
+only claims quoted from the sources. The compressed sources are **archived, not
+deleted**: they remain readable by id, drop out of search and task context, and
+their tokens leave `total_tokens` in the same transaction that publishes the
+summary. If the content has nothing worth keeping, is not meaningfully smaller,
+or spans different owners, the call returns no summary and changes nothing.
+
 ### 7. Delete Task Stream
 Delete a task stream and its associated memories.
 

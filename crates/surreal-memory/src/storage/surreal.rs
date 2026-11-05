@@ -63,9 +63,20 @@ pub struct SurrealStorage {
     /// Bounded cache of query embeddings. Only `search_memories` reads or
     /// fills it; every write path embeds directly.
     query_embed_cache: QueryEmbedCache,
+    /// Summarizer, limits and clock for evidence-backed compression.
+    compression: crate::compression::CompressionRuntime,
     #[cfg(feature = "palace")]
     palace: tokio::sync::OnceCell<PalaceContext>,
 }
+
+/// Rows archived into a summary (or otherwise retired) are not current
+/// knowledge. NONE means active, so legacy rows need no backfill.
+const ACTIVE_STATUS_SQL: &str = "(status IS NONE OR status = 'active')";
+
+/// A memory is a valid compression source only while it is active (not
+/// already archived into a summary or otherwise retired) and unexpired.
+const ELIGIBLE_SOURCE_SQL: &str = "(status IS NONE OR status = 'active') \
+     AND (valid_until IS NONE OR valid_until > time::now())";
 
 /// Environment variable holding the query-embedding cache capacity.
 pub const QUERY_EMBED_CACHE_ENV: &str = "SURREAL_MEMORY_QUERY_EMBED_CACHE";
@@ -151,6 +162,8 @@ impl QueryEmbedCache {
 // ── Retry Configuration ───────────────────────────────────────────────────────
 
 use std::time::Duration;
+
+mod derivation;
 
 /// Number of connect attempts allowed when reconnecting from inside an
 /// operation retry. Deliberately small — the operation deadline, not this
@@ -674,6 +687,11 @@ struct DbMemory {
     version: u32,
     created_at: Datetime,
     updated_at: Datetime,
+    /// Lifecycle state written by compression (NONE and `active` are eligible).
+    /// Not part of the public `Memory`; reads filter on it in SQL.
+    status: Option<String>,
+    /// The derivation this memory was archived into, if it was summarized.
+    derived_into: Option<RecordId>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, SurrealValue)]
@@ -711,6 +729,8 @@ impl From<Memory> for DbMemory {
             version: memory.version,
             created_at: memory.created_at,
             updated_at: memory.updated_at,
+            status: None,
+            derived_into: None,
         }
     }
 }
@@ -826,6 +846,7 @@ impl SurrealStorage {
             embedding_service,
             embedded_semaphore,
             query_embed_cache: QueryEmbedCache::from_env(),
+            compression: crate::compression::CompressionRuntime::default(),
             #[cfg(feature = "palace")]
             palace: tokio::sync::OnceCell::new(),
         })
@@ -1489,6 +1510,9 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
         if categories.is_some() {
             parts.push("categories CONTAINSANY $categories");
         }
+        // Archived (summarized) sources are not current knowledge; the summary
+        // that replaced them is.
+        parts.push(ACTIVE_STATUS_SQL);
         let knn = format!(
             "embedding <|{limit},{ef}|> $query_emb",
             ef = limit.max(KNN_MIN_EF)
@@ -1529,6 +1553,17 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
     /// Replace the query-embedding cache with one of `capacity` entries
     /// (0 disables it). Intended for construction time; the cache starts empty.
     #[must_use]
+    /// Replace the compression runtime (summarizer, limits, clock).
+    pub fn with_compression(mut self, runtime: crate::compression::CompressionRuntime) -> Self {
+        self.compression = runtime;
+        self
+    }
+
+    /// The compression runtime, e.g. to inject a fault in tests.
+    pub fn compression(&self) -> &crate::compression::CompressionRuntime {
+        &self.compression
+    }
+
     pub fn with_query_embed_cache_capacity(mut self, capacity: usize) -> Self {
         self.query_embed_cache = QueryEmbedCache::new(capacity);
         self
@@ -2548,7 +2583,10 @@ impl MemoryStorage for SurrealStorage {
         };
 
         let all_memories: Vec<DbMemory> = db
-            .query("SELECT * FROM memory WHERE task_stream_id = $sid ORDER BY importance DESC, created_at DESC")
+            .query(format!(
+                "SELECT * FROM memory WHERE task_stream_id = $sid AND {ACTIVE_STATUS_SQL} \
+                 ORDER BY importance DESC, created_at DESC"
+            ))
             .bind(("sid", stream_id))
             .await?
             .take(0)?;
@@ -2705,7 +2743,8 @@ impl MemoryStorage for SurrealStorage {
             .await?;
 
         // BM25 full-text branch
-        let mut scope_parts: Vec<String> = vec!["content @@ $query".into()];
+        let mut scope_parts: Vec<String> =
+            vec!["content @@ $query".into(), ACTIVE_STATUS_SQL.into()];
         if user_id.is_some() {
             scope_parts.push("user_id = $uid".into());
         }
@@ -2860,7 +2899,13 @@ impl MemoryStorage for SurrealStorage {
         session_id: Option<&str>,
         older_than_days: u32,
     ) -> Result<Option<Memory>> {
-        let mut conditions = vec![format!("created_at < time::now() - {}d", older_than_days)];
+        // Stream-bound memories belong to their stream's own summarization
+        // (and counter); archived and expired memories are not sources.
+        let mut conditions = vec![
+            format!("created_at < time::now() - {}d", older_than_days),
+            "task_stream_id IS NONE".to_string(),
+            ELIGIBLE_SOURCE_SQL.to_string(),
+        ];
         if user_id.is_some() {
             conditions.push("user_id = $uid".into());
         }
@@ -2874,7 +2919,7 @@ impl MemoryStorage for SurrealStorage {
         let db = self.live_db()?;
 
         let sql = format!(
-            "SELECT * FROM memory WHERE {} ORDER BY created_at ASC",
+            "SELECT * FROM memory WHERE {} ORDER BY created_at ASC LIMIT 200",
             conditions.join(" AND ")
         );
         let mut q = db.query(&sql);
@@ -2894,33 +2939,20 @@ impl MemoryStorage for SurrealStorage {
             return Ok(None);
         }
 
-        let summary_text = old_memories
-            .iter()
-            .enumerate()
-            .map(|(i, m)| format!("{}. {}", i + 1, m.content))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let summary_content = format!(
-            "[Compressed {} memories]\n{}",
-            old_memories.len(),
-            summary_text
-        );
-
-        for m in &old_memories {
-            if let Some(id) = &m.id {
-                let id_str = Self::record_id_to_string(id);
-                let _ = self.delete_memory(&id_str).await;
+        match self
+            .derive_summary(derivation::DerivationRequest {
+                sources: old_memories,
+                stream: None,
+                label: "compressed",
+            })
+            .await?
+        {
+            derivation::DerivationOutcome::Published(summary) => Ok(Some(*summary)),
+            derivation::DerivationOutcome::Deferred(reason) => {
+                tracing::info!(reason, "compression deferred");
+                Ok(None)
             }
         }
-
-        let summary = Memory::new(
-            summary_content,
-            user_id.map(str::to_string),
-            agent_id.map(str::to_string),
-            session_id.map(str::to_string),
-            vec!["compressed".to_string()],
-        );
-        Ok(Some(self.add_memory(summary).await?))
     }
 
     async fn add_memories_from_conversation(
@@ -3369,7 +3401,8 @@ impl MemoryStorage for SurrealStorage {
         let stream_id = stream.id.clone().with_context(|| "TaskStream has no id")?;
 
         // Fetch stream memories ordered oldest-first, scoped to this stream.
-        let mut scope_parts: Vec<String> = vec!["task_stream_id = $sid".into()];
+        let mut scope_parts: Vec<String> =
+            vec!["task_stream_id = $sid".into(), ELIGIBLE_SOURCE_SQL.into()];
         if user_id.is_some() {
             scope_parts.push("user_id = $uid".into());
         }
@@ -3400,97 +3433,27 @@ impl MemoryStorage for SurrealStorage {
         let half = memories.len() / 2;
         let to_compress = memories.into_iter().take(half).collect::<Vec<_>>();
 
-        // M-2(a): sum the compacted memories' token counts so the stream's
-        // `total_tokens` counter can be decremented by exactly what we remove.
-        // Use the same estimate fallback as `add_to_task_stream` /
-        // `get_context_for_task` so the counter stays consistent.
-        let compacted_tokens: u64 = to_compress
-            .iter()
-            .map(|m| {
-                m.token_count
-                    .map(|t| t as u64)
-                    .unwrap_or_else(|| Self::estimate_tokens(&m.content) as u64)
+        // Evidence-backed compression: the pipeline validates, publishes the
+        // summary atomically, archives (never deletes) the sources and fixes
+        // the stream counter in the same transaction. A deferred result
+        // changes nothing.
+        let outcome = self
+            .derive_summary(derivation::DerivationRequest {
+                sources: to_compress,
+                stream: Some(derivation::StreamRef { id: stream_id }),
+                label: "auto_summary",
             })
-            .sum();
-
-        // Build summary content. NOTE: a naive concat can itself grow tokens;
-        // a real LLM summarization path is out of scope for this correctness
-        // tier (there is no existing summarization helper to call here).
-        let summary_content = format!(
-            "[Auto-summary of {} memories from task stream '{}'] {}",
-            half,
-            stream_name,
-            to_compress
-                .iter()
-                .map(|m| m.content.as_str())
-                .collect::<Vec<_>>()
-                .join(" | ")
-        );
-
-        // Delete the originals
-        for m in &to_compress {
-            if let Some(id) = &m.id {
-                let s = Self::record_id_to_string(id);
-                let key = s.split(':').nth(1).unwrap_or(&s).to_string();
-                let _: Option<DbMemory> = self
-                    .write_retrying_conflicts("auto_summarize_task_stream", || async {
-                        db.delete(("memory", key.clone())).await
-                    })
-                    .await?;
+            .await?;
+        match outcome {
+            derivation::DerivationOutcome::Published(summary) => {
+                tracing::info!(stream = stream_name, "auto-summarized task stream");
+                Ok(Some(*summary))
+            }
+            derivation::DerivationOutcome::Deferred(reason) => {
+                tracing::info!(stream = stream_name, reason, "auto-summary deferred");
+                Ok(None)
             }
         }
-
-        // M-2(b): the summary memory MUST stay attached to the stream so that
-        // `get_context_for_task` (which filters by `task_stream_id`) returns it.
-        let mut summary = crate::memory::Memory::new(
-            summary_content,
-            user_id.map(str::to_string),
-            agent_id.map(str::to_string),
-            None,
-            vec!["auto_summary".to_string()],
-        );
-        summary.task_stream_id = Some(stream_id.clone());
-        let stored = self.add_memory(summary).await?;
-
-        // M-2: the summary memory is now a linked member of the stream, so its
-        // own tokens must be counted in `total_tokens`. `add_memory` only
-        // counts tokens into the memory row, never the stream counter, so the
-        // net effect must be `total_tokens -= compacted; total_tokens +=
-        // summary`. Use the same token-estimate source as the rest of the code.
-        let summary_tokens: u64 = stored
-            .token_count
-            .map(|t| t as u64)
-            .unwrap_or_else(|| Self::estimate_tokens(&stored.content) as u64);
-
-        // M-2(a): decrement `total_tokens` by the compacted total, add the new
-        // summary memory's tokens back, and bump `summary_count`.
-        // A definite conflict abort applied nothing, so resubmitting the `+=`
-        // update cannot double-count.
-        let _: Option<serde_json::Value> = self
-            .write_retrying_conflicts("auto_summarize_task_stream", || async {
-                check_statements(
-                    db.query(
-                        "UPDATE type::table($t) \
-                         SET total_tokens = math::max([0, total_tokens - $compacted]) + $summary, \
-                             summary_count += 1, last_active = time::now() \
-                         WHERE name = $n",
-                    )
-                    .bind(("t", "task_stream"))
-                    .bind(("compacted", compacted_tokens))
-                    .bind(("summary", summary_tokens))
-                    .bind(("n", stream_name.to_string()))
-                    .await?,
-                )
-            })
-            .await?
-            .take(0)?;
-
-        tracing::info!(
-            "Auto-summarized {} memories in task stream '{}' → 1 summary",
-            half,
-            stream_name
-        );
-        Ok(Some(stored))
     }
 
     async fn try_update_persona_mindmap(
@@ -3779,6 +3742,7 @@ impl SurrealStorage {
             embedding_service,
             embedded_semaphore,
             query_embed_cache: QueryEmbedCache::from_env(),
+            compression: crate::compression::CompressionRuntime::default(),
             #[cfg(feature = "palace")]
             palace: tokio::sync::OnceCell::new(),
         })
@@ -4457,6 +4421,7 @@ mod retry_tests {
             connection_info,
             embedding_service: Arc::new(MockEmbedding),
             query_embed_cache: QueryEmbedCache::from_env(),
+            compression: crate::compression::CompressionRuntime::default(),
             embedded_semaphore: None,
             #[cfg(feature = "palace")]
             palace: tokio::sync::OnceCell::new(),
