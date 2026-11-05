@@ -45,6 +45,11 @@ pub async fn create_storage(
         retry: retry_config,
     };
 
-    let storage = SurrealStorage::new(&surreal_config, embedding_service).await?;
+    // Defaults to the no-network extractive summarizer. A network provider
+    // needs SUMMARIZER_EGRESS_ALLOWED=true and fails startup without it.
+    let compression = surreal_memory::compression::provider::runtime_from_env()?;
+    let storage = SurrealStorage::new(&surreal_config, embedding_service)
+        .await?
+        .with_compression(compression);
     Ok(Arc::new(storage))
 }

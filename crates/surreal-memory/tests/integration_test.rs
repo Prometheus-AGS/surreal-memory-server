@@ -126,6 +126,15 @@ fn relation(from: &str, to: &str, rel: &str) -> Relation {
     }
 }
 
+/// Content with one extractable rule inside filler: the evidence-backed
+/// compression pipeline needs a claim to keep and enough bulk to shrink, and
+/// defers (leaving everything intact) when it has neither.
+fn compressible(label: &str) -> String {
+    let filler =
+        "The team talked through the schedule, the lunch order and the weekly calendar in detail. ";
+    format!("{filler}{filler}Never skip validation for {label}. {filler}")
+}
+
 fn memory(content: &str, user_id: &str) -> Memory {
     Memory::new(
         content.to_string(),
@@ -349,7 +358,7 @@ async fn test_task_stream_lifecycle() {
 
     let profile = profile_for("default");
     for idx in 0..4 {
-        let mut mem = memory(&format!("Long step {}", idx + 2), "u1");
+        let mut mem = memory(&compressible(&format!("long step {}", idx + 2)), "u1");
         mem.token_count = Some((profile.summarization_threshold() / 4 + 1) as u32);
         s.add_to_task_stream("my-task", None, None, mem)
             .await
@@ -468,7 +477,7 @@ async fn auto_summarize_does_not_touch_sibling_stream() {
     // Seed both streams with enough memories to be compressible.
     for idx in 0..6 {
         let mut m1 = Memory::new(
-            format!("s1 step {idx}"),
+            compressible(&format!("s1 step {idx}")),
             None,
             Some(agent.to_string()),
             None,
@@ -480,7 +489,7 @@ async fn auto_summarize_does_not_touch_sibling_stream() {
             .expect("add to s1");
 
         let mut m2 = Memory::new(
-            format!("s2 step {idx}"),
+            compressible(&format!("s2 step {idx}")),
             None,
             Some(agent.to_string()),
             None,
@@ -1577,7 +1586,7 @@ async fn summarization_decrements_tokens_and_attaches_summary() {
     // (4 memories, ~4/6 of threshold) drops the total back below it.
     let per_memory = (profile.summarization_threshold() / 6 + 1) as u32;
     for idx in 0..8 {
-        let mut mem = memory(&format!("summarize step {idx} distinct content"), "u-sum");
+        let mut mem = memory(&compressible(&format!("summarize step {idx}")), "u-sum");
         mem.token_count = Some(per_memory);
         s.add_to_task_stream("summarize-task", None, None, mem)
             .await
