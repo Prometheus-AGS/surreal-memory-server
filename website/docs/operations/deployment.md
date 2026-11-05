@@ -50,7 +50,7 @@ rendered files, or the next install reverts your change.
 
 | Label | Binary | Listens |
 |---|---|---|
-| `ai.prometheus.surrealdb-native` | `~/.prometheus/bin/surreal` (SurrealDB 3.3.0) | `127.0.0.1:28000` |
+| `ai.prometheus.surrealdb-native` | `~/.prometheus/bin/surreal` (SurrealDB 4.0.0) | `127.0.0.1:28000` |
 | `ai.prometheus.surreal-memory-native` | `/usr/local/bin/surreal-memory-server` | `127.0.0.1:23001` |
 
 The renderer refuses to write a `surrealdb-native` plist for any SurrealDB
@@ -98,7 +98,7 @@ process is still shutting down; wait for it to exit and bootstrap again.
 Verify:
 
 ```bash
-curl -s 127.0.0.1:28000/version      # surrealdb-3.3.0
+curl -s 127.0.0.1:28000/version      # surrealdb-4.0.0
 curl -s 127.0.0.1:23001/health       # status ok
 curl -s 127.0.0.1:23001/ready        # every capability true
 lsof -nP -iTCP:23001 -sTCP:LISTEN    # bound to 127.0.0.1 only

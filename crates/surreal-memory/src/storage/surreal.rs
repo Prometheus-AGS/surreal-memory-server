@@ -883,7 +883,13 @@ impl SurrealStorage {
     async fn connect_with_config(config: &SurrealConfig) -> Result<Surreal<Any>> {
         let sdk_config = surrealdb::opt::Config::default()
             .query_timeout(Duration::from_millis(config.retry.query_timeout_ms));
+        Self::connect_with_sdk_config(config, sdk_config).await
+    }
 
+    async fn connect_with_sdk_config(
+        config: &SurrealConfig,
+        sdk_config: surrealdb::opt::Config,
+    ) -> Result<Surreal<Any>> {
         let db = match &config.mode {
             SurrealMode::Embedded => {
                 let path = config
@@ -891,7 +897,8 @@ impl SurrealStorage {
                     .as_ref()
                     .context("Embedded path required for embedded mode")?;
                 tracing::info!("Connecting to embedded SurrealDB at: {}", path);
-                surrealdb::engine::any::connect((format!("rocksdb://{}", path), sdk_config)).await?
+                surrealdb::engine::any::connect((format!("surrealkv://{}", path), sdk_config))
+                    .await?
             }
             SurrealMode::Server => {
                 let endpoint = config
@@ -3752,7 +3759,13 @@ impl SurrealStorage {
             config: config.clone(),
         };
 
-        let db = Self::connect_with_config(&config).await?;
+        // Throwaway test datastore: SurrealKV's default flushes every commit to
+        // disk (a full fsync on macOS), which makes migrations and writes slow.
+        // Production embedded mode keeps the durable default.
+        let sdk_config = surrealdb::opt::Config::default()
+            .query_timeout(Duration::from_millis(config.retry.query_timeout_ms))
+            .datastore_option("datastore_sync", "never");
+        let db = Self::connect_with_sdk_config(&config, sdk_config).await?;
         run_migrations(&db).await?;
         Self::ensure_embedding_indexes(&db, embedding_service.dimensions()).await?;
 
@@ -4443,6 +4456,7 @@ mod retry_tests {
             )))),
             connection_info,
             embedding_service: Arc::new(MockEmbedding),
+            query_embed_cache: QueryEmbedCache::from_env(),
             embedded_semaphore: None,
             #[cfg(feature = "palace")]
             palace: tokio::sync::OnceCell::new(),

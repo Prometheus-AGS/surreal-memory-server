@@ -1083,10 +1083,18 @@ mod tests {
     async fn make_test_db() -> Surreal<surrealdb::engine::any::Any> {
         let path = std::env::temp_dir().join(format!("migration-test-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&path).expect("create temp dir");
-        let db = connect(format!("rocksdb://{}", path.display()))
+        let db = connect(format!("surrealkv://{}", path.display()))
             .await
             .expect("connect embedded surrealdb");
         db.use_ns("test").use_db("test").await.expect("use ns/db");
+        // Legacy rows only exist in databases upgraded from 3.x, which stay at
+        // compatibility level 3. A fresh 4.0 database is level 4, where v15's
+        // `scope` type change on a populated table is rejected.
+        db.query("DEFINE DATABASE OVERWRITE test COMPATIBILITY 3")
+            .await
+            .expect("define level-3 database")
+            .check()
+            .expect("level-3 database accepted");
         db
     }
 

@@ -4,5 +4,5 @@
 jobs = 10
 
 [env]
-SCCACHE_CACHE_SIZE = "20G"
-SCCACHE_IDLE_TIMEOUT = "0"
+SCCACHE_CACHE_SIZE = { value = "20G", force = false }
+SCCACHE_IDLE_TIMEOUT = { value = "0", force = false }
