@@ -417,7 +417,7 @@ fn spawn_persistent_server(address: SocketAddrV4, path: &std::path::Path) -> Ser
             "--allow-all",
             "--bind",
             &address.to_string(),
-            &format!("rocksdb:{}", path.display()),
+            &format!("surrealkv:{}", path.display()),
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())

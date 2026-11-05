@@ -7,7 +7,7 @@ sidebar_position: 2
 # Configuration
 
 All configuration is environment-driven. The server is built and tested
-against SurrealDB **3.3.0** (SDK pin `=3.3.0`, server image `v3.3.0`).
+against SurrealDB **4.0.0** (SDK pin `=4.0.0`, server image `v4.0.0`).
 
 ## Database
 

@@ -1246,9 +1246,12 @@ async fn legacy_enum_rows_are_repaired_on_server_mode_startup() {
     let db = connect_server_db(&namespace).await;
     let now = surrealdb::types::Datetime::default();
 
+    // Legacy rows only exist in databases upgraded from 3.x, which stay at
+    // compatibility level 3; v15 is rejected on a populated level-4 database.
     let response = db
         .query(
             "
+            DEFINE DATABASE OVERWRITE main COMPATIBILITY 3;
             DEFINE TABLE memory SCHEMAFULL;
             DEFINE FIELD content ON memory TYPE string;
             DEFINE FIELD embedding ON memory TYPE option<array<float>>;

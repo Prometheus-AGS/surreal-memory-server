@@ -17,7 +17,7 @@ path = "src/lib.rs"
 
 [features]
 default = ["embedded"]
-embedded = ["surrealdb/kv-rocksdb"]
+embedded = ["surrealdb/kv-surrealkv"]
 palace = ["dep:mempalace-core"]
 local-embeddings = [
     "candle-core",

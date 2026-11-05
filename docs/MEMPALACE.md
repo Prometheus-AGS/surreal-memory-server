@@ -47,7 +47,7 @@ surreal-memory-server/
 ```
 
 **Key constraints:**
-- `surrealdb = "3.3.0"` (workspace pinned)
+- `surrealdb = "4.0.0"` (workspace pinned)
 - `EmbeddingProvider::Local` path exists but requires `local-embeddings` feature
   (pulls in `candle-core`, `candle-nn`, `candle-transformers`, `tokenizers`, `hf-hub`)
 - Cold-start default is `EMBEDDING_PROVIDER=local` → resolves to `BAAI/bge-small-en-v1.5`
