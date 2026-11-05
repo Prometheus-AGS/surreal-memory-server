@@ -103,6 +103,7 @@ static MIGRATIONS: &[Migration] = &[
         "compression_evidence_and_memory_status",
         MIGRATION_V23_SQL,
     ),
+    Migration::sql(24, "memory_fulltext_index", MIGRATION_V24_SQL),
 ];
 
 // ── v1: Baseline entity + relation schema ─────────────────────────────────────
@@ -593,6 +594,21 @@ DEFINE FIELD OVERWRITE metadata ON memory TYPE option<object> FLEXIBLE;
 COMMIT TRANSACTION;
 ";
 
+// ── v24: Full-text index for the hybrid BM25 leg ──────────────────────────────
+//
+// `hybrid_search_memories` has always queried `content @@ $query`, but no
+// full-text index was ever defined (the v6 note says it was left out pending
+// syntax work). Without one SurrealDB rejects the query, and the old code
+// swallowed the error, so hybrid search was silently vector-only. This is the
+// SurrealDB 4 syntax.
+
+const MIGRATION_V24_SQL: &str = "
+BEGIN TRANSACTION;
+DEFINE ANALYZER IF NOT EXISTS memory_text TOKENIZERS class FILTERS lowercase, ascii;
+DEFINE INDEX IF NOT EXISTS memory_content_ft ON memory FIELDS content FULLTEXT ANALYZER memory_text BM25;
+COMMIT TRANSACTION;
+";
+
 #[derive(Debug, Clone)]
 pub struct RepairChange {
     pub table: &'static str,
@@ -936,9 +952,9 @@ mod tests {
     use super::{
         MIGRATION_V11_SQL, MIGRATION_V12_SQL, MIGRATION_V13_SQL, MIGRATION_V15_SQL,
         MIGRATION_V16_SQL, MIGRATION_V17_SQL, MIGRATION_V18_SQL, MIGRATION_V19_SQL,
-        MIGRATION_V20_SQL, MIGRATION_V21_SQL, MIGRATION_V22_SQL, MIGRATION_V23_SQL, MIGRATIONS,
-        RawMemoryEnumRecord, RawMindMapEnumRecord, RawTaskStreamEnumRecord, apply_migration,
-        inspect_legacy_enum_data, normalize_enum_value,
+        MIGRATION_V20_SQL, MIGRATION_V21_SQL, MIGRATION_V22_SQL, MIGRATION_V23_SQL,
+        MIGRATION_V24_SQL, MIGRATIONS, RawMemoryEnumRecord, RawMindMapEnumRecord,
+        RawTaskStreamEnumRecord, apply_migration, inspect_legacy_enum_data, normalize_enum_value,
     };
     use crate::{MapType, TaskStreamStatus};
     use surrealdb::Surreal;
@@ -949,9 +965,9 @@ mod tests {
     #[test]
     fn migration_v15_is_registered() {
         let last = MIGRATIONS.last().expect("at least one migration");
-        assert_eq!(last.version, 23);
-        assert_eq!(last.name, "compression_evidence_and_memory_status");
-        assert_eq!(last.sql, MIGRATION_V23_SQL);
+        assert_eq!(last.version, 24);
+        assert_eq!(last.name, "memory_fulltext_index");
+        assert_eq!(last.sql, MIGRATION_V24_SQL);
 
         let v18 = MIGRATIONS
             .iter()
@@ -1095,6 +1111,14 @@ mod tests {
             assert!(sql.trim_start().starts_with("BEGIN TRANSACTION;"));
             assert!(sql.trim_end().ends_with("COMMIT TRANSACTION;"));
         }
+    }
+
+    #[test]
+    fn migration_v24_defines_the_fulltext_index_behind_the_bm25_leg() {
+        assert!(MIGRATION_V24_SQL.contains("DEFINE ANALYZER IF NOT EXISTS memory_text"));
+        assert!(MIGRATION_V24_SQL.contains(
+            "DEFINE INDEX IF NOT EXISTS memory_content_ft ON memory FIELDS content FULLTEXT ANALYZER memory_text BM25;"
+        ));
     }
 
     #[test]

@@ -50,6 +50,27 @@ against SurrealDB **4.0.0** (SDK pin `=4.0.0`, server image `v4.0.0`).
 | `OPENAI_API_KEY` / `OPENAI_EMBEDDING_MODEL` | — | OpenAI provider |
 | `COHERE_API_KEY` / `COHERE_EMBEDDING_MODEL` | — | Cohere provider |
 
+## Memory expiry
+
+A memory with `valid_until` set is **expired** once `valid_until` is strictly
+before the operation's cutoff; a `valid_until` equal to the cutoff is still
+live. The cutoff is read once per operation.
+
+Expired memories are excluded from every normal read as soon as they expire,
+whether or not cleanup has run: get by id, list, vector and hybrid search (both
+legs, before the result limit is applied), task-stream context, compression and
+v1 near-duplicate checks. Updating an expired memory is refused; it is never
+renewed or merged into.
+
+The TTL worker only **deletes** them. Each deletion writes a `deleted` history
+row and removes the primary record. The pass reports what it actually removed:
+a deletion that fails is logged as an error, the memory stays (still hidden) and
+is retried on the next pass. History and the physical record stay available to
+audit and cleanup code through `get_memory_including_expired` and
+`get_memory_history`.
+
+Expiry is a visibility guarantee, not erasure: history rows are kept by design.
+
 ## Compression (summarizer)
 
 `auto_summarize_task_stream` and `compress_memories` run an evidence-backed
@@ -128,4 +149,4 @@ that opened them. The local stdio MCP transport remains the trusted local client
 | `API_PORT` | `3001` | |
 | `MCP_STDIO` | `true` | Set `false` for HTTP-only daemons |
 | `RUST_LOG` | `info` | |
-| `TTL_INTERVAL_SECS` | `3600` | TTL expiry worker interval |
+| `TTL_INTERVAL_SECS` | `3600` | TTL cleanup interval; a positive integer, otherwise the default is used with a warning |

@@ -36,6 +36,32 @@ pub struct RekeyReport {
 ///
 /// Implemented by `SurrealStorage`. All methods are `async` and return
 /// `anyhow::Result<T>` for ergonomic error propagation.
+/// What one TTL sweep pass did. Only `removed` counts deletions that actually
+/// happened.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SweepReport {
+    /// Expired rows found this pass (at most one batch).
+    pub selected: u64,
+    /// Rows this pass confirmed deleted.
+    pub removed: u64,
+    /// Rows that were renewed or already gone by the time they were deleted.
+    pub skipped: u64,
+    /// Rows whose deletion failed; they stay (hidden from normal reads) and are
+    /// retried by the next pass.
+    pub failed: u64,
+}
+
+/// Returned (inside the `anyhow::Error`) by `expire_stale_memories` when some
+/// deletions failed, so callers can still read the partial progress by
+/// downcasting.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("TTL sweep removed {removed} of {selected} expired memories; {failed} deletions failed")]
+pub struct SweepIncomplete {
+    pub selected: u64,
+    pub removed: u64,
+    pub failed: u64,
+}
+
 #[async_trait]
 pub trait MemoryStorage: Send + Sync {
     // ── Knowledge Graph ──────────────────────────────────────────────────────
@@ -166,8 +192,28 @@ pub trait MemoryStorage: Send + Sync {
         session_id: Option<&str>,
     ) -> Result<Vec<Memory>>;
 
-    /// Mark memories with `valid_until < now()` as expired. Returns count.
+    /// Physically delete memories whose `valid_until` is before the cutoff
+    /// (equality is still live), writing a `deleted` history row for each.
+    /// Returns the number actually removed.
+    ///
+    /// If any deletion failed this returns an `Err` wrapping
+    /// [`SweepIncomplete`] (downcast it to read the partial progress); those
+    /// rows stay and are retried by the next pass. Expired memories are already
+    /// hidden from normal reads before a sweep runs, so a delayed or failing
+    /// sweep never makes them visible.
     async fn expire_stale_memories(&self) -> Result<u64>;
+
+    /// Like [`expire_stale_memories`](Self::expire_stale_memories) but returns
+    /// the partial progress as a value instead of an error. The default
+    /// delegates, so implementors that predate it keep compiling.
+    async fn expire_stale_memories_report(&self) -> Result<SweepReport> {
+        let removed = self.expire_stale_memories().await?;
+        Ok(SweepReport {
+            selected: removed,
+            removed,
+            ..SweepReport::default()
+        })
+    }
 
     // ── TaskStreams ───────────────────────────────────────────────────────────
 
