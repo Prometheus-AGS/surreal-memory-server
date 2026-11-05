@@ -3536,6 +3536,21 @@ dependencies = [
 
 [[package]]
 name = "jsonwebtoken"
+version = "9.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde"
+dependencies = [
+ "base64 0.22.1",
+ "js-sys",
+ "pem",
+ "ring",
+ "serde",
+ "serde_json",
+ "simple_asn1",
+]
+
+[[package]]
+name = "jsonwebtoken"
 version = "10.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eba32bfb4ffdeaca3e34431072faf01745c9b26d25504aa7a6cf5684334fc4fc"
@@ -6535,6 +6550,7 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "hf-hub 0.5.0",
+ "jsonwebtoken 9.3.1",
  "mempalace-core",
  "reqwest 0.13.5",
  "rmcp",
@@ -6694,7 +6710,7 @@ dependencies = [
  "hmac 0.12.1",
  "http",
  "ipnet",
- "jsonwebtoken",
+ "jsonwebtoken 10.4.0",
  "memchr",
  "mime",
  "num_cpus",
@@ -6858,7 +6874,7 @@ dependencies = [
  "half",
  "hex",
  "http",
- "jsonwebtoken",
+ "jsonwebtoken 10.4.0",
  "lexicmp",
  "phf",
  "quick_cache",
@@ -8552,7 +8568,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -1,6 +1,7 @@
 //! Shared library surface for the `surreal-memory-server` binary and tests.
 
 pub mod api;
+pub mod auth;
 pub mod coerce;
 pub mod config;
 pub mod contracts;

@@ -34,14 +34,18 @@ pub struct AppState {
     /// whether the model was loaded via startup warmup or lazily on first use.
     pub embedding_service: Arc<dyn EmbeddingService>,
     pub operations: crate::operations::OperationService,
+    /// How requests are authorised. In JWT mode `storage`/`operations` are the
+    /// base instances and must never serve a request; handlers receive the
+    /// tenant's own through [`crate::auth::Tenant`].
+    pub access: crate::auth::Access,
 }
 
 #[derive(Serialize)]
-pub(crate) struct ApiError {
-    pub(crate) error: String,
+pub struct ApiError {
+    pub error: String,
 }
 
-pub(crate) type ApiFailure = (StatusCode, Json<ApiError>);
+pub type ApiFailure = (StatusCode, Json<ApiError>);
 
 pub(crate) fn api_error(error: anyhow::Error) -> ApiFailure {
     let message = error.to_string();
@@ -93,10 +97,27 @@ pub fn build_router(
     build_router_with_query_timeout(storage, embedding_service, Duration::from_secs(10))
 }
 
+/// Router for the loopback-only trusted client (`AUTH_MODE=local`).
 pub fn build_router_with_query_timeout(
     storage: Arc<dyn MemoryStorage>,
     embedding_service: Arc<dyn EmbeddingService>,
     query_timeout: Duration,
+) -> Router {
+    build_router_with_access(
+        storage,
+        embedding_service,
+        query_timeout,
+        crate::auth::Access::Local,
+    )
+}
+
+/// Build the router with an explicit authorisation mode. Every route except
+/// `/health` and `/ready` sits behind [`crate::auth::authenticate`].
+pub fn build_router_with_access(
+    storage: Arc<dyn MemoryStorage>,
+    embedding_service: Arc<dyn EmbeddingService>,
+    query_timeout: Duration,
+    access: crate::auth::Access,
 ) -> Router {
     let operations = crate::operations::OperationService::start_with_query_timeout(
         Arc::clone(&storage),
@@ -104,15 +125,17 @@ pub fn build_router_with_query_timeout(
         query_timeout,
     );
     let state = AppState {
-        storage: Arc::clone(&storage),
+        storage,
         embedding_service,
         operations,
+        access,
     };
 
-    // The MCP HTTP service captures storage in its factory closure, returning Router<()>.
-    // Convert it to Router<AppState> via .with_state(()) before merging.
+    // The MCP HTTP service resolves tenant storage per principal, so it holds
+    // the router state itself and returns Router<()>. Convert it to
+    // Router<AppState> via .with_state(()) before merging.
     let mcp_sub: Router<AppState> =
-        crate::mcp::http::mcp_http_router(Arc::clone(&storage), "/mcp").with_state(());
+        crate::mcp::http::mcp_http_router(state.clone(), "/mcp").with_state(());
 
     let router = Router::new()
         .route("/health", get(health_handler))
@@ -130,6 +153,10 @@ pub fn build_router_with_query_timeout(
     router
         .merge(a2a::router())
         .merge(mcp_sub)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth::authenticate,
+        ))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)

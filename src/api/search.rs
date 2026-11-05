@@ -1,7 +1,8 @@
 //! Hybrid search REST API route.
 //! POST /api/v1/search
 
-use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+use crate::auth::{Caller, Tenant};
+use axum::{Json, Router, http::StatusCode, routing::post};
 use serde::Deserialize;
 use serde_json::Value;
 use surreal_memory::Memory;
@@ -43,14 +44,23 @@ fn default_bm25_weight() -> f32 {
 }
 
 async fn hybrid_search(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
+    Caller(principal): Caller,
     Json(body): Json<SearchBody>,
 ) -> Result<Json<Vec<Value>>, (StatusCode, Json<serde_json::Value>)> {
+    let user_id = principal
+        .effective_user(body.user_id.as_deref())
+        .map_err(|error| {
+            (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({ "error": error.to_string() })),
+            )
+        })?;
     let results = state
         .storage
         .hybrid_search_memories(
             &body.query,
-            body.user_id.as_deref(),
+            user_id.as_deref(),
             body.agent_id.as_deref(),
             body.session_id.as_deref(),
             body.categories.as_deref(),
