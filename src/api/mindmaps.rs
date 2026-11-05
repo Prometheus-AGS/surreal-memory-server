@@ -1,9 +1,10 @@
 //! Mindmap REST API routes.
 //! GET/POST/DELETE /api/v1/mindmaps
 
+use crate::auth::Tenant;
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Path, Query},
     http::StatusCode,
     routing::{delete, get, post},
 };
@@ -65,7 +66,7 @@ fn parse_map_type(raw: &str) -> Result<MapType, ApiFailure> {
 }
 
 async fn create_mindmap(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Json(body): Json<CreateMindmapRequest>,
 ) -> Result<(StatusCode, Json<MindMap>), ApiFailure> {
     let mm = body
@@ -76,7 +77,7 @@ async fn create_mindmap(
 }
 
 async fn list_mindmaps(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Query(q): Query<ScopeQuery>,
 ) -> Result<Json<Vec<MindMap>>, ApiFailure> {
     let maps = state
@@ -88,7 +89,7 @@ async fn list_mindmaps(
 }
 
 async fn get_mindmap(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Path(name): Path<String>,
     Query(q): Query<ScopeQuery>,
 ) -> Result<Json<MindMap>, ApiFailure> {
@@ -102,7 +103,7 @@ async fn get_mindmap(
 }
 
 async fn delete_mindmap(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Path(name): Path<String>,
     Query(q): Query<ScopeQuery>,
 ) -> Result<StatusCode, ApiFailure> {
@@ -121,7 +122,7 @@ async fn delete_mindmap(
 }
 
 async fn add_node(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Path(name): Path<String>,
     Query(q): Query<ScopeQuery>,
     Json(body): Json<AddMindmapNodeRequest>,
@@ -142,7 +143,7 @@ async fn add_node(
 }
 
 async fn delete_node(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Path((name, node_id)): Path<(String, String)>,
     Query(q): Query<ScopeQuery>,
 ) -> Result<Json<MindMap>, ApiFailure> {
@@ -164,7 +165,7 @@ async fn delete_node(
 }
 
 async fn add_edge(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Path(name): Path<String>,
     Query(q): Query<ScopeQuery>,
     Json(body): Json<AddMindmapEdgeRequest>,
@@ -185,7 +186,7 @@ async fn add_edge(
 }
 
 async fn export_mindmap(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Path(name): Path<String>,
     Query(q): Query<ExportQuery>,
 ) -> Result<String, ApiFailure> {
@@ -205,7 +206,7 @@ async fn export_mindmap(
 }
 
 async fn generate_persona_mindmap(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Json(body): Json<GeneratePersonaMindmapBody>,
 ) -> Result<(StatusCode, Json<MindMap>), ApiFailure> {
     use std::collections::HashMap;
@@ -270,7 +271,7 @@ async fn generate_persona_mindmap(
 }
 
 async fn generate_ideation_mindmap(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Json(body): Json<GenerateIdeationMindmapBody>,
 ) -> Result<(StatusCode, Json<MindMap>), ApiFailure> {
     let map_type = parse_map_type(&body.map_type)?;
@@ -333,11 +334,15 @@ mod tests {
             Arc::clone(&storage),
             Arc::new(NoOpEmbedder),
         );
-        router().with_state(AppState {
-            storage,
-            embedding_service: Arc::new(NoOpEmbedder),
-            operations,
-        })
+        crate::auth::secured(
+            router(),
+            AppState {
+                storage,
+                embedding_service: Arc::new(NoOpEmbedder),
+                operations,
+                access: crate::auth::Access::Local,
+            },
+        )
     }
 
     async fn json_response(response: axum::response::Response) -> serde_json::Value {

@@ -1,9 +1,10 @@
 //! Memory REST API routes.
 //! POST/GET/PUT/DELETE /api/v1/memory
 
+use crate::auth::{Caller, Principal, ScopeError, Tenant};
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Path, Query},
     http::StatusCode,
     routing::{delete, get, post, put},
 };
@@ -12,7 +13,7 @@ use surreal_memory::Memory;
 
 use crate::contracts::{AddMemoryRequest, UpdateMemoryRequest};
 
-use super::{ApiFailure, AppState, api_error, bad_request, not_found};
+use super::{ApiError, ApiFailure, AppState, api_error, bad_request, not_found};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -32,11 +33,31 @@ struct ScopeQuery {
     session_id: Option<String>,
 }
 
+fn out_of_scope(_: ScopeError) -> ApiFailure {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ApiError {
+            error: "request names an owner outside the credential's scope".to_string(),
+        }),
+    )
+}
+
+/// A restricted principal sees another user's memory exactly as a missing one.
+fn visible_to(principal: &Principal, memory: Option<Memory>) -> Option<Memory> {
+    memory.filter(|memory| principal.may_access(memory.user_id.as_deref()))
+}
+
 async fn add_memory(
-    State(state): State<AppState>,
-    Json(body): Json<AddMemoryRequest>,
+    Tenant(state): Tenant,
+    Caller(principal): Caller,
+    Json(mut body): Json<AddMemoryRequest>,
 ) -> Result<(StatusCode, Json<Memory>), ApiFailure> {
     body.validate().map_err(|e| bad_request(e.to_string()))?;
+    // The owner is derived from the verified credential, so the near-duplicate
+    // check below can only match this principal's own memories.
+    body.user_id = principal
+        .effective_user(body.user_id.as_deref())
+        .map_err(out_of_scope)?;
     let created = state
         .storage
         .add_memory(body.into_memory())
@@ -46,13 +67,17 @@ async fn add_memory(
 }
 
 async fn get_all_memories(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
+    Caller(principal): Caller,
     Query(q): Query<ScopeQuery>,
 ) -> Result<Json<Vec<Memory>>, ApiFailure> {
+    let user_id = principal
+        .effective_user(q.user_id.as_deref())
+        .map_err(out_of_scope)?;
     let mems = state
         .storage
         .get_all_memories(
-            q.user_id.as_deref(),
+            user_id.as_deref(),
             q.agent_id.as_deref(),
             q.session_id.as_deref(),
         )
@@ -62,36 +87,50 @@ async fn get_all_memories(
 }
 
 async fn get_memory(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
+    Caller(principal): Caller,
     Path(id): Path<String>,
 ) -> Result<Json<Memory>, ApiFailure> {
-    let mem = state
-        .storage
-        .get_memory(&id)
-        .await
-        .map_err(api_error)?
-        .ok_or_else(|| not_found("Memory not found"))?;
+    let stored = state.storage.get_memory(&id).await.map_err(api_error)?;
+    let mem = visible_to(&principal, stored).ok_or_else(|| not_found("Memory not found"))?;
     Ok(Json(mem))
 }
 
 async fn update_memory(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
+    Caller(principal): Caller,
     Path(id): Path<String>,
     Json(body): Json<UpdateMemoryRequest>,
 ) -> Result<Json<Memory>, ApiFailure> {
     body.validate().map_err(|e| bad_request(e.to_string()))?;
-    let updated = state
-        .storage
-        .update_memory(&id, body.content)
-        .await
-        .map_err(api_error)?;
+    // A restricted principal's ownership is checked inside the write itself.
+    let updated = match &principal.user_scope {
+        Some(owner) => {
+            state
+                .storage
+                .update_memory_owned(&id, owner, body.content)
+                .await
+        }
+        None => state.storage.update_memory(&id, body.content).await,
+    }
+    .map_err(api_error)?;
     Ok(Json(updated))
 }
 
 async fn delete_memory(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
+    Caller(principal): Caller,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiFailure> {
+    if let Some(owner) = &principal.user_scope {
+        // Ownership is evaluated in the same transaction as the delete.
+        state
+            .storage
+            .delete_memory_owned(&id, owner)
+            .await
+            .map_err(api_error)?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
     state
         .storage
         .get_memory(&id)
@@ -103,13 +142,17 @@ async fn delete_memory(
 }
 
 async fn delete_all_memories(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
+    Caller(principal): Caller,
     Query(q): Query<ScopeQuery>,
 ) -> Result<Json<serde_json::Value>, ApiFailure> {
+    let user_id = principal
+        .effective_user(q.user_id.as_deref())
+        .map_err(out_of_scope)?;
     let count = state
         .storage
         .delete_all_memories(
-            q.user_id.as_deref(),
+            user_id.as_deref(),
             q.agent_id.as_deref(),
             q.session_id.as_deref(),
         )
@@ -119,9 +162,14 @@ async fn delete_all_memories(
 }
 
 async fn get_memory_history(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
+    Caller(principal): Caller,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiFailure> {
+    if principal.user_scope.is_some() {
+        let stored = state.storage.get_memory(&id).await.map_err(api_error)?;
+        visible_to(&principal, stored).ok_or_else(|| not_found("Memory not found"))?;
+    }
     let history = state
         .storage
         .get_memory_history(&id)
@@ -177,13 +225,15 @@ mod tests {
             Arc::clone(&storage),
             Arc::new(NoOpEmbedder),
         );
-        Router::new()
-            .nest("/api/v1/memory", router())
-            .with_state(AppState {
+        crate::auth::secured(
+            Router::new().nest("/api/v1/memory", router()),
+            AppState {
                 storage,
                 embedding_service: Arc::new(NoOpEmbedder),
                 operations,
-            })
+                access: crate::auth::Access::Local,
+            },
+        )
     }
 
     #[tokio::test]

@@ -8,9 +8,10 @@
 //! - `GET  /api/v1/palace/status`          — palace status summary
 //! - `POST /api/v1/palace/hybrid-search`   — unified cross-store search
 
+use crate::auth::Tenant;
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Path, Query},
     routing::{delete, get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -122,7 +123,7 @@ struct DeleteResponse {
 // ── handlers ────────────────────────────────────────────────────────────────
 
 async fn wake_up(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Query(q): Query<WakeQuery>,
 ) -> Result<Json<TextResponse>, ApiFailure> {
     let storage = get_palace(&state)?;
@@ -139,7 +140,7 @@ async fn wake_up(
 }
 
 async fn recall(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Query(q): Query<RecallQuery>,
 ) -> Result<Json<TextResponse>, ApiFailure> {
     let storage = get_palace(&state)?;
@@ -156,7 +157,7 @@ async fn recall(
 }
 
 async fn search(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Json(body): Json<SearchBody>,
 ) -> Result<Json<TextResponse>, ApiFailure> {
     if body.query.trim().is_empty() {
@@ -181,7 +182,7 @@ async fn search(
 }
 
 async fn ingest(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Json(body): Json<IngestBody>,
 ) -> Result<Json<IngestResponse>, ApiFailure> {
     if body.content.trim().is_empty() {
@@ -208,7 +209,7 @@ async fn ingest(
 }
 
 async fn delete_drawer(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Path(id): Path<String>,
 ) -> Result<Json<DeleteResponse>, ApiFailure> {
     if id.trim().is_empty() {
@@ -219,16 +220,14 @@ async fn delete_drawer(
     Ok(Json(DeleteResponse { deleted: true, id }))
 }
 
-async fn status(
-    State(state): State<AppState>,
-) -> Result<Json<surreal_memory::PalaceStatus>, ApiFailure> {
+async fn status(Tenant(state): Tenant) -> Result<Json<surreal_memory::PalaceStatus>, ApiFailure> {
     let storage = get_palace(&state)?;
     let status = storage.palace_status().await.map_err(api_error)?;
     Ok(Json(status))
 }
 
 async fn hybrid_search(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Json(body): Json<HybridSearchBody>,
 ) -> Result<Json<serde_json::Value>, ApiFailure> {
     if body.query.trim().is_empty() {

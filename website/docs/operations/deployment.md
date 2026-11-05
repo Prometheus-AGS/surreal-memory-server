@@ -57,7 +57,9 @@ The renderer refuses to write a `surrealdb-native` plist for any SurrealDB
 version other than the certified one (`SURREALDB_VERSION` in the skill-pack's
 `config/defaults.env`), so a stray Homebrew or PATH binary cannot downgrade
 the database. The memory-server plist sets `API_HOST=127.0.0.1`: the REST/MCP
-endpoints have no authentication.
+endpoints have no authentication in the default `AUTH_MODE=local`, which the
+server refuses to run on any non-loopback bind. Shared deployments set
+`AUTH_MODE=jwt` (see the configuration reference).
 
 Points worth getting right:
 

@@ -5,6 +5,7 @@
 //! action is recoverable from explicit database state.  Wall-clock duration is
 //! never used to infer whether an operation succeeded.
 
+use crate::auth::{Caller, Principal, Tenant};
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     convert::Infallible,
@@ -18,7 +19,7 @@ use anyhow::{Context, Result};
 use arc_swap::ArcSwapOption;
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Path, Query},
     http::StatusCode,
     response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
@@ -2070,10 +2071,27 @@ fn operator_failure(operation_id: &str, error: OperatorError) -> ApiFailure {
     }
 }
 
+/// Retry, reject and re-key change what other callers' work does, so they need
+/// the explicit operator permission in the verified credential. Network
+/// placement (loopback, proxy) is never a substitute for it.
+fn require_operator(principal: &Principal) -> Result<(), ApiFailure> {
+    if principal.operator {
+        return Ok(());
+    }
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(ApiError {
+            error: "this operation needs the operator permission".to_string(),
+        }),
+    ))
+}
+
 async fn retry_operation(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
+    Caller(principal): Caller,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<OperationReceipt>), ApiFailure> {
+    require_operator(&principal)?;
     let receipt = state
         .operations
         .retry(&id)
@@ -2083,10 +2101,12 @@ async fn retry_operation(
 }
 
 async fn reject_operation(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
+    Caller(principal): Caller,
     Path(id): Path<String>,
     Json(request): Json<RejectRequest>,
 ) -> Result<Json<OperationReceipt>, ApiFailure> {
+    require_operator(&principal)?;
     let receipt = state
         .operations
         .reject(&id, &request.reason)
@@ -2096,13 +2116,18 @@ async fn reject_operation(
 }
 
 async fn submit_operation(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
+    Caller(principal): Caller,
     PeerAddr(peer): PeerAddr,
     Json(request): Json<OperationRequest>,
 ) -> Result<(StatusCode, Json<OperationReceipt>), ApiFailure> {
-    // Re-keying rewrites ownership across the whole store, so it is refused
-    // unless the request provably comes from this host. A server started
-    // without connect-info has no peer address and fails closed.
+    // Re-keying rewrites ownership across the whole tenant store, so it needs
+    // the operator permission AND a request that provably comes from this
+    // host. A server started without connect-info has no peer address and
+    // fails closed.
+    if request.kind == REKEY_AGENT_ID_KIND {
+        require_operator(&principal)?;
+    }
     if request.kind == REKEY_AGENT_ID_KIND && !peer.is_some_and(|addr| addr.ip().is_loopback()) {
         return Err((
             StatusCode::FORBIDDEN,
@@ -2141,9 +2166,7 @@ async fn submit_operation(
     }
 }
 
-async fn operation_stats(
-    State(state): State<AppState>,
-) -> Result<Json<OperationStats>, ApiFailure> {
+async fn operation_stats(Tenant(state): Tenant) -> Result<Json<OperationStats>, ApiFailure> {
     state.operations.stats().await.map(Json).map_err(|error| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -2155,7 +2178,7 @@ async fn operation_stats(
 }
 
 async fn get_operation(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Path(id): Path<String>,
 ) -> Result<Json<OperationReceipt>, ApiFailure> {
     let receipt = state
@@ -2168,7 +2191,7 @@ async fn get_operation(
 }
 
 async fn operation_events(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Path(id): Path<String>,
     Query(query): Query<EventsQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiFailure> {
@@ -2670,11 +2693,10 @@ mod tests {
             storage,
             embedding_service: embedder,
             operations: operations.clone(),
+            access: crate::auth::Access::Local,
         };
         (
-            Router::new()
-                .nest("/api/v2/operations", router())
-                .with_state(state),
+            crate::auth::secured(Router::new().nest("/api/v2/operations", router()), state),
             operations,
         )
     }
@@ -3300,11 +3322,10 @@ mod tests {
             storage: Arc::clone(&storage) as Arc<dyn MemoryStorage>,
             embedding_service: embedder,
             operations: service.clone(),
+            access: crate::auth::Access::Local,
         };
         OperatorFixture {
-            router: Router::new()
-                .nest("/api/v2/operations", router())
-                .with_state(state),
+            router: crate::auth::secured(Router::new().nest("/api/v2/operations", router()), state),
             service,
             storage,
         }

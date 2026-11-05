@@ -1,9 +1,10 @@
 //! TaskStream REST API routes.
 //! POST/GET/DELETE /api/v1/taskstreams
 
+use crate::auth::Tenant;
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Path, Query},
     http::StatusCode,
     routing::{delete, get, post},
 };
@@ -69,7 +70,7 @@ struct AutoSummarizeResponse {
 }
 
 async fn create_task_stream(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Json(body): Json<CreateTaskStreamBody>,
 ) -> Result<(StatusCode, Json<TaskStream>), ApiFailure> {
     if body.name.trim().is_empty() {
@@ -90,7 +91,7 @@ async fn create_task_stream(
 }
 
 async fn list_task_streams(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Query(q): Query<ScopeQuery>,
 ) -> Result<Json<Vec<TaskStream>>, ApiFailure> {
     let streams = state
@@ -102,7 +103,7 @@ async fn list_task_streams(
 }
 
 async fn get_task_stream(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Path(name): Path<String>,
 ) -> Result<Json<TaskStream>, ApiFailure> {
     let stream = state
@@ -115,7 +116,7 @@ async fn get_task_stream(
 }
 
 async fn delete_task_stream(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiFailure> {
     state
@@ -127,7 +128,7 @@ async fn delete_task_stream(
 }
 
 async fn archive_task_stream(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Path(name): Path<String>,
 ) -> Result<Json<TaskStream>, ApiFailure> {
     let archived = state
@@ -139,7 +140,7 @@ async fn archive_task_stream(
 }
 
 async fn pause_task_stream(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Path(name): Path<String>,
 ) -> Result<Json<TaskStream>, ApiFailure> {
     let paused = state
@@ -151,7 +152,7 @@ async fn pause_task_stream(
 }
 
 async fn add_memory_to_task_stream(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Path(name): Path<String>,
     Json(body): Json<AddToTaskStreamBody>,
 ) -> Result<(StatusCode, Json<Memory>), ApiFailure> {
@@ -172,7 +173,7 @@ async fn add_memory_to_task_stream(
 }
 
 async fn get_context_for_task(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Path(name): Path<String>,
     Query(q): Query<ContextQuery>,
 ) -> Result<Json<ContextWindow>, ApiFailure> {
@@ -191,7 +192,7 @@ async fn get_context_for_task(
 }
 
 async fn auto_summarize_task_stream(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Path(name): Path<String>,
     body: Option<Json<AutoSummarizeBody>>,
 ) -> Result<Json<AutoSummarizeResponse>, ApiFailure> {
@@ -282,13 +283,15 @@ mod tests {
             Arc::clone(&storage),
             Arc::new(NoOpEmbedder),
         );
-        Router::new()
-            .nest("/api/v1/taskstreams", router())
-            .with_state(AppState {
+        crate::auth::secured(
+            Router::new().nest("/api/v1/taskstreams", router()),
+            AppState {
                 storage,
                 embedding_service: Arc::new(NoOpEmbedder),
                 operations,
-            })
+                access: crate::auth::Access::Local,
+            },
+        )
     }
 
     async fn json_response(response: axum::response::Response) -> serde_json::Value {

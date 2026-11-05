@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 use surreal_memory::storage::migrations::{inspect_legacy_enum_data, repair_legacy_enum_data};
 use surreal_memory_server::{
-    api,
+    api, auth,
     config::{Config, LocalEmbeddingBackend},
     embeddings::{self, EmbeddingService, create_embedding_service},
     executor::{ExecutorIdentity, SupervisedEmbeddingService, run_embedding_executor},
@@ -124,7 +124,25 @@ async fn main() -> Result<()> {
         env!("CARGO_PKG_VERSION")
     );
 
+    // Decide who may reach the API before any storage or model is touched, so
+    // an unsafe combination fails at once. The bind defaults to loopback;
+    // anything else must be an explicit choice AND run with verified
+    // credentials (AUTH_MODE=jwt).
+    let api_host: std::net::IpAddr = match std::env::var("API_HOST") {
+        Ok(host) => host
+            .parse()
+            .with_context(|| format!("API_HOST must be an IP address, got {host:?}"))?,
+        Err(_) => std::net::IpAddr::from([127, 0, 0, 1]),
+    };
+    let auth_mode = auth::load_auth_mode(api_host)?;
+    tracing::info!(
+        mode = if auth_mode.is_local() { "local" } else { "jwt" },
+        %api_host,
+        "API authentication configured"
+    );
+
     let config = load_config().await?;
+    let tenant_base_config = config.clone();
     let embedding_service = init_embedding_service(&config).await?;
     let retry_config = parse_retry_config_from_env();
     let operation_query_timeout = std::time::Duration::from_millis(retry_config.query_timeout_ms);
@@ -148,20 +166,10 @@ async fn main() -> Result<()> {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(3001);
-    // Defaults to all interfaces so the container image keeps working; a
-    // host-local deployment sets API_HOST=127.0.0.1 to keep the unauthenticated
-    // REST/MCP surface off the network.
-    let api_host: std::net::IpAddr = match std::env::var("API_HOST") {
-        Ok(host) => host
-            .parse()
-            .with_context(|| format!("API_HOST must be an IP address, got {host:?}"))?,
-        Err(_) => std::net::IpAddr::from([0, 0, 0, 0]),
-    };
-
     // The API layer keeps a handle to the embedding service so `/health` can
     // report true readiness via `EmbeddingService::is_ready()`.
     let health_embedding = Arc::clone(&embedding_service);
-    let storage = init_storage(config, embedding_service, retry_config).await?;
+    let storage = init_storage(config, embedding_service, retry_config.clone()).await?;
 
     // Graceful shutdown channel — send `true` to stop all workers.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -187,6 +195,14 @@ async fn main() -> Result<()> {
 
     // ── Axum REST API + HTTP/SSE MCP ─────────────────────────────────────────
     let api_storage = Arc::clone(&storage);
+    let api_access = build_access(
+        auth_mode,
+        tenant_base_config,
+        Arc::clone(&health_embedding),
+        retry_config.clone(),
+        operation_query_timeout,
+        shutdown_rx.clone(),
+    );
     let api_handle = tokio::spawn(async move {
         run_api_server(
             api_storage,
@@ -194,6 +210,7 @@ async fn main() -> Result<()> {
             api_port,
             health_embedding,
             operation_query_timeout,
+            api_access,
         )
         .await
     });
@@ -643,17 +660,54 @@ async fn warmup_embedding(service: Arc<dyn EmbeddingService>) -> Result<()> {
     Ok(())
 }
 
+/// Turn the selected authentication mode into the router's access policy. In
+/// JWT mode each verified tenant gets its own database, created on first use
+/// from the base configuration.
+fn build_access(
+    mode: auth::AuthMode,
+    base_config: Config,
+    embedding_service: Arc<dyn EmbeddingService>,
+    retry_config: surreal_memory::RetryConfig,
+    query_timeout: std::time::Duration,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) -> auth::Access {
+    let verifier = match mode {
+        auth::AuthMode::Local => return auth::Access::Local,
+        auth::AuthMode::Jwt(verifier) => verifier,
+    };
+    let factory_embedding = Arc::clone(&embedding_service);
+    let factory: auth::TenantStorageFactory = Arc::new(move |tenant| {
+        let embedding = Arc::clone(&factory_embedding);
+        let base = base_config.clone();
+        let retry = retry_config.clone();
+        Box::pin(async move {
+            let config = auth::tenant_config(&base, &tenant)?;
+            surreal_memory_server::storage::create_storage(&config, embedding, retry).await
+        })
+    });
+    auth::Access::Jwt {
+        verifier,
+        tenants: Arc::new(auth::TenantRegistry::new(
+            factory,
+            embedding_service,
+            query_timeout,
+            Some(shutdown),
+        )),
+    }
+}
+
 async fn run_api_server(
     storage: Arc<dyn MemoryStorage>,
     host: std::net::IpAddr,
     port: u16,
     embedding_service: Arc<dyn EmbeddingService>,
     operation_query_timeout: std::time::Duration,
+    access: auth::Access,
 ) -> Result<()> {
     let addr = std::net::SocketAddr::new(host, port);
     tracing::info!("🌐 Starting REST API + HTTP MCP server on http://{}", addr);
     let router =
-        api::build_router_with_query_timeout(storage, embedding_service, operation_query_timeout);
+        api::build_router_with_access(storage, embedding_service, operation_query_timeout, access);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .context("Failed to bind REST API port")?;
