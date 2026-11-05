@@ -167,6 +167,7 @@ use std::time::Duration;
 
 mod derivation;
 mod expiry;
+mod owned;
 
 /// Number of connect attempts allowed when reconnecting from inside an
 /// operation retry. Deliberately small — the operation deadline, not this
@@ -2269,6 +2270,20 @@ impl MemoryStorage for SurrealStorage {
         })
         .await?;
         Ok(())
+    }
+
+    async fn update_memory_owned(
+        &self,
+        id: &str,
+        owner_user_id: &str,
+        content: String,
+    ) -> Result<Memory> {
+        self.update_memory_owned_impl(id, owner_user_id, content)
+            .await
+    }
+
+    async fn delete_memory_owned(&self, id: &str, owner_user_id: &str) -> Result<()> {
+        self.delete_memory_owned_impl(id, owner_user_id).await
     }
 
     async fn delete_all_memories(

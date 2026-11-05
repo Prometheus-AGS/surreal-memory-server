@@ -1,9 +1,10 @@
 //! Entity REST API routes.
 //! GET/POST/DELETE /api/v1/entities
 
+use crate::auth::Tenant;
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Path, Query},
     http::StatusCode,
     routing::{delete, get, post},
 };
@@ -39,7 +40,7 @@ struct AddObservationsBody {
 }
 
 async fn create_entity(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Json(body): Json<CreateEntityRequest>,
 ) -> Result<(StatusCode, Json<surreal_memory::Entity>), ApiFailure> {
     body.validate().map_err(|e| bad_request(e.to_string()))?;
@@ -52,7 +53,7 @@ async fn create_entity(
 }
 
 async fn create_entities_batch(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Json(bodies): Json<Vec<CreateEntityRequest>>,
 ) -> Result<Json<Vec<surreal_memory::Entity>>, ApiFailure> {
     if bodies.is_empty() {
@@ -73,13 +74,13 @@ async fn create_entities_batch(
     Ok(Json(created))
 }
 
-async fn get_graph(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiFailure> {
+async fn get_graph(Tenant(state): Tenant) -> Result<Json<serde_json::Value>, ApiFailure> {
     let graph = state.storage.get_graph().await.map_err(api_error)?;
     Ok(Json(serde_json::json!(graph)))
 }
 
 async fn delete_entity(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiFailure> {
     state
@@ -91,7 +92,7 @@ async fn delete_entity(
 }
 
 async fn add_observations(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Path(name): Path<String>,
     Json(body): Json<AddObservationsBody>,
 ) -> Result<Json<surreal_memory::Entity>, ApiFailure> {
@@ -113,7 +114,7 @@ async fn add_observations(
 }
 
 async fn create_relation(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Json(body): Json<CreateRelationRequest>,
 ) -> Result<(StatusCode, Json<surreal_memory::Relation>), ApiFailure> {
     body.validate().map_err(|e| bad_request(e.to_string()))?;
@@ -126,7 +127,7 @@ async fn create_relation(
 }
 
 async fn create_relations_batch(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Json(bodies): Json<Vec<CreateRelationRequest>>,
 ) -> Result<Json<Vec<surreal_memory::Relation>>, ApiFailure> {
     if bodies.is_empty() {
@@ -148,7 +149,7 @@ async fn create_relations_batch(
 }
 
 async fn search_entities(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Query(q): Query<SearchQuery>,
 ) -> Result<Json<serde_json::Value>, ApiFailure> {
     let query = q.q.unwrap_or_default();
@@ -183,7 +184,7 @@ struct PathQuery {
 /// `GET /api/v1/entities/:name/neighbors?depth=2&limit=50`
 /// Returns the N-hop subgraph around the given entity.
 async fn expand_neighbors(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Path(name): Path<String>,
     Query(q): Query<NeighborsQuery>,
 ) -> Result<Json<serde_json::Value>, ApiFailure> {
@@ -198,7 +199,7 @@ async fn expand_neighbors(
 /// `GET /api/v1/entities/:name/related?relation_type=WORKS_AT&direction=out`
 /// Returns entities related to the given entity.
 async fn get_related(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Path(name): Path<String>,
     Query(q): Query<RelatedQuery>,
 ) -> Result<Json<serde_json::Value>, ApiFailure> {
@@ -218,7 +219,7 @@ async fn get_related(
 /// `GET /api/v1/entities/:name/path/:to?max_depth=4`
 /// Finds shortest paths from `:name` to `:to` via the relation graph.
 async fn find_path(
-    State(state): State<AppState>,
+    Tenant(state): Tenant,
     Path((from, to)): Path<(String, String)>,
     Query(q): Query<PathQuery>,
 ) -> Result<Json<serde_json::Value>, ApiFailure> {

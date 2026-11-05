@@ -4,9 +4,10 @@
 //! GET  /a2a/tasks/:id    — get task status
 
 use super::AppState;
+use crate::auth::Tenant;
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::Path,
     http::StatusCode,
     routing::{get, post},
 };
@@ -35,7 +36,7 @@ async fn agent_card() -> Json<serde_json::Value> {
             "state_transition_history": true
         },
         "authentication": {
-            "schemes": []
+            "schemes": ["bearer"]
         },
         "skills": [
             {
@@ -86,7 +87,7 @@ struct TaskResponse {
 }
 
 async fn send_task(
-    State(_state): State<AppState>,
+    Tenant(_state): Tenant,
     Json(req): Json<SendTaskRequest>,
 ) -> Result<(StatusCode, Json<TaskResponse>), (StatusCode, Json<serde_json::Value>)> {
     // Generate a task id — in a full implementation this would be persisted

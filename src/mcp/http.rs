@@ -1,9 +1,10 @@
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    body::Body,
+    extract::{Query, Request, State},
     http::HeaderMap,
-    response::{Sse, sse::Event},
-    routing::{get, post},
+    response::{IntoResponse, Response, Sse, sse::Event},
+    routing::{any, get, post},
 };
 use dashmap::DashMap;
 use rmcp::{
@@ -23,26 +24,57 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
+use tower::ServiceExt;
 use uuid::Uuid;
 
-use crate::{mcp::MemoryMcpServer, storage::MemoryStorage};
+use crate::{
+    api::{ApiFailure, AppState},
+    auth::{Caller, Principal, TenantId},
+    mcp::MemoryMcpServer,
+};
 
-type SessionMap = Arc<DashMap<String, mpsc::Sender<RxJsonRpcMessage<RoleServer>>>>;
+/// Who owns an MCP session: the verified `(tenant, subject)` that opened it.
+type SessionOwner = (TenantId, String);
+
+struct LegacySession {
+    owner: SessionOwner,
+    sender: mpsc::Sender<RxJsonRpcMessage<RoleServer>>,
+}
+
+type SessionMap = Arc<DashMap<String, LegacySession>>;
+
+type StreamableService = StreamableHttpService<MemoryMcpServer, LocalSessionManager>;
 
 #[derive(Clone)]
-struct HttpAppState {
-    storage: Arc<dyn MemoryStorage>,
+struct McpState {
+    root: AppState,
+    /// One streamable-HTTP service (and so one session manager) per verified
+    /// principal. A session ID presented by anyone else reaches a different
+    /// manager and is unknown there, so sessions cannot be borrowed.
+    streamable: Arc<DashMap<SessionOwner, StreamableService>>,
     sessions: SessionMap,
 }
 
-pub fn mcp_http_router(storage: Arc<dyn MemoryStorage>, prefix: &str) -> Router {
-    let state = HttpAppState {
-        storage: storage.clone(),
+pub fn mcp_http_router(root: AppState, prefix: &str) -> Router {
+    let state = McpState {
+        root,
+        streamable: Arc::new(DashMap::new()),
         sessions: Arc::new(DashMap::new()),
     };
 
-    // --- Streamable HTTP Endpoint (New Standard) ---
-    //
+    let routes = Router::new()
+        // Streamable HTTP (current standard).
+        .route("/http", any(streamable_handler))
+        .route("/http/{*rest}", any(streamable_handler))
+        // Legacy SSE (backward compatibility), now owner-bound.
+        .route("/sse", get(sse_handler))
+        .route("/messages", post(messages_handler))
+        .with_state(state);
+
+    Router::new().nest(prefix, routes)
+}
+
+fn streamable_service(storage: Arc<dyn crate::storage::MemoryStorage>) -> StreamableService {
     // rmcp 1.4.0's `SessionConfig::DEFAULT_KEEP_ALIVE` is 5 minutes. Idle MCP
     // clients (the common case: a coding agent that calls a tool, thinks for a
     // while, then calls another tool) get culled mid-conversation and the next
@@ -55,24 +87,36 @@ pub fn mcp_http_router(storage: Arc<dyn MemoryStorage>, prefix: &str) -> Router 
     session_config.keep_alive = Some(Duration::from_secs(60 * 60 * 24));
     let mut session_manager = LocalSessionManager::default();
     session_manager.session_config = session_config;
-    let storage_clone = storage.clone();
-    let service = StreamableHttpService::new(
-        move || Ok(MemoryMcpServer::new(storage_clone.clone())),
+    StreamableHttpService::new(
+        move || Ok(MemoryMcpServer::new(Arc::clone(&storage))),
         Arc::new(session_manager),
         StreamableHttpServerConfig::default(),
-    );
-    let streamable_routes = Router::new().nest_service("/http", service);
+    )
+}
 
-    // --- Legacy SSE Endpoints (Backward Compatibility) ---
-    let legacy_routes = Router::new()
-        .route("/sse", get(sse_handler))
-        .route("/messages", post(messages_handler))
-        .with_state(state);
-
-    // Combine both routers
-    let routes = streamable_routes.merge(legacy_routes);
-
-    Router::new().nest(prefix, routes)
+async fn streamable_handler(
+    State(state): State<McpState>,
+    Caller(principal): Caller,
+    request: Request,
+) -> Result<Response, ApiFailure> {
+    let owner = principal.session_owner();
+    let service = match state.streamable.get(&owner) {
+        Some(existing) => existing.clone(),
+        None => {
+            let scoped = state.root.for_principal(&principal).await?;
+            state
+                .streamable
+                .entry(owner)
+                .or_insert_with(|| streamable_service(scoped.storage))
+                .clone()
+        }
+    };
+    let response = service
+        .oneshot(request)
+        .await
+        .unwrap_or_else(|never| match never {});
+    let (parts, body) = response.into_parts();
+    Ok(Response::from_parts(parts, Body::new(body)).into_response())
 }
 
 pub struct MuxTransport {
@@ -106,21 +150,29 @@ impl Transport<RoleServer> for MuxTransport {
 
 async fn sse_handler(
     headers: HeaderMap,
-    State(state): State<HttpAppState>,
-) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
+    State(state): State<McpState>,
+    Caller(principal): Caller,
+) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, ApiFailure> {
+    let scoped = state.root.for_principal(&principal).await?;
     let session_id = Uuid::new_v4().to_string();
 
     let (client_tx, server_rx) = mpsc::channel::<RxJsonRpcMessage<RoleServer>>(100);
     let (server_tx, client_rx) = mpsc::channel::<TxJsonRpcMessage<RoleServer>>(100);
 
-    state.sessions.insert(session_id.clone(), client_tx);
+    state.sessions.insert(
+        session_id.clone(),
+        LegacySession {
+            owner: principal.session_owner(),
+            sender: client_tx,
+        },
+    );
 
     let transport = MuxTransport {
         tx: server_tx,
         rx: server_rx,
     };
 
-    let server = MemoryMcpServer::new(state.storage.clone());
+    let server = MemoryMcpServer::new(scoped.storage);
 
     let session_id_clone = session_id.clone();
     let sessions_clone = state.sessions.clone();
@@ -160,7 +212,7 @@ async fn sse_handler(
 
     let combined_stream = initial_stream.chain(stream);
 
-    Sse::new(combined_stream).keep_alive(axum::response::sse::KeepAlive::new())
+    Ok(Sse::new(combined_stream).keep_alive(axum::response::sse::KeepAlive::new()))
 }
 
 #[derive(serde::Deserialize)]
@@ -170,15 +222,27 @@ struct MessagesQuery {
 }
 
 async fn messages_handler(
-    State(state): State<HttpAppState>,
+    State(state): State<McpState>,
+    Caller(principal): Caller,
     Query(query): Query<MessagesQuery>,
     Json(payload): Json<ClientJsonRpcMessage>,
 ) -> axum::response::Result<impl axum::response::IntoResponse, axum::http::StatusCode> {
-    if let Some(tx) = state.sessions.get(&query.session_id)
+    // A session owned by someone else is reported exactly like an unknown one.
+    let sender = owned_session_sender(&state.sessions, &query.session_id, &principal);
+    if let Some(tx) = sender
         && tx.send(payload).await.is_ok()
     {
         return Ok(axum::http::StatusCode::ACCEPTED);
     }
 
     Err(axum::http::StatusCode::NOT_FOUND)
+}
+
+fn owned_session_sender(
+    sessions: &SessionMap,
+    session_id: &str,
+    principal: &Principal,
+) -> Option<mpsc::Sender<RxJsonRpcMessage<RoleServer>>> {
+    let session = sessions.get(session_id)?;
+    (session.owner == principal.session_owner()).then(|| session.sender.clone())
 }

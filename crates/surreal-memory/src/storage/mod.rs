@@ -95,6 +95,35 @@ pub trait MemoryStorage: Send + Sync {
     async fn get_memory(&self, id: &str) -> Result<Option<Memory>>;
     async fn update_memory(&self, id: &str, content: String) -> Result<Memory>;
     async fn delete_memory(&self, id: &str) -> Result<()>;
+    /// Update a memory only if it belongs to `owner_user_id`. A missing memory
+    /// and one owned by someone else are indistinguishable ("not found").
+    ///
+    /// The default checks ownership with a read and then updates, which is not
+    /// atomic. `SurrealStorage` overrides it with an in-transaction check;
+    /// other implementations that serve restricted callers must do the same.
+    async fn update_memory_owned(
+        &self,
+        id: &str,
+        owner_user_id: &str,
+        content: String,
+    ) -> Result<Memory> {
+        match self.get_memory(id).await? {
+            Some(memory) if memory.user_id.as_deref() == Some(owner_user_id) => {
+                self.update_memory(id, content).await
+            }
+            _ => anyhow::bail!("Memory '{id}' not found"),
+        }
+    }
+    /// Delete a memory only if it belongs to `owner_user_id`. See
+    /// [`MemoryStorage::update_memory_owned`] for the atomicity contract.
+    async fn delete_memory_owned(&self, id: &str, owner_user_id: &str) -> Result<()> {
+        match self.get_memory(id).await? {
+            Some(memory) if memory.user_id.as_deref() == Some(owner_user_id) => {
+                self.delete_memory(id).await
+            }
+            _ => anyhow::bail!("Memory '{id}' not found"),
+        }
+    }
     async fn delete_all_memories(
         &self,
         user_id: Option<&str>,
