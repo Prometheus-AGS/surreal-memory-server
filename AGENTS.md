@@ -214,7 +214,7 @@ EMBEDDING_PROVIDER=openai OPENAI_API_KEY=sk-... ./target/release/surreal-memory-
 | `crates/surreal-memory/src/lib.rs` | Library public API — all re-exports |
 | `crates/surreal-memory/src/storage/mod.rs` | `MemoryStorage` trait (35+ methods) |
 | `crates/surreal-memory/src/storage/surreal.rs` | `SurrealStorage` implementation |
-| `crates/surreal-memory/src/storage/migrations/mod.rs` | Schema migrations (v1–v8) |
+| `crates/surreal-memory/src/storage/migrations/mod.rs` | Schema migrations (v1–v24) |
 | `crates/surreal-memory/src/memory.rs` | `Memory`, `MemoryScope`, `MemoryType` structs |
 | `crates/surreal-memory/src/entity.rs` | `Entity`, `Relation`, `KnowledgeGraph` |
 | `crates/surreal-memory/src/task_stream.rs` | `TaskStream`, `ContextWindow` |
@@ -222,6 +222,7 @@ EMBEDDING_PROVIDER=openai OPENAI_API_KEY=sk-... ./target/release/surreal-memory-
 | `crates/surreal-memory/src/model_profiles.rs` | Token budget registry |
 | `src/mcp/mod.rs` | MCP server tool definitions (40+ tools) |
 | `src/mcp/handlers.rs` | MCP tool handler implementations |
+| `src/auth/` | Verified caller scope: JWT verification, default-deny middleware, per-tenant storage registry |
 
 ## Configuration
 
@@ -252,6 +253,14 @@ Migrations live in `crates/surreal-memory/src/storage/migrations/mod.rs`.
 - v14: Legacy enum string normalization (repair migration)
 - v15: Enum fields as strings for portability
 - v16: Palace `drawers` table with 384d HNSW, BM25, wing/room/hall taxonomy indexes (palace feature)
+- v17: Dynamic embedding index metadata
+- v18: TaskStream scope unique index
+- v19: TaskStep table
+- v20: Durable operation ledger
+- v21: Embedding executor journal
+- v22: Compression derivations and claims
+- v23: Compression evidence and `memory.status` (archived sources)
+- v24: `memory` BM25 full-text index (hybrid search's BM25 leg)
 
 Always check `crates/surreal-memory/src/storage/migrations/mod.rs` for the
 canonical list — this section can lag.
