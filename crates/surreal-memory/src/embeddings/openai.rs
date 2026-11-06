@@ -40,8 +40,10 @@ impl OpenAIEmbeddings {
         };
 
         let cache_namespace = serde_json::json!([
-            "openai", &model,
-            "https://api.openai.com/v1/embeddings;dimensions=default", dimensions
+            "openai",
+            &model,
+            "https://api.openai.com/v1/embeddings;dimensions=default",
+            dimensions
         ])
         .to_string();
 

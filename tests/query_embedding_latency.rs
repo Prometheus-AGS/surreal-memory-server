@@ -40,7 +40,8 @@ async fn measure(service: &SupervisedEmbeddingService, label: &str) -> Vec<f64> 
     let mut out = Vec::with_capacity(SAMPLES);
     for i in 0..SAMPLES {
         // Distinct text per sample, so no layer can serve a repeat.
-        let text = format!("{label} query {i}: how does recall scope pk entries for role delivery?");
+        let text =
+            format!("{label} query {i}: how does recall scope pk entries for role delivery?");
         let started = Instant::now();
         service.embed(&text).await.expect("query embedding");
         out.push(started.elapsed().as_secs_f64());
@@ -55,22 +56,53 @@ async fn query_embedding_latency_idle_and_loaded() {
         "LOCAL_EMBEDDING_EXECUTOR",
         "/usr/local/bin/surreal-memory-mlx-executor",
     ));
-    assert!(executor.exists(), "executor not found: {}", executor.display());
+    assert!(
+        executor.exists(),
+        "executor not found: {}",
+        executor.display()
+    );
     let dimensions: usize = env_or("LOCAL_EMBEDDING_DIMENSIONS", "384").parse().unwrap();
     let home = std::env::var("HOME").unwrap_or_default();
     let child_env = vec![
-        ("EMBEDDING_PROVIDER".to_owned(), env_or("EMBEDDING_PROVIDER", "local")),
-        ("LOCAL_EMBEDDING_MODEL".to_owned(), env_or("LOCAL_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")),
+        (
+            "EMBEDDING_PROVIDER".to_owned(),
+            env_or("EMBEDDING_PROVIDER", "local"),
+        ),
+        (
+            "LOCAL_EMBEDDING_MODEL".to_owned(),
+            env_or("LOCAL_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5"),
+        ),
         (
             "LOCAL_EMBEDDING_MODEL_REVISION".to_owned(),
-            env_or("LOCAL_EMBEDDING_MODEL_REVISION", "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"),
+            env_or(
+                "LOCAL_EMBEDDING_MODEL_REVISION",
+                "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+            ),
         ),
-        ("LOCAL_EMBEDDING_DIMENSIONS".to_owned(), dimensions.to_string()),
-        ("LOCAL_EMBEDDING_BACKEND".to_owned(), env_or("LOCAL_EMBEDDING_BACKEND", "mlx")),
-        ("LOCAL_EMBEDDING_DEVICE".to_owned(), env_or("LOCAL_EMBEDDING_DEVICE", "auto")),
-        ("MODEL_CACHE_DIR".to_owned(), env_or("MODEL_CACHE_DIR", &format!("{home}/.cache/huggingface"))),
-        ("HF_HUB_CACHE".to_owned(), env_or("HF_HUB_CACHE", &format!("{home}/.cache/huggingface/hub"))),
-        ("SURREAL_EXECUTOR_STARTUP_MS".to_owned(), env_or("SURREAL_EXECUTOR_STARTUP_MS", "300000")),
+        (
+            "LOCAL_EMBEDDING_DIMENSIONS".to_owned(),
+            dimensions.to_string(),
+        ),
+        (
+            "LOCAL_EMBEDDING_BACKEND".to_owned(),
+            env_or("LOCAL_EMBEDDING_BACKEND", "mlx"),
+        ),
+        (
+            "LOCAL_EMBEDDING_DEVICE".to_owned(),
+            env_or("LOCAL_EMBEDDING_DEVICE", "auto"),
+        ),
+        (
+            "MODEL_CACHE_DIR".to_owned(),
+            env_or("MODEL_CACHE_DIR", &format!("{home}/.cache/huggingface")),
+        ),
+        (
+            "HF_HUB_CACHE".to_owned(),
+            env_or("HF_HUB_CACHE", &format!("{home}/.cache/huggingface/hub")),
+        ),
+        (
+            "SURREAL_EXECUTOR_STARTUP_MS".to_owned(),
+            env_or("SURREAL_EXECUTOR_STARTUP_MS", "300000"),
+        ),
     ];
     let service = Arc::new(SupervisedEmbeddingService::with_child_env(
         executor,

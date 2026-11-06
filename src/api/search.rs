@@ -87,10 +87,8 @@ pub fn lean_memories(memories: &[Memory], include_embeddings: bool) -> Vec<Value
         .iter()
         .map(|memory| {
             let mut value = serde_json::to_value(memory).unwrap_or(Value::Null);
-            if !include_embeddings {
-                if let Some(object) = value.as_object_mut() {
-                    object.remove("embedding");
-                }
+            if !include_embeddings && let Some(object) = value.as_object_mut() {
+                object.remove("embedding");
             }
             value
         })
