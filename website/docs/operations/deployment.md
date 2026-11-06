@@ -18,7 +18,7 @@ the running server.
 
 | Feature | Effect |
 |---|---|
-| `embedded` | In-process SurrealDB over RocksDB |
+| `embedded` | In-process SurrealDB over SurrealKV |
 | `server-only` | External SurrealDB, no embedded engine |
 | `local-embeddings` | Candle-based local embedding |
 | `metal` / `cuda` | GPU backend (implies `local-embeddings`) |
@@ -37,7 +37,7 @@ Runs `cargo fmt --check`, `cargo clippy -- -D warnings`, and the test suite.
 :::warning Test isolation
 Run integration tests against a **dedicated** SurrealDB, not one shared with
 live services. Sharing an instance makes tests compete with production traffic
-for the same RocksDB, producing intermittent failures that look like code bugs.
+for the same datastore, producing intermittent failures that look like code bugs.
 Set `TEST_SURREAL_ENDPOINT` to a scratch server.
 :::
 
@@ -108,6 +108,26 @@ lsof -nP -iTCP:23001 -sTCP:LISTEN    # bound to 127.0.0.1 only
 
 The server handles `SIGTERM`, so a managed stop logs a clean shutdown rather
 than dying silently.
+
+## Upgrading a running service
+
+Migrations run automatically the first time a new binary starts, so a version bump can
+change your data's schema. A safe order:
+
+1. **Export** the databases (`surreal export`, one per namespace and database) and keep
+   the previous binary somewhere you can find it.
+2. Build the new binary from a clean checkout of the commit you mean to run.
+3. Install it, then restart **only** the memory-server agent. The database agent does
+   not need to restart.
+4. Read the startup log for `Applying migration …` lines, then check `/health` and
+   `/ready`.
+
+Migrations are additive, but they are not reversed by putting the old binary back. To
+return to the previous data, restore from the export.
+
+Remember that a new default can change behavior on upgrade. Since `AUTH_MODE` was
+introduced, the server refuses to start on a non-loopback `API_HOST` without
+`AUTH_MODE=jwt`; see [Authentication and tenancy](../guides/authentication.md).
 
 ## Health and readiness
 

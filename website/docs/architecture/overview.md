@@ -16,6 +16,7 @@ flowchart TB
   end
 
   subgraph binary["surreal-memory-server (binary)"]
+    AUTH["Auth layer — local or JWT<br/>picks the tenant database"]
     MCP["MCP surface — 59 tools<br/>stdio + Streamable HTTP + SSE"]
     REST["REST API — /api/v1, /api/v2"]
     EXEC["Embedding executor supervisor"]
@@ -27,12 +28,14 @@ flowchart TB
   end
 
   subgraph ext["External"]
-    DB[("SurrealDB<br/>embedded RocksDB or server")]
+    DB[("SurrealDB 4.0<br/>embedded SurrealKV or server")]
     CHILD["embedding-executor<br/>child process"]
   end
 
-  CC --> MCP
-  OTHER --> MCP
+  CC --> AUTH
+  OTHER --> AUTH
+  AUTH --> MCP
+  AUTH --> REST
   MCP --> TRAIT
   REST --> TRAIT
   TRAIT --> IMPL
@@ -52,7 +55,7 @@ so a change to this surface ripples outward — it is treated as a stable API.
 
 ### 2. SurrealDB — schema-governed persistence
 
-All persistence runs through migrations (currently **21**). Tables are
+All persistence runs through migrations (currently **24**). Tables are
 `SCHEMAFULL`, which means an undeclared field is a runtime rejection, not a
 silent write. That strictness is deliberate and has a maintenance cost: every
 field added to a persisted Rust struct requires a matching migration.
@@ -84,12 +87,22 @@ short progress watchdog kills healthy children; see
 
 ## Deployment shapes
 
-**Embedded** (`embedded` feature) — SurrealDB runs in-process over RocksDB. One
-process, no external database. RocksDB's stripe locking means concurrent
-transactions on overlapping keys serialize in the storage engine, so in-flight
-operations are bounded by a semaphore (`SURREAL_EMBEDDED_MAX_INFLIGHT`,
-default 16, matching the default stripe count).
+**Embedded** (`embedded` feature) — SurrealDB runs in-process over **SurrealKV**
+(SurrealDB 4.0 removed RocksDB). One process, no external database. Concurrent
+transactions on overlapping keys still serialize in the storage engine, so
+in-flight operations are bounded by a semaphore
+(`SURREAL_EMBEDDED_MAX_INFLIGHT`, default 16). That number was sized on RocksDB's
+stripe count and has not been re-measured on SurrealKV, which syncs every commit by
+default.
 
 **Server** (`server-only`) — connects to an external SurrealDB. Required when
-multiple processes share a database; RocksDB cannot be opened by more than one
-process at a time.
+multiple processes share a database; an embedded SurrealKV directory cannot be
+opened by more than one process at a time.
+
+## Who can reach it
+
+Every HTTP request passes the auth layer first. In `AUTH_MODE=local` (loopback
+only) there is one trusted client and one database. In `AUTH_MODE=jwt` the verified
+token names a tenant, and the request is served from **that tenant's own database**
+with its own operation ledger and cleanup worker; the base storage never serves a
+request. See [Authentication and tenancy](../guides/authentication.md).

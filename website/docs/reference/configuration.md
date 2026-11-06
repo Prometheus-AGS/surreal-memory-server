@@ -14,12 +14,12 @@ against SurrealDB **4.0.0** (SDK pin `=4.0.0`, server image `v4.0.0`).
 | Variable | Default | Notes |
 |---|---|---|
 | `SURREAL_MODE` | `embedded` | `embedded` or `server` |
-| `SURREAL_PATH` | `./data/memory.db` | Embedded RocksDB path |
+| `SURREAL_PATH` | `./data/memory.db` | Embedded SurrealKV directory. With `AUTH_MODE=jwt`, each tenant gets `<path>/tenants/<tenant>` |
 | `SURREAL_ENDPOINT` | — | e.g. `ws://127.0.0.1:28000` |
 | `SURREAL_USERNAME` / `SURREAL_PASSWORD` | — | Server mode credentials |
 | `SURREAL_AUTH_LEVEL` | `root` | `root`, `namespace` or `database` |
 | `SURREAL_NAMESPACE` / `SURREAL_DATABASE` | `memory` / `mcp` | Target namespace/database |
-| `SURREAL_EMBEDDED_MAX_INFLIGHT` | `16` | Matches RocksDB stripe count |
+| `SURREAL_EMBEDDED_MAX_INFLIGHT` | `16` | Embedded-mode concurrency bound; sized on RocksDB, not re-measured on SurrealKV |
 | `SURREAL_QUERY_TIMEOUT_MS` | `10000` | Per-query ceiling (also the operation-ledger deadline) |
 | `SURREAL_OPERATION_DEADLINE_MS` | `30000` | Ceiling for one retried storage operation |
 
@@ -47,10 +47,13 @@ against SurrealDB **4.0.0** (SDK pin `=4.0.0`, server image `v4.0.0`).
 | `LOCAL_EMBEDDING_MODEL_REVISION` | pinned commit | Hugging Face revision of the model |
 | `LOCAL_EMBEDDING_DIMENSIONS` | `384` | Must match the model |
 | `LOCAL_EMBEDDING_DEVICE` | `auto` | `auto` or `cpu` (candle) |
+| `SURREAL_MEMORY_QUERY_EMBED_CACHE` | `512` | Entries in the query-embedding cache (`0` disables caching) |
 | `OPENAI_API_KEY` / `OPENAI_EMBEDDING_MODEL` | — | OpenAI provider |
 | `COHERE_API_KEY` / `COHERE_EMBEDDING_MODEL` | — | Cohere provider |
 
 ## Memory expiry
+
+See also the [Memory expiry guide](../guides/memory-expiry.md).
 
 A memory with `valid_until` set is **expired** once `valid_until` is strictly
 before the operation's cutoff; a `valid_until` equal to the cutoff is still
@@ -72,6 +75,8 @@ audit and cleanup code through `get_memory_including_expired` and
 Expiry is a visibility guarantee, not erasure: history rows are kept by design.
 
 ## Compression (summarizer)
+
+See also the [Compression guide](../guides/compression.md).
 
 `auto_summarize_task_stream` and `compress_memories` run an evidence-backed
 pipeline: a summarizer proposes claims that quote their source text, a
@@ -112,6 +117,9 @@ logged.
 
 ## Authentication and tenancy
 
+The [Authentication and tenancy guide](../guides/authentication.md) has the token
+format, examples and the deployment profile.
+
 `AUTH_MODE=local` (the default) serves an unauthenticated API for the trusted
 local client and is **refused at startup** unless `API_HOST` is a loopback
 address. `AUTH_MODE=jwt` is the shared-deployment mode: every route except
@@ -150,3 +158,12 @@ that opened them. The local stdio MCP transport remains the trusted local client
 | `MCP_STDIO` | `true` | Set `false` for HTTP-only daemons |
 | `RUST_LOG` | `info` | |
 | `TTL_INTERVAL_SECS` | `3600` | TTL cleanup interval; a positive integer, otherwise the default is used with a warning |
+
+## Client commands
+
+The `hook` and `statusline` subcommands read one variable. See
+[CLI and hooks](./cli.md).
+
+| Variable | Default | Notes |
+|---|---|---|
+| `SURREAL_MEMORY_URL` | `http://localhost:23001` | Server the hook client talks to |

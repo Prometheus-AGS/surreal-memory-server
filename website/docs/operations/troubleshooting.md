@@ -64,5 +64,41 @@ nothing was written under, and returns nothing.
 
 ## Embedded mode fails to open the database
 
-RocksDB cannot be opened by two processes at once. Use server mode for
-multi-process access.
+An embedded SurrealKV directory cannot be opened by two processes at once. Use
+server mode for multi-process access.
+
+## The server refuses to start
+
+`refusing to start: AUTH_MODE=local serves an unauthenticated API, but API_HOST=… is
+not a loopback address` means you bound the API to a network address without
+credentials. Either bind `API_HOST=127.0.0.1`, or set `AUTH_MODE=jwt` with
+`AUTH_JWT_ISSUER`, `AUTH_JWT_AUDIENCE`, `AUTH_JWT_ALGORITHM` and a key. The message
+for a missing setting names it. An HS256 key must be at least 32 bytes.
+
+## Requests return 401, 403 or 503 in `jwt` mode
+
+| Symptom | Likely cause |
+|---|---|
+| `401` on every request | no `Authorization: Bearer` header; wrong `iss` or `aud`; signed with another key; `exp` passed |
+| `401` only for old tokens | `iat` is older than `AUTH_JWT_MAX_AGE_SECS` (default 300). Re-issue the token |
+| `401` right after minting | the clock on the issuer is ahead; a token issued more than a few seconds in the future is refused |
+| `403` "outside the credential's scope" | the token has `user_id` and the request named another user (or an empty one) |
+| `403` "restricted to the memory and search routes" | a `user_id` token used another route |
+| `403` "needs the operator permission" | retry, reject or re-key without `"ops":["operator"]` |
+| `503` "tenant storage unavailable" | the tenant database could not be opened or created. In server mode the SurrealDB user needs the right to create namespaces; check the server log for the tenant name |
+
+## A memory exists but cannot be found
+
+Four things make a memory invisible without deleting it:
+
+- it has **expired** (`valid_until` is in the past); see [Memory expiry](../guides/memory-expiry.md)
+- it was **summarized**: its sources are archived and the summary is returned instead;
+  see [Compression](../guides/compression.md)
+- it belongs to **another tenant**, or to another user when your token has `user_id`
+- the search scope names a different `user_id`, `agent_id` or `session_id`
+
+## Cleanup reports failures
+
+`TTL sweep incomplete: failed deletions will be retried on the next pass` is not
+fatal. The rows stay hidden from every read and are retried each pass. If it repeats,
+the log line before it names the cause.
