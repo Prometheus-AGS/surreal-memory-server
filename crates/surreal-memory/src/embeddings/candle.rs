@@ -52,15 +52,20 @@ impl CandleEmbeddings {
             expected_dimensions
         );
 
-        let model_revision = std::env::var("LOCAL_EMBEDDING_MODEL_REVISION")
-            .unwrap_or_else(|_| "main".to_string());
+        let model_revision =
+            std::env::var("LOCAL_EMBEDDING_MODEL_REVISION").unwrap_or_else(|_| "main".to_string());
         // Capture device configuration now, rather than rereading the environment
         // on first inference after the cache identity has been published.
         let force_cpu = force_cpu(std::env::var("LOCAL_EMBEDDING_DEVICE").ok().as_deref())?;
         let cache_namespace = serde_json::json!([
-            "candle", model_id, &model_revision,
+            "candle",
+            model_id,
+            &model_revision,
             "bert;f32;attention-mask-mean;l2;tokenizer-special-tokens",
-            force_cpu, cfg!(feature = "cuda"), cfg!(feature = "metal"), expected_dimensions
+            force_cpu,
+            cfg!(feature = "cuda"),
+            cfg!(feature = "metal"),
+            expected_dimensions
         ])
         .to_string();
 

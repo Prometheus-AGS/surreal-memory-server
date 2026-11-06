@@ -456,9 +456,13 @@ impl SupervisedEmbeddingService {
                                 .filter(|value| !value.is_empty())
                                 .map(|namespace| {
                                     serde_json::json!([
-                                        "supervised", EXECUTOR_PROTOCOL_VERSION,
-                                        &identity.backend, &identity.model_id,
-                                        &identity.model_revision, identity.dimensions, namespace
+                                        "supervised",
+                                        EXECUTOR_PROTOCOL_VERSION,
+                                        &identity.backend,
+                                        &identity.model_id,
+                                        &identity.model_revision,
+                                        identity.dimensions,
+                                        namespace
                                     ])
                                     .to_string()
                                 })

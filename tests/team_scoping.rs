@@ -55,11 +55,13 @@ impl EmbeddingService for TableEmbedder {
 }
 
 /// (content, agent_id, categories, vector).
+type SeedRow = (String, Option<&'static str>, Vec<&'static str>, Vec<f32>);
+
 /// Seven untagged memories sit close to the query; three tagged
 /// `aud:role:ui-dev` sit far away, outside the unfiltered top-k, so a filtered
 /// search can only return them if the filter is applied inside the
 /// nearest-neighbour search.
-fn seed() -> Vec<(String, Option<&'static str>, Vec<&'static str>, Vec<f32>)> {
+fn seed() -> Vec<SeedRow> {
     let mut rows = Vec::new();
     for index in 0..7 {
         rows.push((

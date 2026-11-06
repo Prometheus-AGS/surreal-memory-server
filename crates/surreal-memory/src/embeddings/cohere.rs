@@ -39,8 +39,11 @@ impl CohereEmbeddings {
         };
 
         let cache_namespace = serde_json::json!([
-            "cohere", &model, "https://api.cohere.ai/v1/embed",
-            "input_type=search_document;embedding_types=float", dimensions
+            "cohere",
+            &model,
+            "https://api.cohere.ai/v1/embed",
+            "input_type=search_document;embedding_types=float",
+            dimensions
         ])
         .to_string();
 
