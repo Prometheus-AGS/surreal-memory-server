@@ -79,3 +79,16 @@ Every mutation writes a `memory_history` row recording version, prior content,
 new content, timestamp, and change type. Deletion is included: `delete_memory`
 writes the audit row and removes the record **in one transaction**, so history
 can never describe a deletion that did not happen, or miss one that did.
+
+## Lifecycle: expiry and archiving
+
+A memory can leave normal reads without being deleted:
+
+- **Expired.** A memory with `valid_until` before the operation's cutoff is invisible
+  to every read and cannot be updated or merged into. A cleanup worker deletes it
+  later. See [Memory expiry](../guides/memory-expiry.md).
+- **Summarized.** Compression publishes a summary and archives its sources
+  (`status = 'summarized'`). The sources stay readable by ID as evidence. See
+  [Compression](../guides/compression.md).
+
+Both are visibility rules applied inside the query, in the same way scope is.

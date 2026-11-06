@@ -48,11 +48,25 @@ bag of embeddings:
 - **Mindmaps** — structured graphs with export
 - **Memory Palace** (optional `palace` feature) — a second 384-dimension
   retrieval space
+- **Durable operations** — retry-safe writes with receipts, ordered events and
+  operator controls
+- **Verified caller scope** — optional JWT authentication with one database per
+  tenant, so a shared deployment cannot leak across tenants
+- **Memory expiry** — expired memory is invisible to every read immediately, and
+  cleanup reports what it really removed
+- **Evidence-backed compression** — summaries whose claims quote their sources,
+  with the sources archived rather than deleted
 
-The MCP surface exposes **59 tools** across these areas.
+The MCP surface exposes **59 tools** across these areas, and the REST API covers the
+same ground. Built and tested against SurrealDB **4.0.0**.
 
 ## Where to start
 
+- [Quickstart](guides/quickstart.md) — a running server and your first memory
+- [What's new](whats-new.md) — changes in the current release
+- [Authentication and tenancy](guides/authentication.md) — before you expose the API
+- [Durable operations](guides/durable-operations.md) — writes that survive a crash
+- [REST API](reference/rest-api.md) and [MCP tools](reference/mcp-tools.md) — every route and tool
 - [Architecture overview](architecture/overview.md) — how the pieces fit
 - [Memory model](architecture/memory-model.md) — scopes and types
 - [Deployment](operations/deployment.md) — running it

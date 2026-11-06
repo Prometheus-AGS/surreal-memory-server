@@ -53,6 +53,28 @@ backpressure.
 Server mode gets no semaphore — the remote database schedules its own work, and
 adding a client-side bound would just be a guess about someone else's scheduler.
 
+The number 16 comes from RocksDB's stripe count. SurrealDB 4.0 replaced RocksDB
+with SurrealKV, which syncs every commit by default, and the bound has not been
+re-measured on it. It is kept because it is a safe ceiling, not because it is a
+proven optimum.
+
+## Why one database per tenant
+
+For shared deployments the isolation boundary is a database, chosen only from the
+verified token. The alternative, one shared table with a `tenant_id` column, makes
+isolation depend on every query remembering a predicate, and a single forgotten
+`WHERE` becomes a cross-tenant leak. With a database per tenant a forgotten filter
+can only ever see the caller's own data, and identifiers such as operation IDs
+cannot collide across tenants. The cost is operational: each tenant is a namespace
+to create, back up and migrate.
+
+## Why authentication is default-deny
+
+One middleware authenticates every request and exempts only `/health` and
+`/ready`. A route added next year is therefore protected without anyone having to
+remember to list it, and a test scans the source for routes so an unclassified one
+fails the build.
+
 ## Why SCHEMAFULL despite the maintenance cost
 
 Every persisted field needs a migration, which is real friction. The alternative
