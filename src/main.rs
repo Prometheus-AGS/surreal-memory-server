@@ -423,7 +423,7 @@ async fn connect_surreal_for_repair(
                 .embedded_path
                 .as_ref()
                 .context("Embedded path required for embedded repair mode")?;
-            surrealdb::engine::any::connect(format!("rocksdb://{}", path)).await?
+            surrealdb::engine::any::connect(format!("surrealkv://{}", path)).await?
         }
         surreal_memory::storage::surreal::SurrealMode::Server => {
             let endpoint = config

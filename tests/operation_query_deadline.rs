@@ -58,7 +58,17 @@ async fn start_server() -> (ServerGuard, String) {
     })
     .await
     .expect("isolated surreal fixture becomes reachable");
-    (guard, format!("ws://{address}"))
+    let endpoint = format!("ws://{address}");
+    assert_surrealdb_4(&endpoint).await;
+    (guard, endpoint)
+}
+
+async fn assert_surrealdb_4(endpoint: &str) {
+    let db = surrealdb::engine::any::connect(endpoint)
+        .await
+        .expect("connect to the scratch SurrealDB");
+    let version = db.version().await.expect("read scratch SurrealDB version");
+    assert_eq!(version.to_string(), "4.0.0", "require SurrealDB 4.0.0");
 }
 
 #[async_trait::async_trait]
@@ -417,13 +427,32 @@ fn spawn_persistent_server(address: SocketAddrV4, path: &std::path::Path) -> Ser
             "--allow-all",
             "--bind",
             &address.to_string(),
-            &format!("rocksdb:{}", path.display()),
+            &format!("surrealkv:{}", path.display()),
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .expect("installed surreal CLI starts the persistent fixture");
     ServerGuard(child)
+}
+
+async fn shut_down_persistent_server(mut server: ServerGuard) {
+    let status = Command::new("/bin/kill")
+        .args(["-TERM", &server.0.id().to_string()])
+        .status()
+        .expect("signal the owned SurrealDB fixture");
+    assert!(status.success(), "SurrealDB fixture must receive SIGTERM");
+    let status = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Some(status) = server.0.try_wait().expect("poll SurrealDB shutdown") {
+                return status;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("SurrealDB shuts down within the fixture deadline");
+    assert!(status.success(), "SurrealDB did not shut down cleanly: {status}");
 }
 
 async fn wait_reachable(address: SocketAddrV4) {
@@ -437,6 +466,7 @@ async fn wait_reachable(address: SocketAddrV4) {
     })
     .await
     .expect("persistent surreal fixture becomes reachable");
+    assert_surrealdb_4(&format!("ws://{address}")).await;
 }
 
 fn task_stream_request(operation_id: &str) -> Value {
@@ -514,6 +544,49 @@ async fn submit_until_committed(router: &axum::Router, operation_id: &str) {
     .unwrap_or_else(|_| panic!("{operation_id} did not commit"));
 }
 
+async fn persistence_json(
+    router: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+    expected: StatusCode,
+) -> Value {
+    let mut request = Request::builder().method(method).uri(uri);
+    let body = if let Some(value) = body {
+        request = request.header(header::CONTENT_TYPE, "application/json");
+        Body::from(serde_json::to_vec(&value).expect("serialize fixture request"))
+    } else {
+        Body::empty()
+    };
+    let response = router
+        .clone()
+        .oneshot(request.body(body).expect("build fixture request"))
+        .await
+        .expect("send request through the Memory Server router");
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read fixture response");
+    assert_eq!(status, expected, "{method} {uri}: {}", String::from_utf8_lossy(&bytes));
+    serde_json::from_slice(&bytes).expect("decode fixture response")
+}
+
+async fn assert_scoped_memory(router: &axum::Router, owner: &str, expected: &Value) {
+    let matches = persistence_json(
+        router,
+        "POST",
+        "/api/v1/search",
+        Some(json!({"query":"persistence", "user_id":owner, "limit":10})),
+        StatusCode::OK,
+    )
+    .await;
+    let matches = matches.as_array().expect("scoped retrieval result array");
+    assert_eq!(matches.len(), 1, "scoped results for {owner}: {matches:?}");
+    for field in ["id", "content", "user_id"] {
+        assert_eq!(matches[0][field], expected[field], "scoped memory field {field}");
+    }
+}
+
 #[tokio::test]
 async fn ledger_survives_a_database_restart_without_losing_its_namespace() {
     let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -522,6 +595,8 @@ async fn ledger_survives_a_database_restart_without_losing_its_namespace() {
     };
     drop(listener);
     let data = std::env::temp_dir().join(format!("ledger-restart-{}", uuid::Uuid::new_v4()));
+    // Given a fresh SurrealDB 4.0 SurrealKV store and two distinct owners.
+    assert!(!data.exists(), "persistence fixture must use a fresh directory");
     let server = spawn_persistent_server(address, &data);
     wait_reachable(address).await;
 
@@ -553,11 +628,48 @@ async fn ledger_survives_a_database_restart_without_losing_its_namespace() {
         embedder,
         Duration::from_secs(2),
     );
+    let first = persistence_json(
+        &router,
+        "POST",
+        "/api/v1/memory",
+        Some(json!({"content":"persistence amber", "user_id":"first-owner"})),
+        StatusCode::CREATED,
+    )
+    .await;
+    let second = persistence_json(
+        &router,
+        "POST",
+        "/api/v1/memory",
+        Some(json!({"content":"persistence cobalt", "user_id":"second-owner"})),
+        StatusCode::CREATED,
+    )
+    .await;
+    assert!(first["id"].as_str().is_some() && second["id"].as_str().is_some());
+    assert_ne!(first["id"], second["id"]);
+    assert_scoped_memory(&router, "first-owner", &first).await;
+    assert_scoped_memory(&router, "second-owner", &second).await;
     submit_until_committed(&router, "before-restart").await;
 
-    drop(server);
-    let _server = spawn_persistent_server(address, &data);
+    // When the same 4.0 server reopens the store after a clean shutdown.
+    shut_down_persistent_server(server).await;
+    let server = spawn_persistent_server(address, &data);
     wait_reachable(address).await;
 
+    // Then both owners retain their scoped memories and the ledger still works.
     submit_until_committed(&router, "after-restart").await;
+    let receipt = persistence_json(
+        &router,
+        "GET",
+        "/api/v2/operations/before-restart",
+        None,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(receipt["operation_id"], "before-restart");
+    assert_eq!(receipt["state"], "committed");
+    assert_scoped_memory(&router, "first-owner", &first).await;
+    assert_scoped_memory(&router, "second-owner", &second).await;
+
+    shut_down_persistent_server(server).await;
+    std::fs::remove_dir_all(data).expect("remove the owned SurrealKV fixture");
 }

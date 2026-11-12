@@ -6,20 +6,20 @@ sidebar_position: 2
 
 # Configuration
 
-All configuration is environment-driven. The server is built and tested
-against SurrealDB **3.3.0** (SDK pin `=3.3.0`, server image `v3.3.0`).
+All configuration is environment-driven. The embedded SDK and standalone Compose
+deployment use SurrealDB **4.0.0**. Server mode requires an external SurrealDB 4.0 database.
 
 ## Database
 
 | Variable | Default | Notes |
 |---|---|---|
 | `SURREAL_MODE` | `embedded` | `embedded` or `server` |
-| `SURREAL_PATH` | `./data/memory.db` | Embedded RocksDB path |
+| `SURREAL_PATH` | `./data/memory.db` | Embedded SurrealKV path |
 | `SURREAL_ENDPOINT` | — | e.g. `ws://127.0.0.1:28000` |
 | `SURREAL_USERNAME` / `SURREAL_PASSWORD` | — | Server mode credentials |
 | `SURREAL_AUTH_LEVEL` | `root` | `root`, `namespace` or `database` |
 | `SURREAL_NAMESPACE` / `SURREAL_DATABASE` | `memory` / `mcp` | Target namespace/database |
-| `SURREAL_EMBEDDED_MAX_INFLIGHT` | `16` | Matches RocksDB stripe count |
+| `SURREAL_EMBEDDED_MAX_INFLIGHT` | `16` | Maximum concurrent embedded storage operations |
 | `SURREAL_QUERY_TIMEOUT_MS` | `10000` | Per-query ceiling (also the operation-ledger deadline) |
 | `SURREAL_OPERATION_DEADLINE_MS` | `30000` | Ceiling for one retried storage operation |
 

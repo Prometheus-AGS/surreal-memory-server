@@ -27,7 +27,7 @@ flowchart TB
   end
 
   subgraph ext["External"]
-    DB[("SurrealDB<br/>embedded RocksDB or server")]
+    DB[("SurrealDB<br/>embedded SurrealKV or server")]
     CHILD["embedding-executor<br/>child process"]
   end
 
@@ -84,12 +84,9 @@ short progress watchdog kills healthy children; see
 
 ## Deployment shapes
 
-**Embedded** (`embedded` feature) — SurrealDB runs in-process over RocksDB. One
-process, no external database. RocksDB's stripe locking means concurrent
-transactions on overlapping keys serialize in the storage engine, so in-flight
-operations are bounded by a semaphore (`SURREAL_EMBEDDED_MAX_INFLIGHT`,
-default 16, matching the default stripe count).
+**Embedded** (`embedded` feature) runs SurrealDB in-process over SurrealKV.
+Each store belongs to one process. A semaphore bounds in-flight operations
+through `SURREAL_EMBEDDED_MAX_INFLIGHT`, which defaults to 16.
 
-**Server** (`server-only`) — connects to an external SurrealDB. Required when
-multiple processes share a database; RocksDB cannot be opened by more than one
-process at a time.
+**Server** (`server-only`) connects to an external SurrealDB so multiple
+processes can share a database.

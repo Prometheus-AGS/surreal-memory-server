@@ -1,7 +1,6 @@
-//! Storage writes must survive SurrealDB 3.3 retryable transaction conflicts
-//! (surrealdb-3x-connection-model, c3).
+//! Storage writes must survive retryable transaction conflicts on SurrealDB 4.0.
 //!
-//! A 3.3 server or embedded engine can reject a write to an HNSW-indexed table
+//! A server or embedded engine can reject a write to an HNSW-indexed table
 //! with `Transaction conflict: Resource busy. This transaction can be retried`
 //! (`QueryError::TransactionConflict`). These tests drive enough HNSW writes to
 //! hit that, and assert no conflict reaches the caller and no write is lost or
@@ -14,7 +13,7 @@
 //! ```bash
 //! # Embedded concurrency test (no external server):
 //! cargo test -p surreal-memory --test conflict_retry -- --nocapture
-//! # Server stress test against a scratch 3.3.0 server, never :28000:
+//! # Server stress test against a scratch 4.0.0 server, never :28000:
 //! TEST_SURREAL_ENDPOINT=ws://127.0.0.1:<port> \
 //!   cargo test -p surreal-memory --test conflict_retry -- --ignored --nocapture
 //! ```
@@ -251,15 +250,21 @@ async fn concurrent_embedded_writes_survive_conflicts_without_loss_or_duplicates
 }
 
 /// Sequential add/delete and entity create/delete pairs against a scratch
-/// 3.3.0 server. Zero surfaced errors is required; zero observed retries makes
+/// 4.0.0 server. Zero surfaced errors is required; zero observed retries makes
 /// the run inconclusive rather than a pass.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires TEST_SURREAL_ENDPOINT pointing at a scratch SurrealDB 3.3 server"]
+#[ignore = "requires TEST_SURREAL_ENDPOINT pointing at a scratch SurrealDB 4.0.0 server"]
 async fn server_write_stress_surfaces_no_conflicts() {
     install_retry_counter();
     let retries_before = RETRIES.load(Ordering::SeqCst);
     let endpoint =
         std::env::var("TEST_SURREAL_ENDPOINT").expect("TEST_SURREAL_ENDPOINT must be set");
+    let db = surrealdb::engine::any::connect(endpoint.clone())
+        .await
+        .expect("connect to the scratch SurrealDB");
+    let version = db.version().await.expect("read scratch SurrealDB version");
+    assert_eq!(version.to_string(), "4.0.0", "require SurrealDB 4.0.0");
+    drop(db);
     let embedder: Arc<dyn EmbeddingService> = Arc::new(HashEmbedder);
     let storage = SurrealStorage::new(
         &SurrealConfig {
@@ -267,8 +272,8 @@ async fn server_write_stress_surfaces_no_conflicts() {
             mode: SurrealMode::Server,
             endpoint: Some(endpoint),
             embedded_path: None,
-            username: Some("root".into()),
-            password: Some("root".into()),
+            username: None,
+            password: None,
             namespace: format!("conflict_{}", uuid::Uuid::new_v4().simple()),
             database: "main".into(),
             retry: RetryConfig::default(),

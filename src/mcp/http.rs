@@ -43,7 +43,7 @@ pub fn mcp_http_router(storage: Arc<dyn MemoryStorage>, prefix: &str) -> Router 
 
     // --- Streamable HTTP Endpoint (New Standard) ---
     //
-    // rmcp 1.4.0's `SessionConfig::DEFAULT_KEEP_ALIVE` is 5 minutes. Idle MCP
+    // rmcp's `SessionConfig::DEFAULT_KEEP_ALIVE` is 5 minutes. Idle MCP
     // clients (the common case: a coding agent that calls a tool, thinks for a
     // while, then calls another tool) get culled mid-conversation and the next
     // request returns 404 with `mcp-session-id` set. That manifests upstream as

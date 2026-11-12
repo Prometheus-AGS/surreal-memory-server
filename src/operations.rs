@@ -2513,7 +2513,7 @@ mod tests {
         let unselected_path =
             std::env::temp_dir().join(format!("ledger-unselected-{}", uuid::Uuid::new_v4()));
         let unselected =
-            surrealdb::engine::any::connect(format!("rocksdb://{}", unselected_path.display()))
+            surrealdb::engine::any::connect(format!("surrealkv://{}", unselected_path.display()))
                 .await
                 .unwrap();
         let connect_calls = Arc::new(AtomicUsize::new(0));

@@ -64,5 +64,5 @@ nothing was written under, and returns nothing.
 
 ## Embedded mode fails to open the database
 
-RocksDB cannot be opened by two processes at once. Use server mode for
+An embedded SurrealKV directory can be opened by one process at a time. Use server mode for
 multi-process access.

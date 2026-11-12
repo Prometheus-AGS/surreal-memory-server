@@ -24,11 +24,12 @@ WORKDIR /app
 # Cache dependencies separately from source (layer cache optimization)
 COPY Cargo.toml Cargo.lock ./
 COPY crates/surreal-memory/Cargo.toml crates/surreal-memory/
+COPY vendor/patches ./vendor/patches
 RUN if [ "${PREBUILD_DEPS}" = "1" ]; then \
       mkdir -p src crates/surreal-memory/src \
       && echo "fn main() {}" > src/main.rs \
       && echo "" > crates/surreal-memory/src/lib.rs \
-      && cargo build --release --bin surreal-memory-server ${CARGO_BUILD_FLAGS} 2>/dev/null || true; \
+      && cargo build --release --locked --bin surreal-memory-server ${CARGO_BUILD_FLAGS}; \
     fi
 
 # Now copy and build the real source

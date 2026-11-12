@@ -2,7 +2,7 @@ use anyhow::Result;
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, ServerCapabilities, ServerInfo},
+    model::{CallToolResult, ProtocolVersion, ServerCapabilities, ServerConfig},
     service::RequestContext,
     tool, tool_handler, tool_router,
     transport::stdio,
@@ -641,8 +641,9 @@ impl MemoryMcpServer {
 
 #[tool_handler]
 impl ServerHandler for MemoryMcpServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+            .with_protocol_version(ProtocolVersion::LATEST_WITH_INITIALIZE)
             .with_instructions(
                 "Knowledge graph memory server with scoped memory, TaskStreams, Mindmaps, and Graph-RAG. \
                 Knowledge graph: create_entity/create_entities, add_observations, create_relation/create_relations, \

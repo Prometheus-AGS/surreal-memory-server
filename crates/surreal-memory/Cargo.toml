@@ -17,7 +17,7 @@ path = "src/lib.rs"
 
 [features]
 default = ["embedded"]
-embedded = ["surrealdb/kv-rocksdb"]
+embedded = ["surrealdb/kv-surrealkv"]
 palace = ["dep:mempalace-core"]
 local-embeddings = [
     "candle-core",
@@ -59,9 +59,9 @@ tiktoken-rs = { workspace = true }
 uuid = { workspace = true }
 
 # Candle local embeddings (optional)
-candle-core = { version = "0.9.2", optional = true }
-candle-nn = { version = "0.9.2", optional = true }
-candle-transformers = { version = "0.9.2", optional = true }
+candle-core = { version = "=0.11.1", optional = true }
+candle-nn = { version = "=0.11.1", optional = true }
+candle-transformers = { version = "=0.11.1", optional = true }
 tokenizers = { version = "0.22.2", optional = true }
 hf-hub = { version = "=0.5.0", features = ["tokio"], optional = true }
 

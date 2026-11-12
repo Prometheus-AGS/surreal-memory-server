@@ -45,13 +45,10 @@ replacement on reconnect.
 
 ## Why a semaphore in embedded mode only
 
-RocksDB serializes conflicting transactions across 16 default stripes. Exceeding
-that produces lock-timeout errors that look like application faults. Bounding
-in-flight operations to the stripe count converts the failure into honest
-backpressure.
-
-Server mode gets no semaphore — the remote database schedules its own work, and
-adding a client-side bound would just be a guess about someone else's scheduler.
+The embedded semaphore caps in-flight operations before requests reach the
+storage engine. The limit defaults to 16 and can be set with
+`SURREAL_EMBEDDED_MAX_INFLIGHT`. In server mode, the remote database schedules its
+own work.
 
 ## Why SCHEMAFULL despite the maintenance cost
 

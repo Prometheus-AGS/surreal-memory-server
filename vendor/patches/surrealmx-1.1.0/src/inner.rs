@@ -1,0 +1,603 @@
+// Copyright © SurrealDB Ltd
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! This module stores the inner in-memory database type.
+
+use crate::gc_candidates::GcCandidates;
+use crate::merge_ring::{MergeRing, DEFAULT_MERGE_RING_CAPACITY};
+use crate::oracle::Oracle;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::persistence::Persistence;
+use crate::queue::Commit;
+use crate::readers::Readers;
+use crate::ring::{CommitRing, DEFAULT_COMMIT_RING_CAPACITY};
+use crate::stats::{DatabaseStats, MemoryTracker};
+use crate::sync::RwLock;
+use crate::version_cell::VersionCell;
+use crate::DatabaseOptions;
+use crate::Error;
+use byteslice::ByteSlice;
+use crossbeam_utils::CachePadded;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::thread::JoinHandle;
+
+/// Sentinel published in a slot field while its owning transaction is
+/// choosing its snapshot. Merge versions and commit ids are logical
+/// counters seeded from persisted data and guarded at load time, so they
+/// can never reach this value.
+pub(crate) const SLOT_PINNING: u64 = u64::MAX;
+
+/// Sentinel held in both fields of a registered slot whose transaction has
+/// no snapshot pinned, so watermark scans skip it. Guarded like
+/// [`SLOT_PINNING`].
+pub(crate) const SLOT_UNPINNED: u64 = u64::MAX - 1;
+
+/// Sentinel stored in a commit-queue entry's `merge_version` when the
+/// owning transaction unwound without completing its commit. An aborted
+/// entry counts as complete for the commit-watermark advance (its writes
+/// will never be published) and is skipped by the conflict loop. Real
+/// merge versions are guarded at load time and can never reach this
+/// value.
+pub(crate) const COMMIT_ABORTED: u64 = u64::MAX;
+
+/// Flag set in a commit-queue entry's `merge_version`, together with the
+/// claimed version, once the owning transaction has claimed its merge
+/// version but not yet published it. Persisted versions are guarded at
+/// load time to leave far more headroom than can be claimed, so merge
+/// versions stay below it, and an entry holding it is neither a published
+/// version nor [`COMMIT_ABORTED`].
+pub(crate) const VERSION_CLAIMED: u64 = 1 << 63;
+
+/// A transaction's registration in [`Inner::readers`].
+///
+/// A transaction registers one slot for as long as it exists. Both fields
+/// hold [`SLOT_UNPINNED`] while it has no snapshot. Pinning sets both to
+/// [`SLOT_PINNING`] BEFORE the owning transaction loads its snapshot
+/// (pin-then-read), so every watermark scan either observes the final
+/// snapshot values or the sentinel — and a sentinel forces the sweeper
+/// to treat the watermark as unknown and skip reclamation for that pass.
+/// Each field independently carries the sentinel: a sweeper can scan
+/// between the two value stores, so neither field may be interpreted
+/// before it has left the pinning state. One slot exists per live
+/// transaction and is exclusively owned by it, so state transitions are
+/// plain stores — no CAS protocol is required.
+pub(crate) struct Slot {
+	/// The owner's snapshot merge version, or `SLOT_PINNING`
+	pub(crate) version: AtomicU64,
+	/// The owner's snapshot commit id, or `SLOT_PINNING`
+	pub(crate) commit: AtomicU64,
+}
+
+impl Slot {
+	/// Create a new slot in the unpinned state
+	pub(crate) const fn unpinned() -> Self {
+		Self {
+			version: AtomicU64::new(SLOT_UNPINNED),
+			commit: AtomicU64::new(SLOT_UNPINNED),
+		}
+	}
+}
+
+/// The inner structure of the transactional in-memory database
+pub struct Inner {
+	/// The timestamp version oracle
+	pub(crate) oracle: Arc<Oracle>,
+	/// The underlying concurrent ART datastructure
+	pub(crate) datastore: artmap::ArtMap<ByteSlice, VersionCell>,
+	/// Registered transaction snapshot slots, one per transaction, including
+	/// transactions held in the pool. Watermark scans skip unpinned slots.
+	pub(crate) readers: Readers,
+	/// The fixed-size, lock-free OCC circular commit ring buffer. Its
+	/// completed prefix is the commit watermark: every commit with an id
+	/// at or below it has either published its merge version or aborted.
+	pub(crate) commit_ring: CommitRing<Commit>,
+	/// Transaction updates which are committed but not yet retired
+	pub(crate) transaction_merge_queue: MergeRing,
+	/// The contiguous retired prefix of the merge queue: every merge
+	/// version at or below this watermark has been fully applied to the
+	/// datastore and its queue entry removed. Merge entries are retired
+	/// strictly in version order — never individually on completion —
+	/// because reads resolve the queue overlay with priority over the
+	/// datastore chain: if a newer version's entry were removed while an
+	/// older version was still applying, a reader would find the older
+	/// surviving entry and return a stale value for a snapshot that
+	/// should see the newer one. In-order retirement guarantees every
+	/// version above the watermark is still present in the queue, so the
+	/// newest overlay hit at or below a snapshot is the newest write.
+	/// Bounded by, and advanced only after, the published merge clock
+	/// (`oracle.timestamp`).
+	pub(crate) merge_retire_id: CachePadded<AtomicU64>,
+	/// Set while a thread is retiring merge-queue entries (see
+	/// [`Inner::advance_merge_retirement`]).
+	pub(crate) merge_retiring: CachePadded<AtomicBool>,
+	/// Keys whose version chains may still hold reclaimable garbage:
+	/// chains a commit could not trim to a single live value because a
+	/// reader watermark pinned older versions (or the watermark scan was
+	/// skipped mid-registration), and chains whose newest entry is a
+	/// delete tombstone awaiting collapse. The background sweep visits
+	/// only these keys instead of scanning the whole datastore, so sweep
+	/// cost scales with the amount of pinned garbage rather than the
+	/// dataset size. Only keys are stored (deduplicated, refcounted
+	/// Only keys are stored (deduplicated, refcounted
+	/// `ByteSlice` clones) — never values, which would pin the very memory
+	/// the sweep exists to reclaim. While a long-lived reader pins the
+	/// watermark, every distinct key overwritten during its lifetime
+	/// stays tracked and is revisited (and re-tracked) by each sweep
+	/// tick until the reader departs — the deliberate trade for exact
+	/// reclamation the moment the pin clears; the per-tick cost is one
+	/// chain-lock-and-trim attempt per tracked key.
+	pub(crate) gc_candidates: GcCandidates,
+	/// Optional persistence handler
+	#[cfg(not(target_arch = "wasm32"))]
+	pub(crate) persistence: RwLock<Option<Arc<Persistence>>>,
+	/// Specifies whether background worker threads are enabled
+	pub(crate) background_threads_enabled: AtomicBool,
+	/// Stores a handle to the current transaction cleanup background thread
+	#[cfg(not(target_arch = "wasm32"))]
+	pub(crate) transaction_cleanup_handle: RwLock<Option<JoinHandle<()>>>,
+	/// Stores a handle to the current garbage collection background thread
+	#[cfg(not(target_arch = "wasm32"))]
+	pub(crate) garbage_collection_handle: RwLock<Option<JoinHandle<()>>>,
+	/// Threshold after which transaction state is reset
+	pub(crate) reset_threshold: usize,
+	/// Specifies whether the database has been stopped due to an error
+	pub(crate) is_poisoned: AtomicBool,
+	/// Stores the reason for the database being stopped
+	pub(crate) poison_reason: RwLock<Option<String>>,
+	/// Configured options
+	pub(crate) options: DatabaseOptions,
+	/// Memory accounting tracker
+	pub(crate) memory_tracker: Arc<MemoryTracker>,
+}
+
+impl Inner {
+	/// Create a new [`Inner`] structure with the given options.
+	pub fn new(opts: &DatabaseOptions) -> Self {
+		Self {
+			oracle: Oracle::new(),
+			datastore: artmap::ArtMap::new(),
+			readers: Readers::new(),
+			commit_ring: CommitRing::new(DEFAULT_COMMIT_RING_CAPACITY, 1),
+			transaction_merge_queue: MergeRing::new(DEFAULT_MERGE_RING_CAPACITY),
+			merge_retire_id: CachePadded::new(AtomicU64::new(0)),
+			merge_retiring: CachePadded::new(AtomicBool::new(false)),
+			gc_candidates: GcCandidates::new(),
+			#[cfg(not(target_arch = "wasm32"))]
+			persistence: RwLock::new(None),
+			background_threads_enabled: AtomicBool::new(true),
+			#[cfg(not(target_arch = "wasm32"))]
+			transaction_cleanup_handle: RwLock::new(None),
+			#[cfg(not(target_arch = "wasm32"))]
+			garbage_collection_handle: RwLock::new(None),
+			reset_threshold: opts.reset_threshold,
+			is_poisoned: AtomicBool::new(false),
+			poison_reason: RwLock::new(None),
+			options: opts.clone(),
+			memory_tracker: Arc::new(MemoryTracker::new()),
+		}
+	}
+}
+
+impl Inner {
+	/// Checks if the database has been stopped due to an error.
+	#[inline]
+	pub fn is_poisoned(&self) -> bool {
+		self.is_poisoned.load(Ordering::Acquire)
+	}
+
+	/// Checks if the database has been poisoned, returning an error if so.
+	#[inline]
+	pub fn check_poisoned(&self) -> Result<(), Error> {
+		if self.is_poisoned() {
+			let reason = self
+				.poison_reason
+				.read()
+				.as_ref()
+				.cloned()
+				.unwrap_or_else(|| "unspecified error".to_string());
+			Err(Error::DatabasePoisoned(reason))
+		} else {
+			Ok(())
+		}
+	}
+
+	/// Stops the database with a failure reason (fail-stop).
+	pub fn poison(&self, reason: impl Into<String>) {
+		let reason = reason.into();
+		tracing::error!("Database fail-stop triggered: {reason}");
+		let mut guard = self.poison_reason.write();
+		if guard.is_none() {
+			*guard = Some(reason);
+		}
+		drop(guard);
+		self.is_poisoned.store(true, Ordering::Release);
+	}
+
+	/// Collect runtime statistics for this database.
+	pub fn stats(&self) -> DatabaseStats {
+		let live_keys = self.datastore.len();
+		let live_versions = self.memory_tracker.total_versions();
+		let approx_data_bytes = self.memory_tracker.total_bytes();
+		let gc_candidate_keys = self.gc_candidates.len();
+		let oldest_pinned_version = self.readers.oldest_pinned_version();
+		let active_readers = self.readers.active_readers();
+
+		let commit_taken = self.commit_ring.taken();
+		let commit_wm = self.commit_watermark();
+		let commit_ring_occupancy =
+			usize::try_from(commit_wm.saturating_sub(commit_taken)).unwrap_or(usize::MAX);
+
+		let oracle_ts = self.oracle.timestamp.load(Ordering::Acquire);
+		let merge_retired = self.merge_retire_id.load(Ordering::Acquire);
+		let merge_ring_occupancy =
+			usize::try_from(oracle_ts.saturating_sub(merge_retired)).unwrap_or(usize::MAX);
+
+		#[cfg(not(target_arch = "wasm32"))]
+		let (async_queue_depth, async_queue_bytes, async_dropped_batches) = {
+			if let Some(ref p) = *self.persistence.read() {
+				(
+					p.async_queue_depth.load(Ordering::Relaxed),
+					p.async_queue_bytes.load(Ordering::Relaxed),
+					p.dropped_batches.load(Ordering::Relaxed),
+				)
+			} else {
+				(0, 0, 0)
+			}
+		};
+		#[cfg(target_arch = "wasm32")]
+		let (async_queue_depth, async_queue_bytes, async_dropped_batches) = (0, 0, 0);
+
+		let is_poisoned = self.is_poisoned();
+		let poison_reason = self.poison_reason.read().clone();
+
+		DatabaseStats {
+			live_keys,
+			live_versions,
+			approx_data_bytes,
+			gc_candidate_keys,
+			oldest_pinned_version,
+			active_readers,
+			commit_ring_occupancy,
+			merge_ring_occupancy,
+			async_queue_depth,
+			async_queue_bytes,
+			async_dropped_batches,
+			is_poisoned,
+			poison_reason,
+		}
+	}
+
+	/// Returns the minimum snapshot merge version across all pinned
+	/// transaction slots, bounded by `fallback`, or `None` when any slot
+	/// is mid-registration. See [`earliest_pinned`].
+	#[inline]
+	pub(crate) fn earliest_active_version(&self, fallback: u64) -> Option<u64> {
+		self.readers.earliest_pinned(|s| &s.version, fallback, None)
+	}
+
+	/// Returns the minimum snapshot commit id across all pinned
+	/// transaction slots, bounded by `fallback`, or `None` when any slot
+	/// is mid-registration. See [`earliest_pinned`].
+	#[inline]
+	pub(crate) fn earliest_active_commit(&self, fallback: u64) -> Option<u64> {
+		self.readers.earliest_pinned(|s| &s.commit, fallback, None)
+	}
+
+	/// Returns the number of unretired commits in the commit ring.
+	pub fn unretired_commits(&self) -> u64 {
+		self.commit_ring.published().saturating_sub(self.commit_ring.taken())
+	}
+
+	/// The commit watermark: the contiguous completed prefix of the commit
+	/// ring.
+	#[inline]
+	pub(crate) fn commit_watermark(&self) -> u64 {
+		self.commit_ring.completed()
+	}
+
+	/// Trim commit-queue entries which no active or future transaction can
+	/// need for conflict detection.
+	pub(crate) fn cleanup_commit_queue(&self) {
+		self.refresh_commit_watermark();
+		let fallback = self.commit_watermark();
+		if let Some(oldest) = self.earliest_active_commit(fallback) {
+			self.commit_ring.advance_taken(oldest.saturating_sub(1));
+		}
+	}
+
+	/// Compute the watermark for commit-time inline garbage collection,
+	/// or `None` when a registration is in flight — in which case the
+	/// committer skips inline reclamation for this commit and instead
+	/// tracks each key it touched in [`Inner::gc_candidates`], so the
+	/// tracked background sweep (or the next commit to the key) catches
+	/// up.
+	///
+	/// The committer's own slot is excluded: `commit` takes the
+	/// transaction by mutable reference and marks it done, so no further
+	/// reads can occur at its snapshot. Excluding ANY other slot is
+	/// forbidden — in particular a concurrent committer's slot (pinned at
+	/// its start version, strictly below its merge version) is what
+	/// prevents a delete-collapse from unlinking a chain that a slower
+	/// committer is still about to push an earlier version into, which
+	/// would otherwise resurrect deleted data through the
+	/// `get_or_insert_with` re-seed path.
+	pub(crate) fn inline_gc_watermark(&self, own_slot: usize) -> Option<u64> {
+		// Load the clock bound before the fence-and-scan
+		let now = self.oracle.timestamp.load(Ordering::SeqCst);
+		// Bound by every other registered transaction
+		self.readers.earliest_pinned(|s| &s.version, now, Some(own_slot))
+	}
+
+	/// Compute the next `cleanup_ts` below which no live or future
+	/// transaction can observe a version, or `None` when registrations
+	/// are in flight and the watermark cannot be established.
+	///
+	/// The proposed value is bounded by the published logical clock,
+	/// loaded BEFORE the fence-and-scan over the slots: a transaction
+	/// missed by the scan pinned after the scan, so its snapshot load
+	/// returns at least the clock value we load here, and version
+	/// reclamation always retains the entry visible at the watermark.
+	/// A bounded number of retries absorbs the nanosecond-scale window
+	/// in which a registering transaction is still pinning.
+	pub(crate) fn compute_cleanup_ts(&self) -> Option<u64> {
+		// Retire applied merge-queue entries to free memory before computing
+		// the cleanup bound. Clock advancement is handled continuously by
+		// TransactionInner::publish_merge.
+		self.refresh_merge_watermark();
+		// Retry a bounded number of times while registrations are pinning
+		for _ in 0..3 {
+			// Load the clock bound before the fence-and-scan
+			let now = self.oracle.timestamp.load(Ordering::SeqCst);
+			// Bound by the earliest registered transaction, if any
+			if let Some(earliest) = self.earliest_active_version(now) {
+				return Some(earliest.min(now));
+			}
+			// A registration is mid-pin; give it a beat and retry
+			std::hint::spin_loop();
+		}
+		// Registrations kept arriving; skip this reclamation pass
+		None
+	}
+
+	/// Opportunistically advance the contiguous inserted prefix of the
+	/// commit ring as far as currently possible.
+	pub(crate) fn try_advance_commit_prefix(&self) {
+		self.commit_ring.advance_published();
+	}
+
+	/// Opportunistically advance the published merge clock as far as
+	/// currently possible, through consecutive claimed versions whose
+	/// merge-queue entries have been inserted.
+	pub(crate) fn try_advance_merge_clock(&self) {
+		let max_claimed = self.oracle.alloc.load(Ordering::SeqCst);
+		let cur = self.oracle.timestamp.load(Ordering::SeqCst);
+		let mut target = cur;
+		while target < max_claimed && self.transaction_merge_queue.contains(target + 1) {
+			target += 1;
+		}
+		if target > cur {
+			let _ = self.oracle.timestamp.compare_exchange(
+				cur,
+				target,
+				Ordering::SeqCst,
+				Ordering::SeqCst,
+			);
+		}
+	}
+
+	/// Opportunistically advance both the inserted-prefix bound and the
+	/// completed-prefix watermark of the commit queue as far as
+	/// currently possible. Called by writers after their own commit-slot
+	/// insert to help other in-flight committers make progress, and by
+	/// the cleanup path before computing its trim bound, for freshness.
+	pub(crate) fn refresh_commit_watermark(&self) {
+		self.try_advance_commit_prefix();
+		self.advance_commit_watermark();
+	}
+
+	/// Opportunistically advance both the published merge clock and the
+	/// retired prefix of the merge queue as far as currently possible.
+	/// Called by writers after their own merge insert, and by the
+	/// garbage-collection path before computing its cleanup bound.
+	pub(crate) fn refresh_merge_watermark(&self) {
+		self.try_advance_merge_clock();
+		self.advance_merge_retirement();
+	}
+
+	/// Advance the contiguous completed prefix of the commit ring.
+	pub(crate) fn advance_commit_watermark(&self) {
+		self.commit_ring.advance_completed();
+	}
+
+	/// Advance the contiguous retired prefix of the merge queue, removing
+	/// entries as the watermark passes them.
+	///
+	/// Called by every committer once its merge entry is fully applied to
+	/// the datastore. Entries are removed strictly in version order (see
+	/// the `merge_retire_id` field documentation): the bound is the
+	/// published clock, below which every version's entry was inserted,
+	/// and a missing entry means it was already retired by a racer, so
+	/// its data is in the datastore chains and the watermark may pass it.
+	///
+	/// One thread retires at a time: concurrent walks would repeat the
+	/// same queue lookups and removals over the same prefix, so a caller
+	/// that finds `merge_retiring` set returns at once. Its entry is not
+	/// left behind: every caller marks its entry applied before checking
+	/// the flag, and the retirer re-checks the next entry after clearing
+	/// the flag. In the `SeqCst` order, either the caller sees the flag
+	/// clear and retires, or the retirer sees the entry applied and walks
+	/// again.
+	pub(crate) fn advance_merge_retirement(&self) {
+		loop {
+			// Leave the walk to a retirer that is already running
+			if self.merge_retiring.load(Ordering::SeqCst)
+				|| self.merge_retiring.swap(true, Ordering::SeqCst)
+			{
+				return;
+			}
+			let max_published = self.oracle.timestamp.load(Ordering::SeqCst);
+			let mut target = self.merge_retire_id.load(Ordering::SeqCst);
+			while target < max_published {
+				let next = target + 1;
+				match self.transaction_merge_queue.get(next, |m| m.applied.load(Ordering::SeqCst)) {
+					Some(false) => break,
+					Some(true) => self.transaction_merge_queue.remove(next),
+					None => {}
+				}
+				target = next;
+			}
+			self.merge_retire_id.fetch_max(target, Ordering::SeqCst);
+			self.merge_retiring.store(false, Ordering::SeqCst);
+			// Walk again if the next entry was applied while the flag was held
+			let next = target + 1;
+			if next > self.oracle.timestamp.load(Ordering::SeqCst) {
+				return;
+			}
+			let applied = self
+				.transaction_merge_queue
+				.get(next, |m| m.applied.load(Ordering::SeqCst))
+				.unwrap_or(true);
+			if !applied {
+				return;
+			}
+		}
+	}
+
+	/// Reclaim stale versions on the tracked candidate keys only.
+	///
+	/// Steady-state reclamation happens inline at commit time; whenever a
+	/// commit cannot trim a chain to a single live value it tracks the
+	/// key in [`Inner::gc_candidates`], so this sweep visits exactly the
+	/// keys which may still hold garbage — cost scales with the amount of
+	/// pinned garbage, not the dataset size.
+	///
+	/// Every candidate is drained from the set BEFORE any chain is
+	/// examined. That ordering makes the untrack race-free against
+	/// concurrent commits: a committer tracks its key only after
+	/// pushing the garbage-leaving version under the chain write lock,
+	/// so any garbage added after this sweep's trim re-tracks the key
+	/// for the next pass — the drain here can never orphan it. When
+	/// the trimmed chain still holds reclaimable versions (a reader
+	/// watermark is pinning them), the key is re-tracked for the next
+	/// sweep.
+	#[expect(
+		clippy::significant_drop_tightening,
+		reason = "the version write guard must cover entry.remove() so a committer blocked on it observes is_removed() and re-inserts"
+	)]
+	pub(crate) fn run_gc_tracked(&self, cleanup_ts: u64) {
+		// Untrack every candidate first — see the ordering argument above.
+		// Keys tracked by commits racing with this sweep are picked up by
+		// the next pass.
+		let keys = self.gc_candidates.drain();
+		if keys.is_empty() {
+			return;
+		}
+		// Keys whose garbage a reader watermark still pins
+		let mut retrack = Vec::new();
+		// Process each candidate key in turn
+		// One epoch pin covers every chain read and replacement below
+		let _pin = crate::sync::pin();
+		for key in keys {
+			// The chain may have been unlinked by an earlier collapse
+			let Some(entry) = self.datastore.get(&key) else {
+				continue;
+			};
+			// Lock the chain for writing. The writer is deliberately held
+			// across `entry.remove()` below: a committer blocked on this lock
+			// must observe `is_removed()` and re-insert, rather than writing
+			// into a node we are about to unlink.
+			let mut versions = entry.value().lock();
+			// A sweep or commit-time collapse unlinked this node between
+			// lookup and lock; any recreation re-tracks the key itself
+			if entry.is_removed() {
+				continue;
+			}
+			// Clean up unnecessary older versions
+			let key_len = key.len();
+			let (remaining, needs_gc) = versions.update(|v| {
+				let before = v.footprint(key_len);
+				let remaining = v.gc_older_versions(cleanup_ts);
+				self.memory_tracker.release(before, v.footprint(key_len));
+				(remaining, v.needs_gc())
+			});
+			if remaining == 0 {
+				// Remove the entry while still holding the version write
+				// lock — see the equivalent removal in `run_gc_full`.
+				entry.remove();
+			} else if needs_gc {
+				// Versions remain pinned by a reader watermark: re-track
+				// the key so a later sweep can finish the job.
+				retrack.push(key);
+			}
+		}
+		self.gc_candidates.retrack(retrack);
+	}
+
+	/// Scan the entire datastore, reclaiming stale versions on every key.
+	///
+	/// The background sweep visits only tracked candidate keys (see
+	/// [`Inner::run_gc_tracked`]); this full scan backs the manual
+	/// [`crate::Database::run_gc`] entry point and the one-shot pass at
+	/// persistence load time, which collapses the multi-version chains
+	/// that append-only-log replay builds up. Since a full scan visits
+	/// every key, it supersedes the candidate set: callers clear the set
+	/// before scanning (commits racing with the scan re-track their keys
+	/// as usual).
+	#[expect(
+		clippy::significant_drop_tightening,
+		reason = "the version write guard must cover entry.remove() so a committer blocked on it observes is_removed() and re-inserts"
+	)]
+	pub(crate) fn run_gc_full(&self, cleanup_ts: u64) {
+		// Keys whose garbage a reader watermark still pins
+		let mut retrack = Vec::new();
+		// Iterate over the entire datastore
+		// One epoch pin covers every chain read and replacement below
+		let _pin = crate::sync::pin();
+		for entry in &self.datastore {
+			// Lock the chain for writing
+			let mut versions = entry.value().lock();
+			// Clean up unnecessary older versions
+			let key_len = entry.key().len();
+			let (remaining, needs_gc) = versions.update(|v| {
+				let before = v.footprint(key_len);
+				let remaining = v.gc_older_versions(cleanup_ts);
+				self.memory_tracker.release(before, v.footprint(key_len));
+				(remaining, v.needs_gc())
+			});
+			if remaining == 0 {
+				// Remove the entry while still holding the version write lock,
+				// so a committer blocked on that lock observes `is_removed()`
+				// and re-inserts rather than writing into a node we are about
+				// to unlink.
+				entry.remove();
+			} else if needs_gc {
+				// A reader watermark is pinning reclaimable versions. Track
+				// the key so the targeted sweep revisits it once the pin
+				// clears: the caller cleared the candidate set before this
+				// scan, and no future commit or sweep would otherwise ever
+				// visit a key that is never written again.
+				retrack.push(entry.key().clone());
+			}
+		}
+		self.gc_candidates.retrack(retrack);
+	}
+}
+
+impl Default for Inner {
+	fn default() -> Self {
+		Self::new(&DatabaseOptions::default())
+	}
+}

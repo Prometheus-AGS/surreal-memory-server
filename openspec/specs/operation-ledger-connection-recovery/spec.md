@@ -12,7 +12,7 @@ Before executing its first ledger query, the operation service SHALL open a
 server-mode ledger connection independently of the general storage transport.
 Concurrent first use MUST converge on one published ledger generation. In
 embedded mode it SHALL instead clone the in-process SDK handle because a second
-RocksDB open on the same path is invalid; the clone MUST NOT publish or mutate
+SurrealKV open on the same path is invalid; the clone MUST NOT publish or mutate
 general storage connection state.
 
 #### Scenario: First ledger query overlaps ordinary storage work
@@ -27,7 +27,7 @@ general storage connection state.
 - **THEN** initialization is serialized
 - **AND** every caller observes the same published ledger generation
 
-#### Scenario: Embedded ledger initializes without reopening RocksDB
+#### Scenario: Embedded ledger initializes without reopening SurrealKV
 
 - **WHEN** the operation service uses an embedded database
 - **THEN** ledger initialization clones the existing in-process SDK handle

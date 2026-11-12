@@ -22,15 +22,10 @@ starvation under load. The lock was the bug, not the protection.
 
 ## Bounded concurrency in embedded mode
 
-RocksDB's `PointLockManager` defaults to 16 stripes per column family, so
-concurrent transactions on overlapping keys serialize at the storage engine.
-Layering an application lock on top compounds that into lock-timeout and
-serialization-failure errors.
-
-The fix is a semaphore sized to the stripe count
-(`SURREAL_EMBEDDED_MAX_INFLIGHT`, default 16), which converts queueing into
-honest backpressure. Server mode does not use it — the remote database schedules
-its own work.
+A semaphore bounds concurrent embedded operations
+(`SURREAL_EMBEDDED_MAX_INFLIGHT`, default 16). The limit provides backpressure
+before requests reach the in-process storage engine. In server mode, the
+remote database schedules its own work.
 
 ## Retry classification
 

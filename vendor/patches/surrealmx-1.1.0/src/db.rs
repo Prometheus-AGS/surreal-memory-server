@@ -1,0 +1,2485 @@
+// Copyright © SurrealDB Ltd
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! This module stores the core in-memory database type.
+
+use crate::err::Error;
+use crate::inner::Inner;
+use crate::kv::IntoBytes;
+use crate::options::DatabaseOptions;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::options::{DEFAULT_CLEANUP_INTERVAL, DEFAULT_GC_INTERVAL};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::persistence::Persistence;
+use crate::pool::Pool;
+use crate::pool::DEFAULT_POOL_SIZE;
+use crate::stats::DatabaseStats;
+use crate::thread_slot::ThreadSnapshot;
+use crate::tx::Transaction;
+use byteslice::ByteSlice;
+use std::ops::{Bound, Deref, Range};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
+
+// --------------------------------------------------
+// Database
+// --------------------------------------------------
+
+/// A transactional in-memory database
+pub struct Database {
+	/// The inner structure of the database
+	inner: Arc<Inner>,
+	/// The database transaction pool
+	pool: Arc<Pool>,
+	/// Optional persistence configuration
+	#[cfg(not(target_arch = "wasm32"))]
+	persistence: Option<Persistence>,
+	/// Interval used by the garbage collector thread
+	#[cfg(not(target_arch = "wasm32"))]
+	gc_interval: Duration,
+	/// Interval used by the cleanup thread
+	#[cfg(not(target_arch = "wasm32"))]
+	cleanup_interval: Duration,
+}
+
+impl Default for Database {
+	fn default() -> Self {
+		let inner = Arc::new(Inner::default());
+		let pool = Pool::new(Arc::clone(&inner), DEFAULT_POOL_SIZE);
+		Self {
+			inner,
+			pool,
+			#[cfg(not(target_arch = "wasm32"))]
+			persistence: None,
+			#[cfg(not(target_arch = "wasm32"))]
+			gc_interval: DEFAULT_GC_INTERVAL,
+			#[cfg(not(target_arch = "wasm32"))]
+			cleanup_interval: DEFAULT_CLEANUP_INTERVAL,
+		}
+	}
+}
+
+impl Drop for Database {
+	fn drop(&mut self) {
+		self.shutdown();
+	}
+}
+
+impl Deref for Database {
+	type Target = Inner;
+
+	fn deref(&self) -> &Self::Target {
+		&self.inner
+	}
+}
+
+impl Database {
+	/// Create a new transactional in-memory database
+	pub fn new() -> Self {
+		Self::new_with_options(DatabaseOptions::default())
+	}
+
+	/// Create a new transactional in-memory database with custom options
+	pub fn new_with_options(opts: DatabaseOptions) -> Self {
+		//  Create a new inner database
+		let inner = Arc::new(Inner::new(&opts));
+		// Initialise a transaction pool
+		let pool = Pool::new(Arc::clone(&inner), opts.pool_size);
+		// Create the database
+		let db = Self {
+			inner,
+			pool,
+			#[cfg(not(target_arch = "wasm32"))]
+			persistence: None,
+			#[cfg(not(target_arch = "wasm32"))]
+			gc_interval: opts.gc_interval,
+			#[cfg(not(target_arch = "wasm32"))]
+			cleanup_interval: opts.cleanup_interval,
+		};
+		// Start background tasks when enabled
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			if opts.enable_cleanup {
+				db.initialise_cleanup_worker();
+			}
+			if opts.enable_gc {
+				db.initialise_garbage_worker();
+			}
+		}
+		// Return the database
+		db
+	}
+
+	/// Create a new persistent database with custom options and persistence
+	/// settings
+	#[cfg(not(target_arch = "wasm32"))]
+	pub fn new_with_persistence(
+		opts: DatabaseOptions,
+		persistence_opts: crate::PersistenceOptions,
+	) -> std::io::Result<Self> {
+		//  Create a new inner database
+		let inner = Arc::new(Inner::new(&opts));
+		// Initialise a transaction pool
+		let pool = Pool::new(Arc::clone(&inner), opts.pool_size);
+		// Create a new persistence layer with options
+		let persist = Persistence::new_with_options(persistence_opts, &inner)
+			.map_err(std::io::Error::other)?;
+		// Replace the persistence layer in the database
+		inner.persistence.write().replace(Arc::new(persist.clone()));
+		// Create the database
+		let db = Self {
+			inner,
+			pool,
+			persistence: Some(persist),
+			gc_interval: opts.gc_interval,
+			cleanup_interval: opts.cleanup_interval,
+		};
+		// Start background tasks when enabled
+		if opts.enable_cleanup {
+			db.initialise_cleanup_worker();
+		}
+		if opts.enable_gc {
+			db.initialise_garbage_worker();
+		}
+		// Return the database
+		Ok(db)
+	}
+
+	/// Returns whether the database has been stopped due to an error.
+	pub fn is_poisoned(&self) -> bool {
+		self.inner.is_poisoned()
+	}
+
+	/// Checks whether the database has been stopped, returning an error if so.
+	pub fn check_poisoned(&self) -> Result<(), Error> {
+		self.inner.check_poisoned()
+	}
+
+	/// Returns current runtime statistics for the database.
+	pub fn stats(&self) -> DatabaseStats {
+		self.inner.stats()
+	}
+
+	/// Start a new transaction on this database
+	pub fn transaction(&self, write: bool) -> Transaction {
+		self.pool.get(write)
+	}
+
+	/// Fetch a key directly from the database without allocating a transaction.
+	///
+	/// The read is linearizable: it returns the latest value committed
+	/// before the call, or a value committed while the call was in
+	/// progress. It holds no snapshot, so use a transaction to read several
+	/// keys consistently.
+	pub fn get<K: IntoBytes>(&self, key: K) -> Result<Option<ByteSlice>, Error> {
+		self.inner.check_poisoned()?;
+		let version = self.inner.oracle.timestamp.load(Ordering::Acquire);
+		let lookup = key.as_slice();
+		let retired = self.inner.merge_retire_id.load(Ordering::Acquire);
+		if version > retired {
+			if let Some(v) = self.inner.transaction_merge_queue.newest_write(
+				retired,
+				version,
+				lookup,
+				Clone::clone,
+			) {
+				return Ok(v);
+			}
+		}
+		let res = ByteSlice::with_borrowed(lookup, |k| {
+			self.inner.datastore.get(k).and_then(|e| {
+				e.value().read(|v| v.fetch_unpinned(version).and_then(|v| v.value.clone()))
+			})
+		});
+		Ok(res)
+	}
+
+	/// Inspect a key's value directly via closure without allocating a
+	/// transaction or cloning. Linearizable, as [`Database::get`].
+	pub fn with_value<K, F, R>(&self, key: K, f: F) -> Result<Option<R>, Error>
+	where
+		K: IntoBytes,
+		F: FnOnce(&[u8]) -> R,
+	{
+		self.inner.check_poisoned()?;
+		let version = self.inner.oracle.timestamp.load(Ordering::Acquire);
+		let lookup = key.as_slice();
+		// Only taken if the merge queue holds the key's newest write
+		let mut f = Some(f);
+		let retired = self.inner.merge_retire_id.load(Ordering::Acquire);
+		if version > retired {
+			if let Some(v) =
+				self.inner.transaction_merge_queue.newest_write(retired, version, lookup, |v| {
+					v.as_deref().and_then(|bytes| f.take().map(|f| f(bytes)))
+				}) {
+				return Ok(v);
+			}
+		}
+		let Some(f) = f else {
+			return Ok(None);
+		};
+		let res = ByteSlice::with_borrowed(lookup, |k| {
+			self.inner.datastore.get(k).and_then(|e| {
+				e.value()
+					.read(|v| v.fetch_unpinned(version).and_then(|v| v.value.as_deref().map(f)))
+			})
+		});
+		Ok(res)
+	}
+
+	/// Check if a key exists directly without allocating a transaction.
+	/// Linearizable, as [`Database::get`].
+	pub fn exists<K: IntoBytes>(&self, key: K) -> Result<bool, Error> {
+		self.inner.check_poisoned()?;
+		let version = self.inner.oracle.timestamp.load(Ordering::Acquire);
+		let lookup = key.as_slice();
+		let retired = self.inner.merge_retire_id.load(Ordering::Acquire);
+		if version > retired {
+			if let Some(v) = self.inner.transaction_merge_queue.newest_write(
+				retired,
+				version,
+				lookup,
+				Option::is_some,
+			) {
+				return Ok(v);
+			}
+		}
+		let exists = ByteSlice::with_borrowed(lookup, |k| {
+			self.inner.datastore.get(k).is_some_and(|e| {
+				e.value().read(|v| v.fetch_unpinned(version).is_some_and(|v| v.value.is_some()))
+			})
+		});
+		Ok(exists)
+	}
+
+	/// Scan key-value pairs in a range directly from the database at a
+	/// consistent snapshot, calling a closure with borrowed key and value
+	/// bytes and stopping early if the closure returns `false`. The calling
+	/// thread's own reader slot pins the snapshot, and the datastore is read
+	/// in place whenever no merge is still being applied. Otherwise, or when
+	/// called from within another direct scan on the same thread, a pooled
+	/// read transaction serves the scan.
+	pub fn scan_with<K, F>(
+		&self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		mut f: F,
+	) -> Result<usize, Error>
+	where
+		K: IntoBytes,
+		F: FnMut(&ByteSlice, &[u8]) -> bool,
+	{
+		self.inner.check_poisoned()?;
+		let beg = rng.start.into_bytes();
+		let end = rng.end.into_bytes();
+		// Pin a snapshot for the whole scan: without it, inline GC in
+		// concurrent commits can reclaim the versions being scanned. The
+		// datastore is read in place only once every merge is applied
+		let snapshot = ThreadSnapshot::pin(&self.inner)
+			.filter(|s| s.version() <= self.inner.merge_retire_id.load(Ordering::Acquire));
+		let Some(snapshot) = snapshot else {
+			return self.transaction(false).scan_with(beg..end, skip, limit, f);
+		};
+		let version = snapshot.version();
+		// One epoch pin covers every version read in the scan
+		let _pin = crate::sync::pin();
+		let mut count = 0;
+		let mut skip = skip.unwrap_or_default();
+		let datastore_range =
+			self.inner.datastore.range((Bound::Included(beg), Bound::Excluded(end)));
+		for entry in datastore_range {
+			let matched = entry.value().read(|v| {
+				v.with_version(version, |bytes| {
+					if skip > 0 {
+						skip -= 1;
+						true
+					} else {
+						count += 1;
+						f(entry.key(), bytes)
+					}
+				})
+			});
+			if let Some(continue_iter) = matched {
+				if !continue_iter {
+					break;
+				}
+			}
+			if let Some(l) = limit {
+				if count >= l {
+					break;
+				}
+			}
+		}
+		Ok(count)
+	}
+
+	/// Iterate keys in a range directly from the database at a consistent
+	/// snapshot, stopping early if the closure returns `false`. See
+	/// [`Database::scan_with`].
+	pub fn keys_for_each<K, F>(
+		&self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		mut f: F,
+	) -> Result<usize, Error>
+	where
+		K: IntoBytes,
+		F: FnMut(&ByteSlice) -> bool,
+	{
+		self.inner.check_poisoned()?;
+		let beg = rng.start.into_bytes();
+		let end = rng.end.into_bytes();
+		// Pin a snapshot for the whole scan: without it, inline GC in
+		// concurrent commits can reclaim the versions being scanned. The
+		// datastore is read in place only once every merge is applied
+		let snapshot = ThreadSnapshot::pin(&self.inner)
+			.filter(|s| s.version() <= self.inner.merge_retire_id.load(Ordering::Acquire));
+		let Some(snapshot) = snapshot else {
+			return self.transaction(false).keys_for_each(beg..end, skip, limit, f);
+		};
+		let version = snapshot.version();
+		// One epoch pin covers every version read in the scan
+		let _pin = crate::sync::pin();
+		let mut count = 0;
+		let mut skip = skip.unwrap_or_default();
+		let datastore_range =
+			self.inner.datastore.range((Bound::Included(beg), Bound::Excluded(end)));
+		for entry in datastore_range {
+			let exists = entry.value().read(|v| v.exists_version(version));
+			if !exists {
+				continue;
+			}
+			if skip > 0 {
+				skip -= 1;
+				continue;
+			}
+			count += 1;
+			if !f(entry.key()) {
+				break;
+			}
+			if let Some(l) = limit {
+				if count >= l {
+					break;
+				}
+			}
+		}
+		Ok(count)
+	}
+
+	/// Count keys in a range directly from the database at a consistent
+	/// snapshot. See [`Database::scan_with`].
+	pub fn total<K>(
+		&self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+	) -> Result<usize, Error>
+	where
+		K: IntoBytes,
+	{
+		self.inner.check_poisoned()?;
+		let beg = rng.start.into_bytes();
+		let end = rng.end.into_bytes();
+		// Pin a snapshot for the whole scan: without it, inline GC in
+		// concurrent commits can reclaim the versions being scanned. The
+		// datastore is read in place only once every merge is applied
+		let snapshot = ThreadSnapshot::pin(&self.inner)
+			.filter(|s| s.version() <= self.inner.merge_retire_id.load(Ordering::Acquire));
+		let Some(snapshot) = snapshot else {
+			return self.transaction(false).total(beg..end, skip, limit);
+		};
+		let version = snapshot.version();
+		// One epoch pin covers every version read in the scan
+		let _pin = crate::sync::pin();
+		let mut count = 0;
+		let mut skip = skip.unwrap_or_default();
+		let datastore_range =
+			self.inner.datastore.range((Bound::Included(beg), Bound::Excluded(end)));
+		for entry in datastore_range {
+			let exists = entry.value().read(|v| v.exists_version(version));
+			if !exists {
+				continue;
+			}
+			if skip > 0 {
+				skip -= 1;
+				continue;
+			}
+			count += 1;
+			if let Some(l) = limit {
+				if count >= l {
+					break;
+				}
+			}
+		}
+		Ok(count)
+	}
+
+	/// Scan key-value pairs into a caller-provided buffer, reusing its
+	/// capacity.
+	pub fn scan_into<K>(
+		&self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		buf: &mut Vec<(ByteSlice, ByteSlice)>,
+	) -> Result<(), Error>
+	where
+		K: IntoBytes,
+	{
+		buf.clear();
+		let initial_cap = limit.unwrap_or(128).min(10_000);
+		if buf.capacity() < initial_cap {
+			buf.reserve(initial_cap - buf.capacity());
+		}
+		self.scan_with(rng, skip, limit, |k, v| {
+			buf.push((k.clone(), ByteSlice::from(v)));
+			true
+		})?;
+		Ok(())
+	}
+
+	/// Scan keys into a caller-provided buffer, reusing its capacity.
+	pub fn keys_into<K>(
+		&self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+		buf: &mut Vec<ByteSlice>,
+	) -> Result<(), Error>
+	where
+		K: IntoBytes,
+	{
+		buf.clear();
+		let initial_cap = limit.unwrap_or(128).min(10_000);
+		if buf.capacity() < initial_cap {
+			buf.reserve(initial_cap - buf.capacity());
+		}
+		self.keys_for_each(rng, skip, limit, |k| {
+			buf.push(k.clone());
+			true
+		})?;
+		Ok(())
+	}
+
+	/// Scan key-value pairs in a range directly from the database at a
+	/// consistent snapshot. See [`Database::scan_with`].
+	pub fn scan<K>(
+		&self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+	) -> Result<Vec<(ByteSlice, ByteSlice)>, Error>
+	where
+		K: IntoBytes,
+	{
+		let mut res = Vec::with_capacity(limit.unwrap_or(128).min(10_000));
+		self.scan_into(rng, skip, limit, &mut res)?;
+		Ok(res)
+	}
+
+	/// Scan keys in a range directly from the database at a consistent
+	/// snapshot. See [`Database::scan_with`].
+	pub fn keys<K>(
+		&self,
+		rng: Range<K>,
+		skip: Option<usize>,
+		limit: Option<usize>,
+	) -> Result<Vec<ByteSlice>, Error>
+	where
+		K: IntoBytes,
+	{
+		let mut res = Vec::with_capacity(limit.unwrap_or(128).min(10_000));
+		self.keys_into(rng, skip, limit, &mut res)?;
+		Ok(res)
+	}
+
+	/// Set a key to a value in an auto-committed write transaction.
+	///
+	/// Atomically sets the key to the specified value and commits the write.
+	/// Overwrites any existing value at the key. The write reads nothing, so
+	/// a write-write conflict with a concurrent transaction is retried
+	/// against a fresh snapshot rather than returned.
+	#[inline]
+	pub fn set<K: IntoBytes, V: IntoBytes>(&self, key: K, val: V) -> Result<(), Error> {
+		let key = key.into_bytes();
+		let val = val.into_bytes();
+		self.blind_write(|tx| tx.set(key.clone(), val.clone()))
+	}
+
+	/// Put a key to a value in an auto-committed write transaction.
+	///
+	/// Atomically inserts the key-value pair, returning an error if the key
+	/// already exists in the datastore.
+	#[inline]
+	pub fn put<K: IntoBytes, V: IntoBytes>(&self, key: K, val: V) -> Result<(), Error> {
+		let mut tx = self.transaction(true);
+		tx.put(key, val)?;
+		tx.commit()
+	}
+
+	/// Conditionally set a key to a value in an auto-committed write
+	/// transaction.
+	///
+	/// Succeeds only if the existing value at `key` matches `chk` (or does not
+	/// exist when `chk` is `None`).
+	#[inline]
+	pub fn putc<K: IntoBytes, V: IntoBytes, C: IntoBytes>(
+		&self,
+		key: K,
+		val: V,
+		chk: Option<C>,
+	) -> Result<(), Error> {
+		let mut tx = self.transaction(true);
+		tx.putc(key, val, chk)?;
+		tx.commit()
+	}
+
+	/// Delete a key in an auto-committed write transaction.
+	///
+	/// Atomically creates a tombstone at the key and commits the deletion.
+	/// Like [`Database::set`], a write-write conflict is retried rather than
+	/// returned.
+	#[inline]
+	pub fn del<K: IntoBytes>(&self, key: K) -> Result<(), Error> {
+		let key = key.into_bytes();
+		self.blind_write(|tx| tx.del(key.clone()))
+	}
+
+	/// Commit a write that reads nothing, retrying on write-write conflicts.
+	///
+	/// This goes through a full transaction on purpose: a direct write must
+	/// be pinned while it applies (or inline GC can collapse a chain under
+	/// it), publish through the merge queue in version order (or a snapshot
+	/// can see the clock pass it before its write lands), and be validated
+	/// against concurrent commits (or first-committer-wins is lost). With no
+	/// reads to invalidate, any snapshot is as good as another, so a
+	/// conflict is always safe to retry.
+	fn blind_write(
+		&self,
+		write: impl Fn(&mut Transaction) -> Result<(), Error>,
+	) -> Result<(), Error> {
+		let mut spins = 0;
+		loop {
+			let mut tx = self.transaction(true);
+			write(&mut tx)?;
+			match tx.commit() {
+				Err(Error::KeyWriteConflict) => {
+					crate::sync::backoff(spins);
+					spins += 1;
+				}
+				res => return res,
+			}
+		}
+	}
+
+	/// Conditionally delete a key in an auto-committed write transaction.
+	///
+	/// Succeeds only if the existing value at `key` matches `chk` (or does not
+	/// exist when `chk` is `None`).
+	#[inline]
+	pub fn delc<K: IntoBytes, C: IntoBytes>(&self, key: K, chk: Option<C>) -> Result<(), Error> {
+		let mut tx = self.transaction(true);
+		tx.delc(key, chk)?;
+		tx.commit()
+	}
+
+	/// Get a reference to the persistence layer if enabled
+	#[cfg(not(target_arch = "wasm32"))]
+	pub const fn persistence(&self) -> Option<&Persistence> {
+		self.persistence.as_ref()
+	}
+
+	/// Returns the number of unretired commits in the commit ring.
+	#[cfg(test)]
+	pub fn unretired_commits(&self) -> u64 {
+		self.inner.unretired_commits()
+	}
+
+	/// Manually perform transaction queue cleanup.
+	///
+	/// This trims commit queue entries below the earliest active
+	/// transaction's commit snapshot — or, when no transaction is
+	/// registered, below the current commit id — so an idle database
+	/// releases the whole queue rather than pinning it at its peak.
+	///
+	/// This should be called when automatic cleanup is disabled via
+	/// [`DatabaseOptions::enable_cleanup`].
+	pub fn run_cleanup(&self) {
+		self.inner.cleanup_commit_queue();
+	}
+
+	/// Manually perform a full garbage collection sweep.
+	///
+	/// Steady-state reclamation happens inline at commit time: every
+	/// commit trims the chains it touches down to the current watermark,
+	/// and tracks any chain it could not fully trim for the targeted
+	/// sweep (see [`Database::run_gc_tracked`]). This full scan visits
+	/// every key regardless of tracking, so it also supersedes the
+	/// candidate set — the set is cleared before scanning, and commits
+	/// racing with the scan re-track their keys as usual. It is useful
+	/// when automatic background GC is disabled via
+	/// [`DatabaseOptions::enable_gc`], for example on wasm targets,
+	/// which have no background threads.
+	pub fn run_gc(&self) {
+		// Skip the pass entirely when registrations are in flight
+		if let Some(cleanup_ts) = self.compute_cleanup_ts() {
+			// The full scan visits every candidate anyway
+			self.gc_candidates.clear();
+			// Perform a full datastore scan for stale versions
+			self.run_gc_full(cleanup_ts);
+		}
+	}
+
+	/// Manually sweep only the keys tracked as holding reclaimable
+	/// version garbage.
+	///
+	/// Commits track every chain they could not trim to a single live
+	/// value (older versions pinned by a reader, or a newest-entry
+	/// delete tombstone awaiting collapse), so this sweep's cost scales
+	/// with the amount of pinned garbage rather than the dataset size.
+	/// This is the pass the background garbage collector runs on every
+	/// tick; call it manually when background GC is disabled via
+	/// [`DatabaseOptions::enable_gc`], reserving the full-scan
+	/// [`Database::run_gc`] for occasional use.
+	pub fn run_gc_tracked(&self) {
+		// The steady state is an empty candidate set: skip the watermark
+		// computation (a fence and full slot scan) entirely when there
+		// is nothing to sweep. A key tracked concurrently with this
+		// check is picked up by the next pass.
+		if self.gc_candidates.is_empty() {
+			return;
+		}
+		// Skip the pass entirely when registrations are in flight
+		if let Some(cleanup_ts) = self.compute_cleanup_ts() {
+			// Sweep only the tracked candidate keys
+			self.inner.run_gc_tracked(cleanup_ts);
+		}
+	}
+
+	/// Shutdown the datastore, waiting for background threads to exit
+	fn shutdown(&self) {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			// First, disable Persistence background workers if present
+			if let Some(ref persistence) = self.persistence {
+				// Disable the persistence background workers
+				persistence.background_threads_enabled.store(false, Ordering::Release);
+				// Wait for persistence threads to exit. Each `take` is hoisted
+				// into its own statement so the write guard is released before
+				// the blocking `join`, instead of being held across it.
+				let fsync = persistence.fsync_handle.write().take();
+				if let Some(handle) = fsync {
+					handle.thread().unpark();
+					let _ = handle.join();
+				}
+				let snapshot = persistence.snapshot_handle.write().take();
+				if let Some(handle) = snapshot {
+					handle.thread().unpark();
+					let _ = handle.join();
+				}
+				let appender = persistence.appender_handle.write().take();
+				if let Some(handle) = appender {
+					handle.thread().unpark();
+					let _ = handle.join();
+				}
+			}
+		}
+		// Then disable Database background workers
+		self.background_threads_enabled.store(false, Ordering::Relaxed);
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			// Wait for the transaction cleanup thread to exit
+			let cleanup = self.transaction_cleanup_handle.write().take();
+			if let Some(handle) = cleanup {
+				handle.thread().unpark();
+				let _ = handle.join();
+			}
+			// Wait for the garbage collector thread to exit
+			let gc = self.garbage_collection_handle.write().take();
+			if let Some(handle) = gc {
+				handle.thread().unpark();
+				let _ = handle.join();
+			}
+		}
+	}
+
+	/// Start the transaction commit queue cleanup thread after creating the
+	/// database
+	#[cfg(not(target_arch = "wasm32"))]
+	fn initialise_cleanup_worker(&self) {
+		// Clone the underlying datastore inner
+		let db = Arc::clone(&self.inner);
+		// Check if a background thread is already running
+		if db.transaction_cleanup_handle.read().is_none() {
+			// Get the specified interval
+			let interval = self.cleanup_interval;
+			// Spawn a new thread to handle periodic cleanup
+			let handle = std::thread::spawn(move || {
+				// Check whether the garbage collection process is enabled
+				while db.background_threads_enabled.load(Ordering::Relaxed) {
+					// Wait for a specified time interval
+					std::thread::park_timeout(interval);
+					// Check shutdown flag again after waking
+					if !db.background_threads_enabled.load(Ordering::Relaxed) {
+						break;
+					}
+					// Clean up the transaction commit queue
+					db.cleanup_commit_queue();
+				}
+			});
+			// Store and track the thread handle
+			*self.inner.transaction_cleanup_handle.write() = Some(handle);
+		}
+	}
+
+	/// Start the garbage collection thread after creating the database
+	#[cfg(not(target_arch = "wasm32"))]
+	fn initialise_garbage_worker(&self) {
+		// Clone the underlying datastore inner
+		let db = Arc::clone(&self.inner);
+		// Check if a background thread is already running
+		if db.garbage_collection_handle.read().is_none() {
+			// Get the specified interval
+			let interval = self.gc_interval;
+			// Spawn a new thread to handle the periodic tracked sweep.
+			// Steady-state reclamation happens inline at commit time, and
+			// every chain a commit could not fully trim is tracked in the
+			// candidate set — so this sweep visits only tracked keys, and
+			// its cost scales with the amount of pinned garbage rather
+			// than the dataset size.
+			let handle = std::thread::spawn(move || {
+				// Check whether the garbage collection process is enabled
+				while db.background_threads_enabled.load(Ordering::Relaxed) {
+					// Wait for a specified time interval
+					std::thread::park_timeout(interval);
+					// Check shutdown flag again after waking
+					if !db.background_threads_enabled.load(Ordering::Relaxed) {
+						break;
+					}
+					// The steady state is an empty candidate set: skip
+					// the watermark computation (a fence and full slot
+					// scan) entirely when there is nothing to sweep.
+					if db.gc_candidates.is_empty() {
+						continue;
+					}
+					// Compute the next cleanup_ts by scanning the slot
+					// map: any transaction registering concurrently is
+					// either visible to the scan (and bounds the final
+					// cleanup_ts) or pins after it (and takes a snapshot
+					// at or above the clock bound). A pass is skipped
+					// entirely while a registration is pinning.
+					let Some(cleanup_ts) = db.compute_cleanup_ts() else {
+						continue;
+					};
+					// Sweep only the tracked candidate keys.
+					db.run_gc_tracked(cleanup_ts);
+				}
+			});
+			// Store and track the thread handle
+			*self.inner.garbage_collection_handle.write() = Some(handle);
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+
+	use super::*;
+
+	#[test]
+	fn begin_tx() {
+		let db = Database::new();
+		db.transaction(false);
+	}
+
+	#[test]
+	fn finished_tx_not_writeable() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		let res = tx.cancel();
+		assert!(res.is_ok());
+		let res = tx.put("test", "something");
+		assert!(res.is_err());
+		let res = tx.set("test", "something");
+		assert!(res.is_err());
+		let res = tx.del("test");
+		assert!(res.is_err());
+		let res = tx.commit();
+		assert!(res.is_err());
+		let res = tx.cancel();
+		assert!(res.is_err());
+	}
+
+	#[test]
+	fn cancelled_tx_is_cancelled() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("test", "something").unwrap();
+		let res = tx.exists("test").unwrap();
+		assert!(res);
+		let res = tx.get("test").unwrap();
+		assert_eq!(res.as_deref(), Some(b"something" as &[u8]));
+		let res = tx.cancel();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let res = tx.exists("test").unwrap();
+		assert!(!res);
+		let res = tx.get("test").unwrap();
+		assert_eq!(res, None);
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn committed_tx_is_committed() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("test", "something").unwrap();
+		let res = tx.exists("test").unwrap();
+		assert!(res);
+		let res = tx.get("test").unwrap();
+		assert_eq!(res.as_deref(), Some(b"something" as &[u8]));
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let res = tx.exists("test").unwrap();
+		assert!(res);
+		let res = tx.get("test").unwrap();
+		assert_eq!(res.as_deref(), Some(b"something" as &[u8]));
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn direct_database_operations() {
+		let db = Database::new();
+		assert!(!db.exists("test").unwrap());
+		assert_eq!(db.get("test").unwrap(), None);
+
+		// Direct put
+		db.put("test", "hello world").unwrap();
+		assert!(db.exists("test").unwrap());
+		assert_eq!(db.get("test").unwrap().as_deref(), Some(b"hello world" as &[u8]));
+		assert!(db.put("test", "fail duplicate").is_err());
+
+		// Direct with_value
+		let len = db.with_value("test", <[u8]>::len).unwrap();
+		assert_eq!(len, Some(11));
+
+		// Direct set (overwrite)
+		db.set("test", "updated").unwrap();
+		assert_eq!(db.get("test").unwrap().as_deref(), Some(b"updated" as &[u8]));
+
+		// Direct putc
+		assert!(db.putc("test", "conditional", Some("wrong")).is_err());
+		db.putc("test", "conditional", Some("updated")).unwrap();
+		assert_eq!(db.get("test").unwrap().as_deref(), Some(b"conditional" as &[u8]));
+
+		// Direct delc
+		assert!(db.delc("test", Some("wrong")).is_err());
+		db.delc("test", Some("conditional")).unwrap();
+		assert!(!db.exists("test").unwrap());
+
+		// Direct del
+		db.set("another", "value").unwrap();
+		assert!(db.exists("another").unwrap());
+		db.del("another").unwrap();
+		assert!(!db.exists("another").unwrap());
+
+		// Populate keys for direct range scanning
+		db.set("scan:01", "v1").unwrap();
+		db.set("scan:02", "v2").unwrap();
+		db.set("scan:03", "v3").unwrap();
+
+		assert_eq!(db.total("scan:00".."scan:99", None, None).unwrap(), 3);
+		assert_eq!(db.total("scan:00".."scan:99", Some(1), Some(1)).unwrap(), 1);
+
+		let mut scanned_keys = Vec::new();
+		let count = db
+			.keys_for_each("scan:00".."scan:99", None, None, |k| {
+				scanned_keys.push(k.clone());
+				true
+			})
+			.unwrap();
+		assert_eq!(count, 3);
+		assert_eq!(scanned_keys.len(), 3);
+
+		let mut inspected_values = Vec::new();
+		let count = db
+			.scan_with("scan:00".."scan:99", None, None, |_, v| {
+				inspected_values.push(v.to_vec());
+				true
+			})
+			.unwrap();
+		assert_eq!(count, 3);
+		assert_eq!(inspected_values[0], b"v1");
+
+		let mut buf = Vec::new();
+		db.scan_into("scan:00".."scan:99", None, None, &mut buf).unwrap();
+		assert_eq!(buf.len(), 3);
+
+		let mut kbuf = Vec::new();
+		db.keys_into("scan:00".."scan:99", None, None, &mut kbuf).unwrap();
+		assert_eq!(kbuf.len(), 3);
+	}
+
+	#[test]
+	fn multiple_concurrent_readers() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("test", "something").unwrap();
+		let res = tx.exists("test").unwrap();
+		assert!(res);
+		let res = tx.get("test").unwrap();
+		assert_eq!(res.as_deref(), Some(b"something" as &[u8]));
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx1 = db.transaction(false);
+		let res = tx1.exists("test").unwrap();
+		assert!(res);
+		let res = tx1.exists("temp").unwrap();
+		assert!(!res);
+		// ----------
+		let mut tx2 = db.transaction(false);
+		let res = tx2.exists("test").unwrap();
+		assert!(res);
+		let res = tx2.exists("temp").unwrap();
+		assert!(!res);
+		// ----------
+		let res = tx1.cancel();
+		assert!(res.is_ok());
+		let res = tx2.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn multiple_concurrent_operators() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("test", "something").unwrap();
+		let res = tx.exists("test").unwrap();
+		assert!(res);
+		let res = tx.get("test").unwrap();
+		assert_eq!(res.as_deref(), Some(b"something" as &[u8]));
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx1 = db.transaction(false);
+		let res = tx1.exists("test").unwrap();
+		assert!(res);
+		let res = tx1.exists("temp").unwrap();
+		assert!(!res);
+		// ----------
+		let mut txw = db.transaction(true);
+		txw.put("temp", "other").unwrap();
+		let res = txw.exists("test").unwrap();
+		assert!(res);
+		let res = txw.exists("temp").unwrap();
+		assert!(res);
+		let res = txw.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx2 = db.transaction(false);
+		let res = tx2.exists("test").unwrap();
+		assert!(res);
+		let res = tx2.exists("temp").unwrap();
+		assert!(res);
+		// ----------
+		let res = tx1.exists("temp").unwrap();
+		assert!(!res);
+		// ----------
+		let res = tx1.cancel();
+		assert!(res.is_ok());
+		let res = tx2.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn iterate_keys_forward() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "a").unwrap();
+		tx.put("b", "b").unwrap();
+		tx.put("c", "c").unwrap();
+		tx.put("d", "d").unwrap();
+		tx.put("e", "e").unwrap();
+		tx.put("f", "f").unwrap();
+		tx.put("g", "g").unwrap();
+		tx.put("h", "h").unwrap();
+		tx.put("i", "i").unwrap();
+		tx.put("j", "j").unwrap();
+		tx.put("k", "k").unwrap();
+		tx.put("l", "l").unwrap();
+		tx.put("m", "m").unwrap();
+		tx.put("n", "n").unwrap();
+		tx.put("o", "o").unwrap();
+		let res = tx.keys("c".."z", None, Some(10)).unwrap();
+		assert_eq!(res.len(), 10);
+		assert_eq!(res[0].as_ref(), b"c");
+		assert_eq!(res[1], "d");
+		assert_eq!(res[2], "e");
+		assert_eq!(res[3], "f");
+		assert_eq!(res[4], "g");
+		assert_eq!(res[5], "h");
+		assert_eq!(res[6], "i");
+		assert_eq!(res[7], "j");
+		assert_eq!(res[8], "k");
+		assert_eq!(res[9], "l");
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let res = tx.keys("c".."z", None, Some(10)).unwrap();
+		assert_eq!(res.len(), 10);
+		assert_eq!(res[0].as_ref(), b"c");
+		assert_eq!(res[1], "d");
+		assert_eq!(res[2], "e");
+		assert_eq!(res[3], "f");
+		assert_eq!(res[4], "g");
+		assert_eq!(res[5], "h");
+		assert_eq!(res[6], "i");
+		assert_eq!(res[7], "j");
+		assert_eq!(res[8], "k");
+		assert_eq!(res[9], "l");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let res = tx.keys("c".."z", Some(3), Some(10)).unwrap();
+		assert_eq!(res.len(), 10);
+		assert_eq!(res[0], "f");
+		assert_eq!(res[1], "g");
+		assert_eq!(res[2], "h");
+		assert_eq!(res[3], "i");
+		assert_eq!(res[4], "j");
+		assert_eq!(res[5], "k");
+		assert_eq!(res[6], "l");
+		assert_eq!(res[7], "m");
+		assert_eq!(res[8], "n");
+		assert_eq!(res[9], "o");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn iterate_keys_reverse() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "a").unwrap();
+		tx.put("b", "b").unwrap();
+		tx.put("c", "c").unwrap();
+		tx.put("d", "d").unwrap();
+		tx.put("e", "e").unwrap();
+		tx.put("f", "f").unwrap();
+		tx.put("g", "g").unwrap();
+		tx.put("h", "h").unwrap();
+		tx.put("i", "i").unwrap();
+		tx.put("j", "j").unwrap();
+		tx.put("k", "k").unwrap();
+		tx.put("l", "l").unwrap();
+		tx.put("m", "m").unwrap();
+		tx.put("n", "n").unwrap();
+		tx.put("o", "o").unwrap();
+		let res = tx.keys_reverse("c".."z", None, Some(10)).unwrap();
+		assert_eq!(res.len(), 10);
+		assert_eq!(res[0], "o");
+		assert_eq!(res[1], "n");
+		assert_eq!(res[2], "m");
+		assert_eq!(res[3], "l");
+		assert_eq!(res[4], "k");
+		assert_eq!(res[5], "j");
+		assert_eq!(res[6], "i");
+		assert_eq!(res[7], "h");
+		assert_eq!(res[8], "g");
+		assert_eq!(res[9], "f");
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let res = tx.keys_reverse("c".."z", None, Some(10)).unwrap();
+		assert_eq!(res.len(), 10);
+		assert_eq!(res[0], "o");
+		assert_eq!(res[1], "n");
+		assert_eq!(res[2], "m");
+		assert_eq!(res[3], "l");
+		assert_eq!(res[4], "k");
+		assert_eq!(res[5], "j");
+		assert_eq!(res[6], "i");
+		assert_eq!(res[7], "h");
+		assert_eq!(res[8], "g");
+		assert_eq!(res[9], "f");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let res = tx.keys_reverse("c".."z", Some(3), Some(10)).unwrap();
+		assert_eq!(res.len(), 10);
+		assert_eq!(res[0], "l");
+		assert_eq!(res[1], "k");
+		assert_eq!(res[2], "j");
+		assert_eq!(res[3], "i");
+		assert_eq!(res[4], "h");
+		assert_eq!(res[5], "g");
+		assert_eq!(res[6], "f");
+		assert_eq!(res[7], "e");
+		assert_eq!(res[8], "d");
+		assert_eq!(res[9], "c");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn iterate_keys_values_forward() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "a").unwrap();
+		tx.put("b", "b").unwrap();
+		tx.put("c", "c").unwrap();
+		tx.put("d", "d").unwrap();
+		tx.put("e", "e").unwrap();
+		tx.put("f", "f").unwrap();
+		tx.put("g", "g").unwrap();
+		tx.put("h", "h").unwrap();
+		tx.put("i", "i").unwrap();
+		tx.put("j", "j").unwrap();
+		tx.put("k", "k").unwrap();
+		tx.put("l", "l").unwrap();
+		tx.put("m", "m").unwrap();
+		tx.put("n", "n").unwrap();
+		tx.put("o", "o").unwrap();
+		let res = tx.scan("c".."z", None, Some(10)).unwrap();
+		assert_eq!(res.len(), 10);
+		assert_eq!(res[0].0.as_ref(), b"c");
+		assert_eq!(res[0].1.as_ref(), b"c");
+		assert_eq!(res[1].0.as_ref(), b"d");
+		assert_eq!(res[1].1.as_ref(), b"d");
+		assert_eq!(res[2].0.as_ref(), b"e");
+		assert_eq!(res[3].0.as_ref(), b"f");
+		assert_eq!(res[4].0.as_ref(), b"g");
+		assert_eq!(res[5].0.as_ref(), b"h");
+		assert_eq!(res[6].0.as_ref(), b"i");
+		assert_eq!(res[7].0.as_ref(), b"j");
+		assert_eq!(res[8].0.as_ref(), b"k");
+		assert_eq!(res[9].0.as_ref(), b"l");
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let res = tx.scan("c".."z", None, Some(10)).unwrap();
+		assert_eq!(res.len(), 10);
+		assert_eq!(res[0].0.as_ref(), b"c");
+		assert_eq!(res[0].1.as_ref(), b"c");
+		assert_eq!(res[1].0.as_ref(), b"d");
+		assert_eq!(res[1].1.as_ref(), b"d");
+		assert_eq!(res[2].0.as_ref(), b"e");
+		assert_eq!(res[3].0.as_ref(), b"f");
+		assert_eq!(res[4].0.as_ref(), b"g");
+		assert_eq!(res[5].0.as_ref(), b"h");
+		assert_eq!(res[6].0.as_ref(), b"i");
+		assert_eq!(res[7].0.as_ref(), b"j");
+		assert_eq!(res[8].0.as_ref(), b"k");
+		assert_eq!(res[9].0.as_ref(), b"l");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let res = tx.scan("c".."z", Some(3), Some(10)).unwrap();
+		assert_eq!(res.len(), 10);
+		assert_eq!(res[0].0.as_ref(), b"f");
+		assert_eq!(res[1].0.as_ref(), b"g");
+		assert_eq!(res[2].0.as_ref(), b"h");
+		assert_eq!(res[3].0.as_ref(), b"i");
+		assert_eq!(res[4].0.as_ref(), b"j");
+		assert_eq!(res[5].0.as_ref(), b"k");
+		assert_eq!(res[6].0.as_ref(), b"l");
+		assert_eq!(res[7].0.as_ref(), b"m");
+		assert_eq!(res[8].0.as_ref(), b"n");
+		assert_eq!(res[9].0.as_ref(), b"o");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn iterate_keys_values_reverse() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "a").unwrap();
+		tx.put("b", "b").unwrap();
+		tx.put("c", "c").unwrap();
+		tx.put("d", "d").unwrap();
+		tx.put("e", "e").unwrap();
+		tx.put("f", "f").unwrap();
+		tx.put("g", "g").unwrap();
+		tx.put("h", "h").unwrap();
+		tx.put("i", "i").unwrap();
+		tx.put("j", "j").unwrap();
+		tx.put("k", "k").unwrap();
+		tx.put("l", "l").unwrap();
+		tx.put("m", "m").unwrap();
+		tx.put("n", "n").unwrap();
+		tx.put("o", "o").unwrap();
+		let res = tx.scan_reverse("c".."z", None, Some(10)).unwrap();
+		assert_eq!(res.len(), 10);
+		assert_eq!(res[0].0.as_ref(), b"o");
+		assert_eq!(res[1].0.as_ref(), b"n");
+		assert_eq!(res[2].0.as_ref(), b"m");
+		assert_eq!(res[3].0.as_ref(), b"l");
+		assert_eq!(res[4].0.as_ref(), b"k");
+		assert_eq!(res[5].0.as_ref(), b"j");
+		assert_eq!(res[6].0.as_ref(), b"i");
+		assert_eq!(res[7].0.as_ref(), b"h");
+		assert_eq!(res[8].0.as_ref(), b"g");
+		assert_eq!(res[9].0.as_ref(), b"f");
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let res = tx.scan_reverse("c".."z", None, Some(10)).unwrap();
+		assert_eq!(res.len(), 10);
+		assert_eq!(res[0].0.as_ref(), b"o");
+		assert_eq!(res[1].0.as_ref(), b"n");
+		assert_eq!(res[2].0.as_ref(), b"m");
+		assert_eq!(res[3].0.as_ref(), b"l");
+		assert_eq!(res[4].0.as_ref(), b"k");
+		assert_eq!(res[5].0.as_ref(), b"j");
+		assert_eq!(res[6].0.as_ref(), b"i");
+		assert_eq!(res[7].0.as_ref(), b"h");
+		assert_eq!(res[8].0.as_ref(), b"g");
+		assert_eq!(res[9].0.as_ref(), b"f");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let res = tx.scan_reverse("c".."z", Some(3), Some(10)).unwrap();
+		assert_eq!(res.len(), 10);
+		assert_eq!(res[0].0.as_ref(), b"l");
+		assert_eq!(res[1].0.as_ref(), b"k");
+		assert_eq!(res[2].0.as_ref(), b"j");
+		assert_eq!(res[3].0.as_ref(), b"i");
+		assert_eq!(res[4].0.as_ref(), b"h");
+		assert_eq!(res[5].0.as_ref(), b"g");
+		assert_eq!(res[6].0.as_ref(), b"f");
+		assert_eq!(res[7].0.as_ref(), b"e");
+		assert_eq!(res[8].0.as_ref(), b"d");
+		assert_eq!(res[9].0.as_ref(), b"c");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn count_keys_values() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "a").unwrap();
+		tx.put("b", "b").unwrap();
+		tx.put("c", "c").unwrap();
+		tx.put("d", "d").unwrap();
+		tx.put("e", "e").unwrap();
+		tx.put("f", "f").unwrap();
+		tx.put("g", "g").unwrap();
+		tx.put("h", "h").unwrap();
+		tx.put("i", "i").unwrap();
+		tx.put("j", "j").unwrap();
+		tx.put("k", "k").unwrap();
+		tx.put("l", "l").unwrap();
+		tx.put("m", "m").unwrap();
+		tx.put("n", "n").unwrap();
+		tx.put("o", "o").unwrap();
+		let res = tx.total("c".."z", None, Some(10)).unwrap();
+		assert_eq!(res, 10);
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let res = tx.total("c".."z", Some(3), Some(10)).unwrap();
+		assert_eq!(res, 10);
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	// --------------------------------------------------
+	// Cursor and Iterator Tests
+	// --------------------------------------------------
+
+	#[test]
+	fn cursor_forward_iteration() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("b", "2").unwrap();
+		tx.put("c", "3").unwrap();
+		tx.put("d", "4").unwrap();
+		tx.put("e", "5").unwrap();
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let mut cursor = tx.cursor("a".."z").unwrap();
+		cursor.seek_to_first();
+		// Check first entry
+		assert!(cursor.valid());
+		assert_eq!(cursor.key().unwrap().as_ref(), b"a");
+		assert_eq!(cursor.value().unwrap().as_ref(), b"1");
+		// Move forward
+		cursor.next();
+		assert!(cursor.valid());
+		assert_eq!(cursor.key().unwrap().as_ref(), b"b");
+		// Continue to end
+		cursor.next(); // c
+		cursor.next(); // d
+		cursor.next(); // e
+		assert!(cursor.valid());
+		assert_eq!(cursor.key().unwrap().as_ref(), b"e");
+		cursor.next();
+		assert!(!cursor.valid());
+		drop(cursor);
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn cursor_reverse_iteration() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("b", "2").unwrap();
+		tx.put("c", "3").unwrap();
+		tx.put("d", "4").unwrap();
+		tx.put("e", "5").unwrap();
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let mut cursor = tx.cursor("a".."z").unwrap();
+		cursor.seek_to_last();
+		// Check last entry
+		assert!(cursor.valid());
+		assert_eq!(cursor.key().unwrap().as_ref(), b"e");
+		assert_eq!(cursor.value().unwrap().as_ref(), b"5");
+		// Move backward
+		cursor.prev();
+		assert!(cursor.valid());
+		assert_eq!(cursor.key().unwrap().as_ref(), b"d");
+		// Continue to beginning
+		cursor.prev(); // c
+		cursor.prev(); // b
+		cursor.prev(); // a
+		assert!(cursor.valid());
+		assert_eq!(cursor.key().unwrap().as_ref(), b"a");
+		cursor.prev();
+		assert!(!cursor.valid());
+		drop(cursor);
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn cursor_seek_operations() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("c", "3").unwrap();
+		tx.put("e", "5").unwrap();
+		tx.put("g", "7").unwrap();
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let mut cursor = tx.cursor("a".."z").unwrap();
+		// Seek to exact key
+		cursor.seek("c");
+		assert!(cursor.valid());
+		assert_eq!(cursor.key().unwrap().as_ref(), b"c");
+		// Seek to non-existent key (should land on next)
+		cursor.seek("d");
+		assert!(cursor.valid());
+		assert_eq!(cursor.key().unwrap().as_ref(), b"e");
+		// Seek for prev to exact key
+		cursor.seek_for_prev("e");
+		assert!(cursor.valid());
+		assert_eq!(cursor.key().unwrap().as_ref(), b"c");
+		// Seek beyond range
+		cursor.seek("z");
+		assert!(!cursor.valid());
+		drop(cursor);
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn cursor_bidirectional_switch() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("b", "2").unwrap();
+		tx.put("c", "3").unwrap();
+		tx.put("d", "4").unwrap();
+		tx.put("e", "5").unwrap();
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let mut cursor = tx.cursor("a".."z").unwrap();
+		// Start forward
+		cursor.seek_to_first();
+		assert_eq!(cursor.key().unwrap().as_ref(), b"a");
+		cursor.next();
+		assert_eq!(cursor.key().unwrap().as_ref(), b"b");
+		cursor.next();
+		assert_eq!(cursor.key().unwrap().as_ref(), b"c");
+		// Switch to reverse
+		cursor.prev();
+		assert!(cursor.valid());
+		assert_eq!(cursor.key().unwrap().as_ref(), b"b");
+		// Switch back to forward
+		cursor.next();
+		assert!(cursor.valid());
+		assert_eq!(cursor.key().unwrap().as_ref(), b"c");
+		drop(cursor);
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn keys_iterator_forward() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("b", "2").unwrap();
+		tx.put("c", "3").unwrap();
+		tx.put("d", "4").unwrap();
+		tx.put("e", "5").unwrap();
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let keys: Vec<_> = tx.keys_iter("b".."e").unwrap().collect();
+		assert_eq!(keys.len(), 3);
+		assert_eq!(keys[0].as_ref(), b"b");
+		assert_eq!(keys[1].as_ref(), b"c");
+		assert_eq!(keys[2].as_ref(), b"d");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn keys_iterator_reverse() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("b", "2").unwrap();
+		tx.put("c", "3").unwrap();
+		tx.put("d", "4").unwrap();
+		tx.put("e", "5").unwrap();
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let keys: Vec<_> = tx.keys_iter_reverse("b".."e").unwrap().collect();
+		assert_eq!(keys.len(), 3);
+		assert_eq!(keys[0].as_ref(), b"d");
+		assert_eq!(keys[1].as_ref(), b"c");
+		assert_eq!(keys[2].as_ref(), b"b");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn keys_iterator_with_take() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("b", "2").unwrap();
+		tx.put("c", "3").unwrap();
+		tx.put("d", "4").unwrap();
+		tx.put("e", "5").unwrap();
+		tx.put("f", "6").unwrap();
+		tx.put("g", "7").unwrap();
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let keys: Vec<_> = tx.keys_iter("a".."z").unwrap().take(3).collect();
+		assert_eq!(keys.len(), 3);
+		assert_eq!(keys[0].as_ref(), b"a");
+		assert_eq!(keys[1].as_ref(), b"b");
+		assert_eq!(keys[2].as_ref(), b"c");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn keys_iterator_with_skip() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("b", "2").unwrap();
+		tx.put("c", "3").unwrap();
+		tx.put("d", "4").unwrap();
+		tx.put("e", "5").unwrap();
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let keys: Vec<_> = tx.keys_iter("a".."z").unwrap().skip(2).collect();
+		assert_eq!(keys.len(), 3);
+		assert_eq!(keys[0].as_ref(), b"c");
+		assert_eq!(keys[1].as_ref(), b"d");
+		assert_eq!(keys[2].as_ref(), b"e");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn scan_iterator_forward() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("b", "2").unwrap();
+		tx.put("c", "3").unwrap();
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let pairs: Vec<_> = tx.scan_iter("a".."z").unwrap().collect();
+		assert_eq!(pairs.len(), 3);
+		assert_eq!(pairs[0].0.as_ref(), b"a");
+		assert_eq!(pairs[0].1.as_ref(), b"1");
+		assert_eq!(pairs[1].0.as_ref(), b"b");
+		assert_eq!(pairs[1].1.as_ref(), b"2");
+		assert_eq!(pairs[2].0.as_ref(), b"c");
+		assert_eq!(pairs[2].1.as_ref(), b"3");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn scan_iterator_reverse() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("b", "2").unwrap();
+		tx.put("c", "3").unwrap();
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let pairs: Vec<_> = tx.scan_iter_reverse("a".."z").unwrap().collect();
+		assert_eq!(pairs.len(), 3);
+		assert_eq!(pairs[0].0.as_ref(), b"c");
+		assert_eq!(pairs[0].1.as_ref(), b"3");
+		assert_eq!(pairs[1].0.as_ref(), b"b");
+		assert_eq!(pairs[1].1.as_ref(), b"2");
+		assert_eq!(pairs[2].0.as_ref(), b"a");
+		assert_eq!(pairs[2].1.as_ref(), b"1");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn scan_iterator_with_take() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("b", "2").unwrap();
+		tx.put("c", "3").unwrap();
+		tx.put("d", "4").unwrap();
+		tx.put("e", "5").unwrap();
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(false);
+		let pairs: Vec<_> = tx.scan_iter("a".."z").unwrap().take(2).collect();
+		assert_eq!(pairs.len(), 2);
+		assert_eq!(pairs[0].0.as_ref(), b"a");
+		assert_eq!(pairs[1].0.as_ref(), b"b");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn iterator_sees_uncommitted_writes() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("b", "2").unwrap();
+		// Before commit, iterator should see uncommitted writes
+		let keys: Vec<_> = tx.keys_iter("a".."z").unwrap().collect();
+		assert_eq!(keys.len(), 2);
+		assert_eq!(keys[0].as_ref(), b"a");
+		assert_eq!(keys[1].as_ref(), b"b");
+		let res = tx.commit();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn cursor_handles_deleted_entries() {
+		let db = Database::new();
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.put("a", "1").unwrap();
+		tx.put("b", "2").unwrap();
+		tx.put("c", "3").unwrap();
+		let res = tx.commit();
+		assert!(res.is_ok());
+		// ----------
+		let mut tx = db.transaction(true);
+		tx.del("b").unwrap();
+		// Iterator should skip deleted entry
+		let keys: Vec<_> = tx.keys_iter("a".."z").unwrap().collect();
+		assert_eq!(keys.len(), 2);
+		assert_eq!(keys[0].as_ref(), b"a");
+		assert_eq!(keys[1].as_ref(), b"c");
+		let res = tx.cancel();
+		assert!(res.is_ok());
+	}
+
+	#[test]
+	fn cleanup_trims_commit_queue_when_idle() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		for i in 0..10 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("key{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+		assert_eq!(db.unretired_commits(), 10);
+		assert_eq!(db.inner.commit_ring.occupied(), 10);
+		db.run_cleanup();
+		// With no registered readers the trim bound falls back to the
+		// current commit id: everything below it is unreachable by any
+		// future transaction's conflict window, which starts strictly
+		// above the commit id the transaction registers at. The exclusive
+		// bound leaves exactly the entry at the current commit id.
+		assert_eq!(db.unretired_commits(), 1);
+		// The retired entries are released, not just counted as retired
+		assert_eq!(db.inner.commit_ring.occupied(), 1);
+	}
+
+	#[test]
+	fn cleanup_respects_active_reader() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		// Commit five transactions before the reader starts
+		for i in 0..5 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("pre{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+		// Register a reader pinned at the current commit id
+		let reader = db.transaction(false);
+		// Commit five more transactions after the reader registered
+		for i in 0..5 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("post{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+		assert_eq!(db.unretired_commits(), 10);
+		db.run_cleanup();
+		// Entries above the reader's snapshot commit id must survive:
+		// they sit inside its potential conflict window. Entries at ids
+		// 1-4 are trimmed; the entry at the reader's snapshot (5) and
+		// everything above remain.
+		assert_eq!(db.unretired_commits(), 6);
+		assert_eq!(db.inner.commit_ring.occupied(), 6);
+		drop(reader);
+		db.run_cleanup();
+		// With the reader gone the idle fallback applies again
+		assert_eq!(db.unretired_commits(), 1);
+		assert_eq!(db.inner.commit_ring.occupied(), 1);
+	}
+
+	#[test]
+	fn cleanup_keeps_entries_in_a_live_conflict_window() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		for i in 0..5 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("pre{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+		let mut writer = db.transaction(true);
+		writer.set("mine", "value").unwrap();
+		for i in 0..5 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("post{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+		db.run_cleanup();
+		// The writer validates against every commit in its window, so a
+		// released entry there would read as gone and abort it
+		writer.commit().unwrap();
+	}
+
+	#[test]
+	fn logical_clock_is_dense() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		for i in 0..10 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("key{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+		// Merge versions are dense sequential integers: ten commits
+		// publish exactly versions 1 through 10.
+		assert_eq!(db.oracle.timestamp.load(std::sync::atomic::Ordering::SeqCst), 10);
+		let entry = db.datastore.get(b"key0".as_slice()).expect("key0 missing");
+		assert_eq!(entry.value().read(|v| v.as_slice()[0].version), 1);
+		let entry = db.datastore.get(b"key9".as_slice()).expect("key9 missing");
+		assert_eq!(entry.value().read(|v| v.as_slice()[0].version), 10);
+	}
+
+	#[test]
+	fn logical_clock_continues_above_seed() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		// Simulate a datastore seeded from files written by a release
+		// which minted wall-clock nanosecond versions. Real persistence
+		// load seeds all three counters together (see
+		// `Persistence::load`); seeding only the clock and leaving
+		// `merge_retire_id` at its unseeded default would make the
+		// opportunistic retirement walk cross an astronomical gap one
+		// step at a time.
+		let seed = 1_700_000_000_000_000_000u64;
+		db.oracle.alloc.store(seed, std::sync::atomic::Ordering::SeqCst);
+		db.oracle.timestamp.store(seed, std::sync::atomic::Ordering::SeqCst);
+		db.merge_retire_id.store(seed, std::sync::atomic::Ordering::SeqCst);
+		let mut tx = db.transaction(true);
+		tx.set("key", "value").unwrap();
+		tx.commit().unwrap();
+		// The next minted version continues strictly above the seed
+		let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
+		assert_eq!(entry.value().read(|v| v.as_slice()[0].version), seed + 1);
+		// And the write is visible to a fresh reader
+		let mut tx = db.transaction(false);
+		assert_eq!(tx.get("key").unwrap().as_deref(), Some(b"value" as &[u8]));
+		tx.cancel().unwrap();
+	}
+
+	#[test]
+	fn slot_lifecycle() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		assert_eq!(db.readers.pinned(), 0);
+		let tx = db.transaction(false);
+		assert_eq!(db.readers.pinned(), 1);
+		let first = tx.inner.as_ref().unwrap().slot;
+		drop(tx);
+		assert_eq!(db.readers.pinned(), 0);
+		// Pool reuse re-pins the retained slot
+		let tx = db.transaction(false);
+		assert_eq!(db.readers.pinned(), 1);
+		assert_eq!(tx.inner.as_ref().unwrap().slot, first);
+		drop(tx);
+		assert_eq!(db.readers.pinned(), 0);
+	}
+
+	#[test]
+	fn direct_scans_pin_the_threads_own_slot() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		db.set("a", "1").unwrap();
+		db.set("b", "2").unwrap();
+		let before = db.inner.readers.registered();
+		// The scan's snapshot is pinned only while the scan runs
+		let mut pinned = 0;
+		let count = db
+			.scan_with("a".."z", None, None, |_, _| {
+				pinned = db.inner.readers.pinned();
+				true
+			})
+			.unwrap();
+		assert_eq!(count, 2);
+		assert_eq!(pinned, 1);
+		assert_eq!(db.inner.readers.pinned(), 0);
+		// The thread keeps its slot for later direct scans
+		let registered = db.inner.readers.registered();
+		assert_eq!(registered, before + 1);
+		assert_eq!(db.keys_for_each("a".."z", None, None, |_| true).unwrap(), 2);
+		assert_eq!(db.total("a".."z", None, None).unwrap(), 2);
+		assert_eq!(db.inner.readers.registered(), registered);
+	}
+
+	#[test]
+	fn nested_direct_scans_fall_back_to_a_transaction() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		db.set("a", "1").unwrap();
+		db.set("b", "2").unwrap();
+		let mut nested = Vec::new();
+		let count = db
+			.scan_with("a".."z", None, None, |_, _| {
+				nested.push(db.total("a".."z", None, None).unwrap());
+				true
+			})
+			.unwrap();
+		assert_eq!(count, 2);
+		assert_eq!(nested, vec![2, 2]);
+		assert_eq!(db.inner.readers.pinned(), 0);
+	}
+
+	#[test]
+	fn thread_slots_are_released_when_the_thread_exits() {
+		use std::sync::Arc;
+		let db = Arc::new(Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		));
+		db.set("a", "1").unwrap();
+		let before = db.inner.readers.registered();
+		let scanner = Arc::clone(&db);
+		std::thread::spawn(move || {
+			assert_eq!(scanner.total("a".."z", None, None).unwrap(), 1);
+		})
+		.join()
+		.unwrap();
+		assert_eq!(db.inner.readers.registered(), before);
+	}
+
+	#[test]
+	fn watermark_conservative_while_pinning() {
+		use crate::inner::SLOT_PINNING;
+		use std::sync::atomic::Ordering;
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		// Commit some entries which would otherwise be trimmed
+		for i in 0..5 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("key{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+		// Register a slot stuck in the pinning state, simulating a
+		// transaction choosing its snapshot
+		let index = db.readers.register();
+		db.readers.slot(index).version.store(SLOT_PINNING, Ordering::SeqCst);
+		db.readers.slot(index).commit.store(SLOT_PINNING, Ordering::SeqCst);
+		// Every sweep must treat the watermark as unknown and skip
+		assert_eq!(db.compute_cleanup_ts(), None);
+		let before = db.unretired_commits();
+		db.run_cleanup();
+		assert_eq!(db.unretired_commits(), before);
+		// Release the pinning slot; sweeps proceed again
+		db.readers.release(index);
+		assert!(db.compute_cleanup_ts().is_some());
+		db.run_cleanup();
+		assert_eq!(db.unretired_commits(), 1);
+	}
+
+	#[test]
+	fn commit_watermark_tracks_commits() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		for i in 0..5 {
+			let mut tx = db.transaction(true);
+			tx.set(format!("key{i}"), "value").unwrap();
+			tx.commit().unwrap();
+		}
+		// Every commit completed, so the watermark covers all claimed ids
+		assert_eq!(db.commit_watermark(), 5);
+		assert_eq!(db.inner.commit_ring.published(), 5);
+		// An aborted commit removes its entry, which also counts as
+		// complete: the watermark must still cover the aborted id.
+		let mut tx1 = db.transaction(true);
+		tx1.set("conflict", "a").unwrap();
+		let mut tx2 = db.transaction(true);
+		tx2.set("conflict", "b").unwrap();
+		tx1.commit().unwrap();
+		assert!(tx2.commit().is_err());
+		assert_eq!(db.commit_watermark(), db.inner.commit_ring.published());
+	}
+
+	#[test]
+	fn concurrent_commits_retire_every_merge_entry() {
+		use std::sync::atomic::Ordering;
+		use std::sync::{Arc, Barrier};
+		let db = Arc::new(Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		));
+		let (threads, rounds) = if cfg!(miri) {
+			(4, 10)
+		} else {
+			(16, 2_000)
+		};
+		// Every round ends with all threads committing at once, so the
+		// last merges of each round race to retire
+		let start = Arc::new(Barrier::new(threads + 1));
+		let done = Arc::new(Barrier::new(threads + 1));
+		let handles: Vec<_> = (0..threads)
+			.map(|t| {
+				let db = Arc::clone(&db);
+				let start = Arc::clone(&start);
+				let done = Arc::clone(&done);
+				std::thread::spawn(move || {
+					for round in 0..rounds {
+						start.wait();
+						let mut tx = db.transaction(true);
+						tx.set(format!("t{t}-r{round}"), "value").unwrap();
+						tx.commit().unwrap();
+						done.wait();
+					}
+				})
+			})
+			.collect();
+		for round in 0..rounds {
+			start.wait();
+			done.wait();
+			// A committer that finds another thread retiring returns without
+			// retiring, so this only holds if the retirers picked up every
+			// entry applied while they held the flag
+			let published = db.oracle.timestamp.load(Ordering::SeqCst);
+			assert_eq!(published, ((round + 1) * threads) as u64);
+			assert_eq!(db.merge_retire_id.load(Ordering::SeqCst), published, "round {round}");
+			// Earlier rounds were checked already, so only this round's
+			// merges could remain in the ring
+			let first = (round * threads) as u64 + 1;
+			for version in first..=published {
+				assert!(!db.transaction_merge_queue.contains(version), "round {round}");
+			}
+		}
+		for handle in handles {
+			handle.join().unwrap();
+		}
+	}
+
+	#[test]
+	fn inline_gc_trims_hot_key_at_commit() {
+		// The deterministic memory bound: with no readers pinning older
+		// versions, every commit trims the chain it touches down to the
+		// latest version — no background worker, no sleeps, and the same
+		// behaviour on wasm targets which have no threads at all.
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		for i in 0..100 {
+			let mut tx = db.transaction(true);
+			tx.set("hotkey", format!("v{i}")).unwrap();
+			tx.commit().unwrap();
+		}
+		let entry = db.datastore.get(b"hotkey".as_slice()).expect("hotkey missing");
+		let chain = entry.value().read(|v| v.as_slice().to_vec());
+		assert_eq!(chain.len(), 1, "inline GC should trim superseded versions at commit");
+		assert_eq!(chain[0].value.as_deref(), Some(b"v99" as &[u8]));
+	}
+
+	#[test]
+	fn inline_gc_unlinks_deleted_key_at_commit() {
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		// Scoped: a shadowed-but-live transaction would keep its slot
+		// registered and pin the delete's watermark below the tombstone
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "value").unwrap();
+			tx.commit().unwrap();
+		}
+		assert!(db.datastore.get(b"key".as_slice()).is_some());
+		// With no readers below the delete, the tombstone collapses the
+		// chain at commit time and the node is unlinked immediately.
+		{
+			let mut tx = db.transaction(true);
+			tx.del("key").unwrap();
+			tx.commit().unwrap();
+		}
+		assert!(
+			db.datastore.get(b"key".as_slice()).is_none(),
+			"a delete with no readers should unlink the node at commit"
+		);
+	}
+
+	#[test]
+	fn safety_net_reclaims_after_reader_departs() {
+		// Garbage pinned by a reader on a key that is never written again
+		// is invisible to inline commit-time GC: the manual full scan
+		// must reclaim it just like the tracked sweep does.
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "v0").unwrap();
+			tx.commit().unwrap();
+		}
+		// Pin the initial version while overwriting the key
+		let reader = db.transaction(false);
+		for i in 1..=50 {
+			let mut tx = db.transaction(true);
+			tx.set("key", format!("v{i}")).unwrap();
+			tx.commit().unwrap();
+		}
+		{
+			let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
+			let len = entry.value().read(|v| v.as_slice().len());
+			assert!(len > 1, "the pinned reader should retain history");
+		}
+		// Drop the reader; no further commits touch the key, so only the
+		// manual (or background) full sweep can reclaim the garbage
+		drop(reader);
+		db.run_gc();
+		let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
+		let chain = entry.value().read(|v| v.as_slice().to_vec());
+		assert_eq!(chain.len(), 1, "the safety-net sweep should reclaim departed-reader garbage");
+		assert_eq!(chain[0].value.as_deref(), Some(b"v50" as &[u8]));
+	}
+
+	#[test]
+	fn tracked_sweep_reclaims_departed_reader_garbage() {
+		// The commit path tracks every chain it cannot trim to a single
+		// live value, so the targeted sweep must reclaim departed-reader
+		// garbage without a full datastore scan.
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "v0").unwrap();
+			tx.commit().unwrap();
+		}
+		// Pin the initial version while overwriting the key
+		let reader = db.transaction(false);
+		for i in 1..=50 {
+			let mut tx = db.transaction(true);
+			tx.set("key", format!("v{i}")).unwrap();
+			tx.commit().unwrap();
+		}
+		// The pinned overwrites must have tracked the key
+		assert!(
+			db.gc_candidates.contains(b"key".as_slice()),
+			"a commit that leaves garbage should track its key"
+		);
+		// While the reader is pinned, the sweep trims what it can and
+		// keeps the key tracked for the next pass
+		db.run_gc_tracked();
+		{
+			let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
+			assert!(entry.value().read(|v| v.as_slice().len()) > 1);
+			assert!(
+				db.gc_candidates.contains(b"key".as_slice()),
+				"a still-pinned chain should stay tracked after a sweep"
+			);
+		}
+		// Once the reader departs, the tracked sweep finishes the job
+		drop(reader);
+		db.run_gc_tracked();
+		let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
+		let chain = entry.value().read(|v| v.as_slice().to_vec());
+		assert_eq!(chain.len(), 1, "the tracked sweep should reclaim departed-reader garbage");
+		assert_eq!(chain[0].value.as_deref(), Some(b"v50" as &[u8]));
+		assert!(
+			!db.gc_candidates.contains(b"key".as_slice()),
+			"a terminal chain should be untracked after the sweep"
+		);
+	}
+
+	#[test]
+	fn tracked_sweep_unlinks_pinned_tombstone() {
+		// A delete committed while a reader pins the prior value cannot
+		// collapse at commit time; the tracked sweep must unlink it after
+		// the reader departs.
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "value").unwrap();
+			tx.commit().unwrap();
+		}
+		let reader = db.transaction(false);
+		{
+			let mut tx = db.transaction(true);
+			tx.del("key").unwrap();
+			tx.commit().unwrap();
+		}
+		// The pinned tombstone keeps the node linked and tracked
+		assert!(db.datastore.get(b"key".as_slice()).is_some());
+		assert!(db.gc_candidates.contains(b"key".as_slice()));
+		// After the reader departs the sweep collapses and unlinks it
+		drop(reader);
+		db.run_gc_tracked();
+		assert!(
+			db.datastore.get(b"key".as_slice()).is_none(),
+			"the tracked sweep should unlink a departed-reader tombstone"
+		);
+		assert!(!db.gc_candidates.contains(b"key".as_slice()));
+	}
+
+	#[test]
+	fn full_scan_supersedes_candidate_set() {
+		// The manual full scan visits every key, so it clears the
+		// candidate set rather than leaving stale entries behind.
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "v0").unwrap();
+			tx.commit().unwrap();
+		}
+		let reader = db.transaction(false);
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "v1").unwrap();
+			tx.commit().unwrap();
+		}
+		assert!(db.gc_candidates.contains(b"key".as_slice()));
+		drop(reader);
+		db.run_gc();
+		assert_eq!(db.gc_candidates.len(), 0, "the full scan should clear the candidate set");
+		let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
+		assert_eq!(entry.value().read(|v| v.as_slice().len()), 1);
+	}
+
+	#[cfg(not(target_arch = "wasm32"))]
+	#[test]
+	fn load_collapses_aol_replay_chains() {
+		// Append-only-log replay pushes one chain entry per record, so a
+		// key updated N times holds N versions after replay — garbage no
+		// commit or tracked sweep would ever visit on a key that is never
+		// written again. The one-shot sweep at load time must collapse
+		// every chain to its latest version.
+		let temp_dir = tempfile::TempDir::new().unwrap();
+		let persistence = crate::PersistenceOptions::new(temp_dir.path())
+			.with_aol_mode(crate::AolMode::SynchronousOnCommit)
+			.with_snapshot_mode(crate::SnapshotMode::Never)
+			.with_fsync_mode(crate::FsyncMode::EveryAppend);
+		{
+			let db = Database::new_with_persistence(
+				crate::DatabaseOptions::default(),
+				persistence.clone(),
+			)
+			.unwrap();
+			for i in 0..5 {
+				let mut tx = db.transaction(true);
+				tx.set("key", format!("v{i}")).unwrap();
+				tx.commit().unwrap();
+			}
+		}
+		// Reopen: replay rebuilds the chain, then the load sweep trims it
+		let db =
+			Database::new_with_persistence(crate::DatabaseOptions::default(), persistence).unwrap();
+		let entry = db.datastore.get(b"key".as_slice()).expect("key missing after reload");
+		let chain = entry.value().read(|v| v.as_slice().to_vec());
+		assert_eq!(chain.len(), 1, "the load-time sweep should collapse replayed chains");
+		assert_eq!(chain[0].value.as_deref(), Some(b"v4" as &[u8]));
+	}
+
+	#[cfg(not(target_arch = "wasm32"))]
+	#[test]
+	fn dropping_persistent_database_releases_datastore_and_aol() {
+		// The datastore owns its persistence layer, so the layer must not
+		// own the datastore back: a cycle would keep the datastore and the
+		// open AOL handle alive for the life of the process. Every worker
+		// is enabled, as each holds references of its own.
+		let temp_dir = tempfile::TempDir::new().unwrap();
+		let persistence = crate::PersistenceOptions::new(temp_dir.path())
+			.with_aol_mode(crate::AolMode::AsynchronousAfterCommit)
+			.with_snapshot_mode(crate::SnapshotMode::Interval(Duration::from_millis(10)))
+			.with_fsync_mode(crate::FsyncMode::Interval(Duration::from_millis(10)));
+		let db =
+			Database::new_with_persistence(crate::DatabaseOptions::default(), persistence).unwrap();
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "value").unwrap();
+			tx.commit().unwrap();
+		}
+		let inner = Arc::downgrade(&db.inner);
+		let aol = Arc::downgrade(db.persistence().unwrap().aol.as_ref().unwrap());
+		drop(db);
+		assert_eq!(inner.strong_count(), 0, "the datastore should be freed with the database");
+		assert_eq!(aol.strong_count(), 0, "the AOL handle should be freed with the database");
+	}
+
+	#[cfg(not(target_arch = "wasm32"))]
+	#[test]
+	fn dropping_persistent_database_runs_final_fsync() {
+		// Without a per-commit fsync, commits leave pending syncs which the
+		// persistence layer must flush when the database is dropped
+		let temp_dir = tempfile::TempDir::new().unwrap();
+		let persistence = crate::PersistenceOptions::new(temp_dir.path())
+			.with_aol_mode(crate::AolMode::SynchronousOnCommit)
+			.with_snapshot_mode(crate::SnapshotMode::Never)
+			.with_fsync_mode(crate::FsyncMode::Never);
+		let db =
+			Database::new_with_persistence(crate::DatabaseOptions::default(), persistence).unwrap();
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "value").unwrap();
+			tx.commit().unwrap();
+		}
+		let pending = Arc::clone(&db.persistence().unwrap().pending_syncs);
+		assert!(pending.load(Ordering::Acquire) > 0, "the commit should await an fsync");
+		drop(db);
+		assert_eq!(pending.load(Ordering::Acquire), 0, "dropping should fsync pending writes");
+	}
+
+	#[test]
+	fn full_scan_retracks_pinned_chains() {
+		// A manual full scan clears the candidate set, so any chain it
+		// cannot trim to a terminal state must be re-tracked — otherwise
+		// its garbage would be stranded once the pinning reader departs,
+		// since the background sweep never scans the full datastore.
+		let db = Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		);
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "v0").unwrap();
+			tx.commit().unwrap();
+		}
+		let reader = db.transaction(false);
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "v1").unwrap();
+			tx.commit().unwrap();
+		}
+		// The full scan runs while the reader still pins the old version
+		db.run_gc();
+		assert!(
+			db.gc_candidates.contains(b"key".as_slice()),
+			"the full scan should re-track a chain it could not trim"
+		);
+		// After the reader departs the tracked sweep reclaims the garbage
+		drop(reader);
+		db.run_gc_tracked();
+		let entry = db.datastore.get(b"key".as_slice()).expect("key missing");
+		assert_eq!(entry.value().read(|v| v.as_slice().len()), 1);
+	}
+
+	#[test]
+	fn pin_then_read_stress() {
+		use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+		use std::sync::Arc;
+		use std::thread;
+		use std::time::{Duration, Instant};
+		// Workers are disabled; a dedicated thread hammers the manual
+		// sweep entry points instead, maximising sweep frequency against
+		// the pin-then-read registration protocol.
+		let db = Arc::new(Database::new_with_options(
+			crate::DatabaseOptions::default().with_all_workers_disabled(),
+		));
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "v0").unwrap();
+			tx.commit().unwrap();
+		}
+		let stop = Arc::new(AtomicBool::new(false));
+		let none_reads = Arc::new(AtomicUsize::new(0));
+		let total_reads = Arc::new(AtomicUsize::new(0));
+		// Single writer thread keeps overwriting the same key
+		let writer = {
+			let db = Arc::clone(&db);
+			let stop = Arc::clone(&stop);
+			thread::spawn(move || {
+				let mut counter: u64 = 0;
+				while !stop.load(Ordering::Relaxed) {
+					let mut tx = db.transaction(true);
+					tx.set("key", format!("v{counter}")).unwrap();
+					tx.commit().unwrap();
+					counter = counter.wrapping_add(1);
+				}
+			})
+		};
+		// Sweeper thread hammers cleanup and both gc paths continuously
+		let sweeper = {
+			let db = Arc::clone(&db);
+			let stop = Arc::clone(&stop);
+			thread::spawn(move || {
+				while !stop.load(Ordering::Relaxed) {
+					db.run_cleanup();
+					db.run_gc();
+					db.run_gc_tracked();
+				}
+			})
+		};
+		// Reader threads open many short-lived snapshots
+		let mut readers = Vec::new();
+		for _ in 0..6 {
+			let db = Arc::clone(&db);
+			let stop = Arc::clone(&stop);
+			let none_reads = Arc::clone(&none_reads);
+			let total_reads = Arc::clone(&total_reads);
+			readers.push(thread::spawn(move || {
+				while !stop.load(Ordering::Relaxed) {
+					let mut tx = db.transaction(false);
+					let value = tx.get("key").unwrap();
+					total_reads.fetch_add(1, Ordering::Relaxed);
+					if value.is_none() {
+						none_reads.fetch_add(1, Ordering::Relaxed);
+					}
+					tx.cancel().unwrap();
+				}
+			}));
+		}
+		let started = Instant::now();
+		while started.elapsed() < Duration::from_millis(500) {
+			thread::sleep(Duration::from_millis(10));
+		}
+		stop.store(true, Ordering::Relaxed);
+		writer.join().unwrap();
+		sweeper.join().unwrap();
+		for r in readers {
+			r.join().unwrap();
+		}
+		let nones = none_reads.load(Ordering::Relaxed);
+		let total = total_reads.load(Ordering::Relaxed);
+		assert_eq!(
+			nones, 0,
+			"reader observed `None` for a key that always has a committed \
+			 value ({nones} of {total} reads): the pin-then-read protocol \
+			 failed to protect a registering reader from a sweep"
+		);
+	}
+
+	/// A commit which fails to reach the append-only log must never become
+	/// visible, since a restart would lose it, and must not leave its merge
+	/// version unpublished, which would stall every later commit and
+	/// snapshot.
+	#[cfg(not(target_arch = "wasm32"))]
+	#[test]
+	fn a_commit_which_fails_to_persist_is_never_published() {
+		use crate::{AolMode, FsyncMode, PersistenceOptions};
+		let dir = tempfile::TempDir::new().unwrap();
+		let persistence = PersistenceOptions::new(dir.path())
+			.with_aol_mode(AolMode::SynchronousOnCommit)
+			.with_fsync_mode(FsyncMode::EveryAppend);
+		let db = Database::new_with_persistence(DatabaseOptions::default(), persistence).unwrap();
+		// A log opened only for reading fails every write
+		let aol = std::fs::File::open(dir.path().join("aol.bin")).unwrap();
+		db.inner.persistence.read().as_ref().unwrap().replace_aol_handle(aol);
+		let mut tx = db.transaction(true);
+		tx.set("key", "value").unwrap();
+		let err = tx.commit().unwrap_err();
+		assert!(matches!(err, Error::TxCommitNotPersisted(_)), "{err}");
+		// The write reached neither the datastore nor the merge queue
+		assert!(db.inner.datastore.get(b"key".as_slice()).is_none());
+		let version = db.inner.oracle.alloc.load(Ordering::SeqCst);
+		let published = db
+			.inner
+			.transaction_merge_queue
+			.get(version, |m| m.writeset.is_empty())
+			.unwrap_or(true);
+		assert!(published, "the failed writeset was published in the merge queue");
+		// The clock and retirement moved past the claimed version
+		assert_eq!(db.inner.oracle.timestamp.load(Ordering::SeqCst), version);
+		assert_eq!(db.inner.merge_retire_id.load(Ordering::SeqCst), version);
+	}
+
+	/// A claimed merge version is marked with the `VERSION_CLAIMED` bit, so
+	/// a database is only opened when the versions it will claim stay below
+	/// that bit. A persisted version at the load-time bound is rejected,
+	/// and one just below it is accepted.
+	#[cfg(not(target_arch = "wasm32"))]
+	#[test]
+	fn persisted_versions_leave_room_below_the_claimed_flag() {
+		use crate::inner::VERSION_CLAIMED;
+		use crate::{AolMode, PersistenceOptions};
+		let open = |version: u64| {
+			let dir = tempfile::TempDir::new().unwrap();
+			let persistence =
+				|| PersistenceOptions::new(dir.path()).with_aol_mode(AolMode::SynchronousOnCommit);
+			let db =
+				Database::new_with_persistence(DatabaseOptions::default(), persistence()).unwrap();
+			let mut writeset = std::collections::BTreeMap::new();
+			writeset.insert("key".into_bytes(), Some("value".into_bytes()));
+			db.inner.persistence.read().as_ref().unwrap().append(version, &writeset).unwrap();
+			drop(db);
+			Database::new_with_persistence(DatabaseOptions::default(), persistence()).is_ok()
+		};
+		assert!(open(VERSION_CLAIMED / 2 - 1), "a version below the bound was rejected");
+		assert!(!open(VERSION_CLAIMED / 2), "a version at the bound was accepted");
+	}
+
+	/// Once a write to the append-only log fails, nothing more is written to
+	/// it, in every fsync mode and not only the one which commits in groups.
+	/// The failed commit poisons the database, but the log must stop by
+	/// itself too, since other commits and the fsync worker reach it
+	/// directly.
+	#[cfg(not(target_arch = "wasm32"))]
+	#[test]
+	fn a_failed_append_stops_the_log_in_every_fsync_mode() {
+		use crate::{AolMode, FsyncMode, PersistenceOptions};
+		let writeset = |key: &str| {
+			let mut writeset = std::collections::BTreeMap::new();
+			writeset.insert(
+				ByteSlice::from(key.as_bytes()),
+				Some(ByteSlice::from(b"value".as_slice())),
+			);
+			writeset
+		};
+		for fsync_mode in
+			[FsyncMode::Never, FsyncMode::Interval(Duration::from_secs(1)), FsyncMode::EveryAppend]
+		{
+			let dir = tempfile::TempDir::new().unwrap();
+			let path = dir.path().join("aol.bin");
+			let persistence = PersistenceOptions::new(dir.path())
+				.with_aol_mode(AolMode::SynchronousOnCommit)
+				.with_fsync_mode(fsync_mode);
+			let db =
+				Database::new_with_persistence(DatabaseOptions::default(), persistence).unwrap();
+			let len = std::fs::metadata(&path).unwrap().len();
+			let persistence = db.inner.persistence.read().clone().unwrap();
+			// A log opened only for reading fails the write
+			persistence.replace_aol_handle(std::fs::File::open(&path).unwrap());
+			assert!(persistence.append(1, &writeset("first")).is_err(), "{fsync_mode:?}");
+			// Every later append fails without writing, even to a log which
+			// would take it
+			let writable = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+			persistence.replace_aol_handle(writable);
+			let err = persistence.append(2, &writeset("second")).unwrap_err();
+			assert!(
+				matches!(err, crate::err::PersistenceError::AppendFailed(_)),
+				"{fsync_mode:?}: {err}"
+			);
+			assert_eq!(std::fs::metadata(&path).unwrap().len(), len, "{fsync_mode:?}");
+		}
+	}
+}

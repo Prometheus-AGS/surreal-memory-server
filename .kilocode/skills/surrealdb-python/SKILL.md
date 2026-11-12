@@ -10,10 +10,10 @@ metadata:
 
 ## Running SurrealDB (Server Mode)
 
-Persist data with RocksDB:
+Persist data with SurrealKV on SurrealDB 4.0:
 
 ```bash
-surreal start -u root -p root rocksdb:database
+surreal start -u root -p root surrealkv:database
 ```
 
 In-memory:

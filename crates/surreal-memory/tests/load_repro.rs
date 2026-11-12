@@ -10,18 +10,15 @@
 //! dependencies. Run explicitly with:
 //!
 //! ```bash
-//! # Bring up the docker-compose SurrealDB first:
-//! docker-compose up -d surrealdb
+//! # Server mode against an externally provisioned scratch SurrealDB 4.0.0:
+//! TEST_SURREAL_ENDPOINT=ws://127.0.0.1:<port> \
+//!   cargo test -p surreal-memory --test load_repro --features embedded,metal --release -- --ignored server
 //!
-//! # Server mode (default endpoint = ws://127.0.0.1:28000 per docker-compose.yaml):
-//! cargo test --test load_repro --features embedded,metal --release -- --ignored server
-//!
-//! # Embedded mode (uses a temp RocksDB path):
-//! cargo test --test load_repro --features embedded,metal --release -- --ignored embedded
+//! # Embedded mode (uses a temp SurrealKV path):
+//! cargo test -p surreal-memory --test load_repro --features embedded,metal --release -- --ignored embedded
 //! ```
 //!
-//! Override the server endpoint with `TEST_SURREAL_ENDPOINT=ws://host:port`
-//! (matches the existing `integration_test.rs` convention).
+//! The fixture host owns access to the disposable database endpoint.
 //!
 //! Each test appends a markdown row to
 //! `crates/surreal-memory/tests/load_repro_baseline.md` so successive runs
@@ -56,19 +53,21 @@ impl surreal_memory::embeddings::EmbeddingService for NoOpEmbedder {
 
 async fn server_storage(namespace: String) -> Arc<SurrealStorage> {
     let embedder: Arc<dyn surreal_memory::embeddings::EmbeddingService> = Arc::new(NoOpEmbedder);
-    let endpoint = std::env::var("TEST_SURREAL_ENDPOINT")
-        .unwrap_or_else(|_| "ws://127.0.0.1:28000".to_string());
+    let endpoint =
+        std::env::var("TEST_SURREAL_ENDPOINT").expect("provide a disposable SurrealDB endpoint");
+    let db = surrealdb::engine::any::connect(endpoint.clone())
+        .await
+        .expect("connect to the scratch SurrealDB");
+    let version = db.version().await.expect("read scratch SurrealDB version");
+    assert_eq!(version.to_string(), "4.0.0", "require SurrealDB 4.0.0");
+    drop(db);
     let config = SurrealConfig {
         auth_level: Default::default(),
         mode: SurrealMode::Server,
         endpoint: Some(endpoint),
         embedded_path: None,
-        username: Some(
-            std::env::var("TEST_SURREAL_USERNAME").unwrap_or_else(|_| "root".to_string()),
-        ),
-        password: Some(
-            std::env::var("TEST_SURREAL_PASSWORD").unwrap_or_else(|_| "root".to_string()),
-        ),
+        username: None,
+        password: None,
         namespace,
         database: "main".to_string(),
         retry: RetryConfig::default(),
@@ -313,7 +312,7 @@ fn init_tracing() {
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore = "requires docker-compose up -d surrealdb"]
+#[ignore = "requires TEST_SURREAL_ENDPOINT for a scratch SurrealDB 4.0.0"]
 async fn server_mixed_load() {
     init_tracing();
     let namespace = format!("loadrepro_{}", Uuid::new_v4().simple());
@@ -330,7 +329,7 @@ async fn server_mixed_load() {
     .await;
 
     append_baseline(
-        "server-mode (surrealdb 3.3.0 client + server)",
+        "server mode (SurrealDB 4.0.0 client and server)",
         HEADER,
         &[
             read_only.summary_md_row("hybrid_search × 64"),
@@ -351,7 +350,7 @@ async fn server_mixed_load() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore = "writes to a temp embedded RocksDB path"]
+#[ignore = "writes to a temp embedded SurrealKV path"]
 async fn embedded_mixed_load() {
     let temp = std::env::temp_dir().join(format!("loadrepro_{}", Uuid::new_v4().simple()));
     let storage = embedded_storage(temp.to_string_lossy().into_owned()).await;
@@ -367,7 +366,7 @@ async fn embedded_mixed_load() {
     .await;
 
     append_baseline(
-        "embedded mode (surrealdb 3.3.0 client + server)",
+        "embedded mode (SurrealDB 4.0.0 SurrealKV)",
         HEADER,
         &[
             read_only.summary_md_row("hybrid_search × 64"),
@@ -383,6 +382,7 @@ async fn embedded_mixed_load() {
     );
 
     eprintln!("embedded_mixed_load: see crates/surreal-memory/tests/load_repro_baseline.md");
-    // Best-effort cleanup; ignore errors (RocksDB lock files may linger briefly).
+    drop(storage);
+    // Best-effort cleanup of the temporary SurrealKV directory.
     let _ = std::fs::remove_dir_all(&temp);
 }

@@ -111,7 +111,7 @@ impl Inputs {
         }
         let surreal = if std::env::var_os("LDD_SURREAL_BIN").is_some() { Some(declared_path("LDD_SURREAL_BIN", false)?) } else { None };
         let docker = if surreal.is_none() && std::env::var_os("LDD_DOCKER_BIN").is_some() { Some(declared_path("LDD_DOCKER_BIN", false)?) } else { None };
-        ensure!(surreal.is_some() || docker.is_some(), "BLOCKED: declare LDD_SURREAL_BIN or LDD_DOCKER_BIN for real SurrealDB 3.3.0");
+        ensure!(surreal.is_some() || docker.is_some(), "BLOCKED: declare LDD_SURREAL_BIN or LDD_DOCKER_BIN for real SurrealDB 4.0.0");
         let image = if docker.is_some() { Some(required("LDD_SURREAL_IMAGE")?) } else { None };
         let scratch = declared_path("LDD_SCRATCH_ROOT", true)?;
         for forbidden in ["/Users/gqadonis/.codex", "/Users/gqadonis/.claude", "/Users/gqadonis/.cortex", "/Users/gqadonis/.prometheus"] {
@@ -235,14 +235,11 @@ async fn start_database(inputs: &Inputs, root: &Path, env: &BTreeMap<String, Str
     let port = free_port()?;
     let bind = format!("127.0.0.1:{port}");
     let mut database = if let Some(binary) = &inputs.surreal {
-        let version = clean_command(binary, root, env).arg("version").output().context("BLOCKED: SurrealDB version command")?;
-        let text = String::from_utf8_lossy(&version.stdout);
-        ensure!(version.status.success() && text.contains("3.3.0"), "BLOCKED: require actual SurrealDB 3.3.0, observed {text}");
         let child = clean_command(binary, root, env)
             .args(["start", "--no-banner", "--unauthenticated", "--allow-all", "--bind", &bind, "memory"])
             .stdout(File::create(inputs.evidence.join("cache-surreal.stdout"))?)
             .stderr(File::create(inputs.evidence.join("cache-surreal.stderr"))?).spawn().context("BLOCKED: start real SurrealDB")?;
-        Database { endpoint: format!("ws://{bind}"), identity: json!({"mode":"server-memory","binary":binary,"binarySha256":digest(binary)?,"version":text.trim(),"bind":bind}), _process: Some(ProcessGuard { child }), _container: None }
+        Database { endpoint: format!("ws://{bind}"), identity: json!({"mode":"server-memory","binary":binary,"binarySha256":digest(binary)?,"bind":bind}), _process: Some(ProcessGuard { child }), _container: None }
     } else {
         let binary = inputs.docker.as_ref().context("BLOCKED: Docker binary")?;
         let image = inputs.image.as_ref().context("BLOCKED: pinned SurrealDB image")?;
@@ -254,10 +251,8 @@ async fn start_database(inputs: &Inputs, root: &Path, env: &BTreeMap<String, Str
             .output().context("BLOCKED: start preprovisioned real SurrealDB container")?;
         ensure!(result.status.success(), "BLOCKED: Docker/real pinned SurrealDB image unavailable: {}", String::from_utf8_lossy(&result.stderr));
         let image_id = clean_command(binary, root, env).args(["inspect", "--format", "{{.Image}}", &name]).output()?;
-        let version = clean_command(binary, root, env).args(["exec", &name, "/surreal", "version"]).output()?;
-        ensure!(version.status.success() && String::from_utf8_lossy(&version.stdout).contains("3.3.0"), "BLOCKED: container must actually run SurrealDB 3.3.0");
         Database { endpoint: format!("ws://{bind}"), identity: json!({"mode":"server-memory-container","container":name,"image":image,
-            "imageId":String::from_utf8_lossy(&image_id.stdout).trim(),"version":String::from_utf8_lossy(&version.stdout).trim(),"bind":bind}), _process: None, _container: Some(guard) }
+            "imageId":String::from_utf8_lossy(&image_id.stdout).trim(),"bind":bind}), _process: None, _container: Some(guard) }
     };
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -268,6 +263,11 @@ async fn start_database(inputs: &Inputs, root: &Path, env: &BTreeMap<String, Str
         ensure!(Instant::now() < deadline, "BLOCKED: real SurrealDB did not become ready");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    let version = client.get(format!("http://{bind}/version")).timeout(Duration::from_secs(1))
+        .send().await?.error_for_status()?.text().await?;
+    ensure!(version.trim() == "surrealdb-4.0.0",
+        "BLOCKED: scratch endpoint must serve SurrealDB 4.0.0, observed {version}");
+    database.identity["version"] = json!(version.trim());
     Ok(database)
 }
 

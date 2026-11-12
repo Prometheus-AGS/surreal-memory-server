@@ -1,0 +1,1049 @@
+#![cfg(not(target_arch = "wasm32"))]
+
+use byteslice::ByteSlice;
+#[cfg(unix)]
+use std::path::Path;
+use std::time::Duration;
+use surrealmx::{
+	AolMode, CompressionMode, Database, DatabaseOptions, FsyncMode, PersistenceOptions,
+	SnapshotMode,
+};
+use tempfile::TempDir;
+
+#[test]
+fn test_aol_synchronous_basic() {
+	// Create a temporary directory for testing
+	let temp_dir = TempDir::new().unwrap();
+	let temp_path = temp_dir.path();
+
+	// Create database options
+	let db_opts = DatabaseOptions::default();
+
+	// Configure synchronous AOL persistence (no snapshots)
+	let persistence_opts = PersistenceOptions::new(temp_path)
+		.with_aol_mode(AolMode::SynchronousOnCommit)
+		.with_snapshot_mode(SnapshotMode::Never)
+		.with_fsync_mode(FsyncMode::EveryAppend);
+
+	// Create persistent database with AOL mode
+	let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+
+	// Add some data
+	{
+		let mut tx = db.transaction(true);
+		tx.set("key1", "value1").unwrap();
+		tx.set("key2", "value2").unwrap();
+		tx.commit().unwrap();
+	}
+
+	// Add more data in a separate transaction
+	{
+		let mut tx = db.transaction(true);
+		tx.set("key3", "value3").unwrap();
+		tx.del("key1").unwrap(); // Delete key1
+		tx.commit().unwrap();
+	}
+
+	// Verify data is accessible in current session
+	{
+		let mut tx = db.transaction(false);
+		assert_eq!(tx.get("key1").unwrap(), None); // Should be deleted
+		assert_eq!(tx.get("key2").unwrap(), Some(ByteSlice::from("value2")));
+		assert_eq!(tx.get("key3").unwrap(), Some(ByteSlice::from("value3")));
+		tx.cancel().unwrap();
+	}
+
+	// Verify AOL file exists and snapshot doesn't
+	let aol_path = temp_path.join("aol.bin");
+	let snapshot_path = temp_path.join("snapshot.bin");
+
+	assert!(aol_path.exists(), "AOL file should exist");
+	assert!(!snapshot_path.exists(), "Snapshot file should not exist in AOL-only mode");
+
+	std::thread::sleep(Duration::from_millis(250));
+
+	// Verify the AOL file has content
+	let aol_metadata = std::fs::metadata(&aol_path).unwrap();
+	assert!(aol_metadata.len() > 0, "AOL file should not be empty");
+}
+
+#[test]
+fn test_aol_asynchronous_basic() {
+	// Create a temporary directory for testing
+	let temp_dir = TempDir::new().unwrap();
+	let temp_path = temp_dir.path();
+
+	// Create database options
+	let db_opts = DatabaseOptions::default();
+
+	// Configure asynchronous AOL persistence (no snapshots)
+	let persistence_opts = PersistenceOptions::new(temp_path)
+		.with_aol_mode(AolMode::AsynchronousAfterCommit)
+		.with_snapshot_mode(SnapshotMode::Never)
+		.with_fsync_mode(FsyncMode::Never);
+
+	// Create persistent database with AOL mode
+	let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+
+	// Add some data
+	{
+		let mut tx = db.transaction(true);
+		tx.set("key1", "value1").unwrap();
+		tx.set("key2", "value2").unwrap();
+		tx.commit().unwrap();
+	}
+
+	// Add more data in a separate transaction
+	{
+		let mut tx = db.transaction(true);
+		tx.set("key3", "value3").unwrap();
+		tx.del("key1").unwrap(); // Delete key1
+		tx.commit().unwrap();
+	}
+
+	// Verify data is accessible in current session
+	{
+		let mut tx = db.transaction(false);
+		assert_eq!(tx.get("key1").unwrap(), None); // Should be deleted
+		assert_eq!(tx.get("key2").unwrap(), Some(ByteSlice::from("value2")));
+		assert_eq!(tx.get("key3").unwrap(), Some(ByteSlice::from("value3")));
+		tx.cancel().unwrap();
+	}
+
+	// Verify AOL file exists and snapshot doesn't
+	let aol_path = temp_path.join("aol.bin");
+	let snapshot_path = temp_path.join("snapshot.bin");
+
+	assert!(aol_path.exists(), "AOL file should exist");
+	assert!(!snapshot_path.exists(), "Snapshot file should not exist in AOL-only mode");
+
+	std::thread::sleep(Duration::from_millis(250));
+
+	// Verify the AOL file has content
+	let aol_metadata = std::fs::metadata(&aol_path).unwrap();
+	assert!(aol_metadata.len() > 0, "AOL file should not be empty");
+}
+
+#[test]
+fn test_aol_recovery() {
+	// Create a temporary directory for testing
+	let temp_dir = TempDir::new().unwrap();
+	let temp_path = temp_dir.path();
+
+	// Create database options
+	let db_opts = DatabaseOptions::default();
+
+	// Configure AOL persistence
+	let persistence_opts = PersistenceOptions::new(temp_path)
+		.with_aol_mode(AolMode::SynchronousOnCommit)
+		.with_snapshot_mode(SnapshotMode::Never)
+		.with_fsync_mode(FsyncMode::EveryAppend);
+
+	// Create first database instance and add data
+	{
+		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
+
+		let mut tx = db.transaction(true);
+		tx.set("recover_key1".to_string(), "recover_value1".to_string()).unwrap();
+		tx.set("recover_key2".to_string(), "recover_value2".to_string()).unwrap();
+		tx.commit().unwrap();
+
+		// Update a key
+		let mut tx = db.transaction(true);
+		tx.set("recover_key1".to_string(), "updated_value1".to_string()).unwrap();
+		tx.set("recover_key3".to_string(), "recover_value3".to_string()).unwrap();
+		tx.commit().unwrap();
+
+		// Delete a key
+		let mut tx = db.transaction(true);
+		tx.del("recover_key2".to_string()).unwrap();
+		tx.commit().unwrap();
+	} // Database drops here, releasing all resources
+
+	// Create second database instance from the same directory (simulates
+	// restart)
+	{
+		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+
+		// Verify data was recovered from AOL
+		let mut tx = db.transaction(false);
+		assert_eq!(tx.get("recover_key1").unwrap(), Some(ByteSlice::from("updated_value1")));
+		assert_eq!(tx.get("recover_key2").unwrap(), None); // Should be deleted
+		assert_eq!(tx.get("recover_key3").unwrap(), Some(ByteSlice::from("recover_value3")));
+		tx.cancel().unwrap();
+	}
+}
+
+#[test]
+fn test_aol_fsync_modes() {
+	// Test FsyncMode::EveryAppend
+	{
+		let temp_dir = TempDir::new().unwrap();
+		let temp_path = temp_dir.path();
+
+		let db_opts = DatabaseOptions::default();
+		let persistence_opts = PersistenceOptions::new(temp_path)
+			.with_aol_mode(AolMode::SynchronousOnCommit)
+			.with_fsync_mode(FsyncMode::EveryAppend);
+
+		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+
+		let mut tx = db.transaction(true);
+		tx.set(&b"key_1"[..], "fsync_every_append").unwrap();
+		tx.commit().unwrap(); // Should fsync immediately
+	}
+
+	// Test FsyncMode::Interval
+	{
+		let temp_dir = TempDir::new().unwrap();
+		let temp_path = temp_dir.path();
+
+		let db_opts = DatabaseOptions::default();
+		let persistence_opts = PersistenceOptions::new(temp_path)
+			.with_aol_mode(AolMode::SynchronousOnCommit)
+			.with_fsync_mode(FsyncMode::Interval(Duration::from_millis(100)));
+
+		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+
+		let mut tx = db.transaction(true);
+		tx.set(&b"key_1"[..], "fsync_interval").unwrap();
+		tx.commit().unwrap(); // Should not fsync immediately
+
+		// Wait for interval to pass
+		std::thread::sleep(Duration::from_millis(200));
+	}
+
+	// Test FsyncMode::Never
+	{
+		let temp_dir = TempDir::new().unwrap();
+		let temp_path = temp_dir.path();
+
+		let db_opts = DatabaseOptions::default();
+		let persistence_opts = PersistenceOptions::new(temp_path)
+			.with_aol_mode(AolMode::SynchronousOnCommit)
+			.with_fsync_mode(FsyncMode::Never);
+
+		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+
+		let mut tx = db.transaction(true);
+		tx.set(&b"key_1"[..], "fsync_never").unwrap();
+		tx.commit().unwrap(); // Should never fsync
+	}
+}
+
+#[test]
+fn test_snapshot_manual_creation() {
+	// Create a temporary directory for testing
+	let temp_dir = TempDir::new().unwrap();
+	let temp_path = temp_dir.path();
+
+	// Create database options
+	let db_opts = DatabaseOptions::default();
+
+	// Configure manual snapshot persistence (no AOL, no automatic snapshots)
+	let persistence_opts = PersistenceOptions::new(temp_path)
+		.with_aol_mode(AolMode::Never)
+		.with_snapshot_mode(SnapshotMode::Never);
+
+	// Create persistent database
+	let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+
+	// Add some data
+	{
+		let mut tx = db.transaction(true);
+		tx.set("snap_key1".to_string(), "snap_value1".to_string()).unwrap();
+		tx.set("snap_key2".to_string(), "snap_value2".to_string()).unwrap();
+		tx.commit().unwrap();
+	}
+
+	// Manually create a snapshot
+	if let Some(persistence) = db.persistence() {
+		persistence.snapshot().unwrap();
+	}
+
+	// Verify snapshot file exists and AOL doesn't
+	let snapshot_path = temp_path.join("snapshot.bin");
+	let aol_path = temp_path.join("aol.bin");
+
+	assert!(snapshot_path.exists(), "Snapshot file should exist");
+	assert!(!aol_path.exists(), "AOL file should not exist in snapshot-only mode");
+
+	// Verify the snapshot file has content
+	let snapshot_metadata = std::fs::metadata(&snapshot_path).unwrap();
+	assert!(snapshot_metadata.len() > 0, "Snapshot file should not be empty");
+}
+
+#[test]
+fn test_snapshot_only_persistence_basic() {
+	// Create a temporary directory for testing
+	let temp_dir = TempDir::new().unwrap();
+	let temp_path = temp_dir.path();
+
+	// Create database options
+	let db_opts = DatabaseOptions::default();
+
+	// Configure snapshot-only persistence (no AOL)
+	let persistence_opts = PersistenceOptions::new(temp_path)
+		.with_aol_mode(AolMode::Never)
+		.with_snapshot_mode(SnapshotMode::Interval(Duration::from_mins(1)));
+
+	// Create persistent database with snapshot-only mode
+	let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+
+	// Add some data
+	{
+		let mut tx = db.transaction(true);
+		tx.put("key1".to_string(), "value1".to_string()).unwrap();
+		tx.put("key2".to_string(), "value2".to_string()).unwrap();
+		tx.commit().unwrap();
+	}
+
+	// Verify data is accessible in current session
+	{
+		let mut tx = db.transaction(false);
+		assert_eq!(tx.get("key1").unwrap(), Some(ByteSlice::from("value1")));
+		assert_eq!(tx.get("key2").unwrap(), Some(ByteSlice::from("value2")));
+		tx.cancel().unwrap();
+	}
+
+	// Trigger a manual snapshot
+	if let Some(persistence) = db.persistence() {
+		persistence.snapshot().unwrap();
+	}
+
+	// Verify snapshot file exists but AOL file doesn't
+	let snapshot_path = temp_path.join("snapshot.bin");
+	let aol_path = temp_path.join("aol.bin");
+
+	assert!(snapshot_path.exists(), "Snapshot file should exist");
+	assert!(!aol_path.exists(), "AOL file should not exist in snapshot-only mode");
+
+	// Verify the snapshot file has content
+	let snapshot_metadata = std::fs::metadata(&snapshot_path).unwrap();
+	assert!(snapshot_metadata.len() > 0, "Snapshot file should not be empty");
+
+	println!("Successfully created snapshot file with {} bytes", snapshot_metadata.len());
+}
+
+#[test]
+fn test_snapshot_basic() {
+	// Test basic snapshot creation
+	let temp_dir = TempDir::new().unwrap();
+	let temp_path = temp_dir.path();
+
+	let db_opts = DatabaseOptions::default();
+	let persistence_opts = PersistenceOptions::new(temp_path)
+		.with_aol_mode(AolMode::Never)
+		.with_snapshot_mode(SnapshotMode::Never);
+
+	let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+
+	// Add test data
+	{
+		let mut tx = db.transaction(true);
+		for i in 0..100 {
+			tx.set(format!("key_{i}"), format!("value_{i}_with_some_data")).unwrap();
+		}
+		tx.commit().unwrap();
+	}
+
+	// Create snapshot
+	if let Some(persistence) = db.persistence() {
+		persistence.snapshot().unwrap();
+	}
+
+	// Verify snapshot file exists and has content
+	let snapshot_path = temp_path.join("snapshot.bin");
+	assert!(snapshot_path.exists(), "Snapshot file should exist");
+
+	let metadata = std::fs::metadata(&snapshot_path).unwrap();
+	assert!(metadata.len() > 0, "Snapshot file should not be empty");
+
+	println!("Snapshot size = {} bytes", metadata.len());
+}
+
+#[test]
+fn test_snapshot_recovery() {
+	// Create a temporary directory for testing
+	let temp_dir = TempDir::new().unwrap();
+	let temp_path = temp_dir.path();
+
+	let db_opts = DatabaseOptions::default();
+	let persistence_opts = PersistenceOptions::new(temp_path)
+		.with_aol_mode(AolMode::Never)
+		.with_snapshot_mode(SnapshotMode::Never);
+
+	// Create first database instance and add data
+	{
+		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
+
+		// Add initial data
+		{
+			let mut tx = db.transaction(true);
+			tx.set("snapshot_key1".to_string(), "snapshot_value1".to_string()).unwrap();
+			tx.set("snapshot_key2".to_string(), "snapshot_value2".to_string()).unwrap();
+			tx.commit().unwrap();
+		}
+
+		// Update data
+		{
+			let mut tx = db.transaction(true);
+			tx.set("snapshot_key1".to_string(), "updated_snapshot_value1".to_string()).unwrap();
+			tx.set("snapshot_key3".to_string(), "snapshot_value3".to_string()).unwrap();
+			tx.commit().unwrap();
+		}
+
+		// Delete data
+		{
+			let mut tx = db.transaction(true);
+			tx.del("snapshot_key2".to_string()).unwrap();
+			tx.commit().unwrap();
+		}
+
+		// Create snapshot before closing
+		if let Some(persistence) = db.persistence() {
+			persistence.snapshot().unwrap();
+		}
+	} // Database drops here
+
+	// Create second database instance from the same directory (simulates
+	// restart)
+	{
+		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+
+		// Verify data was recovered from snapshot
+		let mut tx = db.transaction(false);
+		assert_eq!(
+			tx.get("snapshot_key1").unwrap().as_deref(),
+			Some(b"updated_snapshot_value1" as &[u8])
+		);
+		assert_eq!(tx.get("snapshot_key2").unwrap(), None); // Should be deleted
+		assert_eq!(tx.get("snapshot_key3").unwrap().as_deref(), Some(b"snapshot_value3" as &[u8]));
+		tx.cancel().unwrap();
+	}
+}
+
+#[test]
+fn test_snapshot_interval() {
+	// Create a temporary directory for testing
+	let temp_dir = TempDir::new().unwrap();
+	let temp_path = temp_dir.path();
+
+	let db_opts = DatabaseOptions::default();
+	let persistence_opts = PersistenceOptions::new(temp_path)
+		.with_aol_mode(AolMode::Never)
+		.with_snapshot_mode(SnapshotMode::Interval(Duration::from_millis(100)));
+
+	let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+
+	// Add some data
+	{
+		let mut tx = db.transaction(true);
+		tx.set("interval_key1".to_string(), "interval_value1".to_string()).unwrap();
+		tx.commit().unwrap();
+	}
+
+	// Wait for snapshot to be created automatically
+	std::thread::sleep(Duration::from_millis(200));
+
+	// Add more data
+	{
+		let mut tx = db.transaction(true);
+		tx.set("interval_key2".to_string(), "interval_value2".to_string()).unwrap();
+		tx.commit().unwrap();
+	}
+
+	// Wait for another snapshot
+	std::thread::sleep(Duration::from_millis(200));
+
+	// Verify snapshot file exists
+	let snapshot_path = temp_path.join("snapshot.bin");
+	assert!(snapshot_path.exists(), "Snapshot file should exist with interval snapshots");
+}
+
+#[test]
+fn test_combined_aol_and_snapshot() {
+	// Create a temporary directory for testing
+	let temp_dir = TempDir::new().unwrap();
+	let temp_path = temp_dir.path();
+
+	let db_opts = DatabaseOptions::default();
+	let persistence_opts = PersistenceOptions::new(temp_path)
+		.with_aol_mode(AolMode::SynchronousOnCommit)
+		.with_snapshot_mode(SnapshotMode::Never) // Manual snapshots
+		.with_fsync_mode(FsyncMode::EveryAppend);
+
+	// Create first database instance
+	{
+		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
+
+		// Add initial data (will go to AOL)
+		{
+			let mut tx = db.transaction(true);
+			tx.set("combined_key1".to_string(), "combined_value1".to_string()).unwrap();
+			tx.set("combined_key2".to_string(), "combined_value2".to_string()).unwrap();
+			tx.commit().unwrap();
+		}
+
+		// Create a snapshot (should truncate AOL)
+		if let Some(persistence) = db.persistence() {
+			persistence.snapshot().unwrap();
+		}
+
+		// Add more data after snapshot (will go to AOL)
+		{
+			let mut tx = db.transaction(true);
+			tx.set("combined_key3".to_string(), "combined_value3".to_string()).unwrap();
+			tx.set("combined_key1".to_string(), "updated_combined_value1".to_string()).unwrap();
+			tx.commit().unwrap();
+		}
+	} // Database drops here
+
+	// Verify both snapshot and AOL files exist
+	let snapshot_path = temp_path.join("snapshot.bin");
+	let aol_path = temp_path.join("aol.bin");
+
+	assert!(snapshot_path.exists(), "Snapshot file should exist");
+	assert!(aol_path.exists(), "AOL file should exist");
+
+	// Create second database instance (simulates restart)
+	{
+		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+
+		// Verify data was recovered from both snapshot and AOL
+		let mut tx = db.transaction(false);
+		assert_eq!(
+			tx.get("combined_key1").unwrap().as_deref(),
+			Some(b"updated_combined_value1" as &[u8])
+		);
+		assert_eq!(tx.get("combined_key2").unwrap().as_deref(), Some(b"combined_value2" as &[u8]));
+		assert_eq!(tx.get("combined_key3").unwrap().as_deref(), Some(b"combined_value3" as &[u8]));
+		tx.cancel().unwrap();
+	}
+}
+
+#[test]
+fn test_aol_snapshot_with_truncation() {
+	// Create a temporary directory for testing
+	let temp_dir = TempDir::new().unwrap();
+	let temp_path = temp_dir.path();
+
+	let db_opts = DatabaseOptions::default();
+	let persistence_opts = PersistenceOptions::new(temp_path)
+		.with_aol_mode(AolMode::SynchronousOnCommit)
+		.with_snapshot_mode(SnapshotMode::Never)
+		.with_fsync_mode(FsyncMode::EveryAppend);
+
+	let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+
+	// Add data that will go to AOL
+	{
+		let mut tx = db.transaction(true);
+		for i in 0..10 {
+			tx.set(format!("key_{i}"), format!("value_{i}")).unwrap();
+		}
+		tx.commit().unwrap();
+	}
+
+	// Check AOL file size before snapshot
+	let aol_path = temp_path.join("aol.bin");
+	let aol_size_before = std::fs::metadata(&aol_path).unwrap().len();
+	assert!(aol_size_before > 0, "AOL should have content before snapshot");
+
+	// Create snapshot (should truncate AOL)
+	if let Some(persistence) = db.persistence() {
+		persistence.snapshot().unwrap();
+	}
+
+	// Check AOL file size after snapshot (should be much smaller or empty)
+	let aol_size_after = std::fs::metadata(&aol_path).unwrap().len();
+	assert!(aol_size_after < aol_size_before, "AOL should be truncated after snapshot");
+
+	// Add more data after snapshot
+	{
+		let mut tx = db.transaction(true);
+		tx.set("post_snapshot_key".to_string(), "post_snapshot_value".to_string()).unwrap();
+		tx.commit().unwrap();
+	}
+
+	// Verify snapshot exists
+	let snapshot_path = temp_path.join("snapshot.bin");
+	assert!(snapshot_path.exists(), "Snapshot file should exist");
+
+	// Verify all data is still accessible
+	{
+		let mut tx = db.transaction(false);
+		for i in 0..10 {
+			assert_eq!(
+				tx.get(format!("key_{i}")).unwrap(),
+				Some(ByteSlice::from(format!("value_{i}")))
+			);
+		}
+		assert_eq!(
+			tx.get("post_snapshot_key").unwrap(),
+			Some(ByteSlice::from("post_snapshot_value"))
+		);
+		tx.cancel().unwrap();
+	}
+}
+
+#[test]
+fn test_combined_recovery_complex() {
+	// Create a temporary directory for testing
+	let temp_dir = TempDir::new().unwrap();
+	let temp_path = temp_dir.path();
+
+	let db_opts = DatabaseOptions::default();
+	let persistence_opts = PersistenceOptions::new(temp_path)
+		.with_aol_mode(AolMode::SynchronousOnCommit)
+		.with_snapshot_mode(SnapshotMode::Never)
+		.with_fsync_mode(FsyncMode::EveryAppend);
+
+	// First session: Add data, snapshot, add more data
+	{
+		let db = Database::new_with_persistence(db_opts.clone(), persistence_opts.clone()).unwrap();
+
+		// Phase 1: Add initial data
+		{
+			let mut tx = db.transaction(true);
+			tx.set("phase1_key1".to_string(), "phase1_value1".to_string()).unwrap();
+			tx.set("phase1_key2".to_string(), "phase1_value2".to_string()).unwrap();
+			tx.commit().unwrap();
+		}
+
+		// Phase 2: Update and delete some data
+		{
+			let mut tx = db.transaction(true);
+			tx.set("phase1_key1".to_string(), "updated_phase1_value1".to_string()).unwrap();
+			tx.del("phase1_key2".to_string()).unwrap();
+			tx.set("phase2_key1".to_string(), "phase2_value1".to_string()).unwrap();
+			tx.commit().unwrap();
+		}
+
+		// Create snapshot
+		if let Some(persistence) = db.persistence() {
+			persistence.snapshot().unwrap();
+		}
+
+		// Phase 3: Add data after snapshot
+		{
+			let mut tx = db.transaction(true);
+			tx.set("phase3_key1".to_string(), "phase3_value1".to_string()).unwrap();
+			tx.set("phase1_key1".to_string(), "final_phase1_value1".to_string()).unwrap();
+			tx.commit().unwrap();
+		}
+	} // First session ends
+
+	// Second session: Verify all data is recovered correctly
+	{
+		let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+
+		let mut tx = db.transaction(false);
+		assert_eq!(
+			tx.get("phase1_key1").unwrap().as_deref(),
+			Some(b"final_phase1_value1" as &[u8])
+		);
+		assert_eq!(tx.get("phase1_key2").unwrap(), None); // Should be deleted
+		assert_eq!(tx.get("phase2_key1").unwrap(), Some(ByteSlice::from("phase2_value1")));
+		assert_eq!(tx.get("phase3_key1").unwrap(), Some(ByteSlice::from("phase3_value1")));
+		tx.cancel().unwrap();
+	}
+}
+
+#[test]
+fn test_custom_file_paths() {
+	// Create a temporary directory for testing
+	let temp_dir = TempDir::new().unwrap();
+	let temp_path = temp_dir.path();
+
+	// Create custom subdirectories
+	let aol_dir = temp_path.join("logs");
+	let snapshot_dir = temp_path.join("snapshots");
+	std::fs::create_dir_all(&aol_dir).unwrap();
+	std::fs::create_dir_all(&snapshot_dir).unwrap();
+
+	let db_opts = DatabaseOptions::default();
+	let persistence_opts = PersistenceOptions::new(temp_path)
+		.with_aol_mode(AolMode::SynchronousOnCommit)
+		.with_snapshot_mode(SnapshotMode::Never)
+		.with_aol_path(aol_dir.join("custom.aol"))
+		.with_snapshot_path(snapshot_dir.join("custom.snapshot"));
+
+	let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+
+	// Add some data
+	{
+		let mut tx = db.transaction(true);
+		tx.set("custom_key".to_string(), "custom_value".to_string()).unwrap();
+		tx.commit().unwrap();
+	}
+
+	// Create snapshot
+	if let Some(persistence) = db.persistence() {
+		persistence.snapshot().unwrap();
+	}
+
+	// Verify files exist at custom paths
+	let custom_aol_path = aol_dir.join("custom.aol");
+	let custom_snapshot_path = snapshot_dir.join("custom.snapshot");
+
+	assert!(custom_aol_path.exists(), "Custom AOL file should exist");
+	assert!(custom_snapshot_path.exists(), "Custom snapshot file should exist");
+}
+
+#[test]
+fn test_persistence_options_builder() {
+	let temp_dir = TempDir::new().unwrap();
+	let temp_path = temp_dir.path();
+
+	// Test fluent builder pattern
+	let persistence_opts = PersistenceOptions::new(temp_path)
+		.with_aol_mode(AolMode::AsynchronousAfterCommit)
+		.with_snapshot_mode(SnapshotMode::Interval(Duration::from_secs(1)))
+		.with_fsync_mode(FsyncMode::Interval(Duration::from_millis(500)));
+
+	// Verify the options were set correctly
+	assert_eq!(persistence_opts.aol_mode, AolMode::AsynchronousAfterCommit);
+	assert_eq!(persistence_opts.snapshot_mode, SnapshotMode::Interval(Duration::from_secs(1)));
+	assert_eq!(persistence_opts.fsync_mode, FsyncMode::Interval(Duration::from_millis(500)));
+
+	// Test that database can be created with these options
+	let db_opts = DatabaseOptions::default();
+	let _ = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+}
+
+#[test]
+fn test_readonly_operations_no_persistence() {
+	// Test that read-only operations work even with persistence configured
+	let temp_dir = TempDir::new().unwrap();
+	let temp_path = temp_dir.path();
+
+	let db_opts = DatabaseOptions::default();
+	let persistence_opts = PersistenceOptions::new(temp_path)
+		.with_aol_mode(AolMode::SynchronousOnCommit)
+		.with_snapshot_mode(SnapshotMode::Never);
+
+	let db = Database::new_with_persistence(db_opts, persistence_opts).unwrap();
+
+	// Perform read-only operations (should not trigger persistence)
+	{
+		let mut tx = db.transaction(false);
+		assert_eq!(tx.get("non_existent_key").unwrap(), None);
+		assert!(!tx.exists("non_existent_key").unwrap());
+		tx.cancel().unwrap();
+	}
+
+	// Verify no persistence files were created for read-only operations
+	let aol_path = temp_path.join("aol.bin");
+	let snapshot_path = temp_path.join("snapshot.bin");
+
+	// The AOL file holds only the header written when it was created, and
+	// the snapshot should not exist
+	assert_eq!(
+		std::fs::read(&aol_path).unwrap(),
+		[0xFF, b'S', b'M', b'X', b'A', b'O', b'L', 2],
+		"AOL file should hold only its header after read-only operations"
+	);
+	assert!(!snapshot_path.exists(), "Snapshot file should not exist after read-only operations");
+}
+
+#[test]
+fn test_snapshot_persists_only_latest_version() {
+	// Create a temporary directory for testing
+	let temp_dir = TempDir::new().unwrap();
+	let temp_path = temp_dir.path();
+
+	// Configure manual snapshots without compression, so the snapshot
+	// file can be decoded directly as a plain bincode stream
+	let persistence_opts = PersistenceOptions::new(temp_path)
+		.with_aol_mode(AolMode::Never)
+		.with_snapshot_mode(SnapshotMode::Never)
+		.with_compression(CompressionMode::None);
+
+	// Write three versions of one key, and create-then-delete another
+	{
+		let db =
+			Database::new_with_persistence(DatabaseOptions::default(), persistence_opts).unwrap();
+		for val in ["v1", "v2", "v3"] {
+			let mut tx = db.transaction(true);
+			tx.set("alpha", val).unwrap();
+			tx.commit().unwrap();
+		}
+		{
+			let mut tx = db.transaction(true);
+			tx.set("beta", "temporary").unwrap();
+			tx.commit().unwrap();
+		}
+		{
+			let mut tx = db.transaction(true);
+			tx.del("beta").unwrap();
+			tx.commit().unwrap();
+		}
+		// Take a manual snapshot
+		db.persistence().unwrap().snapshot().unwrap();
+	}
+
+	// Decode the snapshot file directly: a header naming the version the
+	// snapshot covers, then entries which each hold exactly one version with
+	// a value, the deleted key absent entirely
+	let file = std::fs::File::open(temp_path.join("snapshot.bin")).unwrap();
+	let mut reader = std::io::BufReader::new(file);
+	let mut header = [0u8; 16];
+	std::io::Read::read_exact(&mut reader, &mut header).unwrap();
+	assert_eq!(header[..8], [0xFF, b'S', b'M', b'X', b'S', b'N', b'P', 1]);
+	let covered = u64::from_le_bytes(header[8..].try_into().unwrap());
+	let mut entries = Vec::new();
+	loop {
+		type Entry = (ByteSlice, Vec<(u64, Option<ByteSlice>)>);
+		let result: Result<Entry, _> =
+			bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard());
+		match result {
+			Ok(entry) => entries.push(entry),
+			Err(bincode::error::DecodeError::Io {
+				inner,
+				..
+			}) if inner.kind() == std::io::ErrorKind::UnexpectedEof => break,
+			Err(e) => panic!("snapshot decode failed: {e}"),
+		}
+	}
+	assert!(!entries.is_empty(), "snapshot should contain entries");
+	for (key, versions) in &entries {
+		assert_eq!(versions.len(), 1, "entry for {key:?} should hold exactly one version");
+		assert!(versions[0].1.is_some(), "entry for {key:?} should hold a value");
+		assert_ne!(key.as_ref(), b"beta", "deleted key should be absent from the snapshot");
+		assert!(versions[0].0 <= covered, "entry for {key:?} is above the covered version");
+	}
+	let alpha = entries.iter().find(|(k, _)| k.as_ref() == b"alpha").expect("alpha missing");
+	assert_eq!(alpha.1[0].1.as_deref(), Some(b"v3" as &[u8]));
+
+	// Reopen from the snapshot and verify the observable state
+	let persistence_opts = PersistenceOptions::new(temp_path)
+		.with_aol_mode(AolMode::Never)
+		.with_snapshot_mode(SnapshotMode::Never)
+		.with_compression(CompressionMode::None);
+	let db = Database::new_with_persistence(DatabaseOptions::default(), persistence_opts).unwrap();
+	let mut tx = db.transaction(false);
+	assert_eq!(tx.get("alpha").unwrap(), Some(ByteSlice::from("v3")));
+	assert_eq!(tx.get("beta").unwrap(), None);
+	tx.cancel().unwrap();
+}
+
+#[test]
+fn test_restart_seeds_version_counter() {
+	// Create a temporary directory for testing
+	let temp_dir = TempDir::new().unwrap();
+	let temp_path = temp_dir.path();
+
+	// Configure synchronous AOL persistence
+	let persistence_opts = || {
+		PersistenceOptions::new(temp_path)
+			.with_aol_mode(AolMode::SynchronousOnCommit)
+			.with_snapshot_mode(SnapshotMode::Never)
+			.with_fsync_mode(FsyncMode::EveryAppend)
+	};
+
+	// Run 1: commit three versions of one key (versions 1..=3)
+	{
+		let db =
+			Database::new_with_persistence(DatabaseOptions::default(), persistence_opts()).unwrap();
+		for val in ["a", "b", "c"] {
+			let mut tx = db.transaction(true);
+			tx.set("key", val).unwrap();
+			tx.commit().unwrap();
+		}
+	}
+
+	// Run 2: the logical clock must be seeded above the persisted
+	// versions, so the new write lands strictly above the reloaded
+	// chain. Without seeding it would mint version 1 and be inserted
+	// BELOW the persisted versions, making the old value win.
+	{
+		let db =
+			Database::new_with_persistence(DatabaseOptions::default(), persistence_opts()).unwrap();
+		let mut tx = db.transaction(true);
+		tx.set("key", "d").unwrap();
+		tx.commit().unwrap();
+		let mut tx = db.transaction(false);
+		assert_eq!(tx.get("key").unwrap(), Some(ByteSlice::from("d")));
+		tx.cancel().unwrap();
+	}
+
+	// Reopen again and write a fifth version
+	{
+		let db =
+			Database::new_with_persistence(DatabaseOptions::default(), persistence_opts()).unwrap();
+		let mut tx = db.transaction(false);
+		assert_eq!(tx.get("key").unwrap(), Some(ByteSlice::from("d")));
+		tx.cancel().unwrap();
+	}
+}
+
+#[test]
+fn test_loads_multiversion_snapshot_files() {
+	// Create a temporary directory for testing
+	let temp_dir = TempDir::new().unwrap();
+	let temp_path = temp_dir.path();
+
+	// Hand-write a snapshot file in the format produced by releases which
+	// persisted the full version chain per key: one key with a
+	// multi-version chain, and one key whose newest entry is a delete
+	// tombstone. Loading must surface only the newest value of the first
+	// key, and treat the second as absent.
+	{
+		use std::io::Write as _;
+		let file = std::fs::File::create(temp_path.join("snapshot.bin")).unwrap();
+		let mut writer = std::io::BufWriter::new(file);
+		let multi: (ByteSlice, Vec<(u64, Option<ByteSlice>)>) = (
+			ByteSlice::from("multi"),
+			vec![
+				(1, Some(ByteSlice::from("v1"))),
+				(2, Some(ByteSlice::from("v2"))),
+				(3, Some(ByteSlice::from("v3"))),
+			],
+		);
+		let gone: (ByteSlice, Vec<(u64, Option<ByteSlice>)>) =
+			(ByteSlice::from("gone"), vec![(1, Some(ByteSlice::from("x"))), (2, None)]);
+		bincode::serde::encode_into_std_write(&multi, &mut writer, bincode::config::standard())
+			.unwrap();
+		bincode::serde::encode_into_std_write(&gone, &mut writer, bincode::config::standard())
+			.unwrap();
+		writer.flush().unwrap();
+	}
+
+	// Open a database over the hand-written snapshot
+	let persistence_opts = PersistenceOptions::new(temp_path)
+		.with_aol_mode(AolMode::Never)
+		.with_snapshot_mode(SnapshotMode::Never)
+		.with_compression(CompressionMode::None);
+	let db = Database::new_with_persistence(DatabaseOptions::default(), persistence_opts).unwrap();
+	let mut tx = db.transaction(false);
+	assert_eq!(tx.get("multi").unwrap(), Some(ByteSlice::from("v3")));
+	assert_eq!(tx.get("gone").unwrap(), None);
+	tx.cancel().unwrap();
+}
+
+/// Counts this process's open file descriptors which refer to the same file
+/// as `path`.
+///
+/// Matching on device and inode, rather than counting every descriptor,
+/// keeps the result independent of whatever else this process (including
+/// the other tests running in it) has open. Each descriptor is reopened and
+/// inspected through the new handle, because `stat` on a `/dev/fd` entry
+/// describes the entry itself rather than the file behind it on macOS.
+#[cfg(unix)]
+fn open_handles_to(path: &Path) -> usize {
+	use std::os::unix::fs::MetadataExt;
+	let target = std::fs::metadata(path).unwrap();
+	// Snapshot the listing first, so descriptors opened below are not part of
+	// it
+	let entries: Vec<_> =
+		std::fs::read_dir("/dev/fd").unwrap().filter_map(Result::ok).map(|e| e.path()).collect();
+	entries
+		.into_iter()
+		.filter_map(|entry| std::fs::File::open(entry).ok()?.metadata().ok())
+		.filter(|meta| meta.dev() == target.dev() && meta.ino() == target.ino())
+		.count()
+}
+
+#[cfg(unix)]
+#[test]
+fn test_dropping_database_closes_aol_handle() {
+	// Every combination of background workers a persistent database can run
+	let configs = [
+		(AolMode::SynchronousOnCommit, FsyncMode::EveryAppend, SnapshotMode::Never),
+		(AolMode::SynchronousOnCommit, FsyncMode::Never, SnapshotMode::Never),
+		(
+			AolMode::AsynchronousAfterCommit,
+			FsyncMode::Interval(Duration::from_millis(50)),
+			SnapshotMode::Interval(Duration::from_millis(50)),
+		),
+	];
+	for (aol_mode, fsync_mode, snapshot_mode) in configs {
+		let temp_dir = TempDir::new().unwrap();
+		let aol_path = temp_dir.path().join("aol.bin");
+		let persistence_opts = PersistenceOptions::new(temp_dir.path())
+			.with_aol_mode(aol_mode)
+			.with_snapshot_mode(snapshot_mode)
+			.with_fsync_mode(fsync_mode);
+		let db =
+			Database::new_with_persistence(DatabaseOptions::default(), persistence_opts).unwrap();
+		{
+			let mut tx = db.transaction(true);
+			tx.set("key", "value").unwrap();
+			tx.commit().unwrap();
+		}
+		// The handle is open while the database is, which also proves the
+		// check below can observe an open handle at all
+		assert!(open_handles_to(&aol_path) > 0, "AOL should be open ({aol_mode:?})");
+		// Dropping the database releases the handle
+		drop(db);
+		assert_eq!(
+			open_handles_to(&aol_path),
+			0,
+			"dropping the database should close the AOL handle ({aol_mode:?})"
+		);
+	}
+}
+
+#[test]
+fn test_transaction_outliving_database_still_persists() {
+	let temp_dir = TempDir::new().unwrap();
+	let persistence_opts = PersistenceOptions::new(temp_dir.path())
+		.with_aol_mode(AolMode::SynchronousOnCommit)
+		.with_snapshot_mode(SnapshotMode::Never)
+		.with_fsync_mode(FsyncMode::EveryAppend);
+	let db = Database::new_with_persistence(DatabaseOptions::default(), persistence_opts.clone())
+		.unwrap();
+	// Open a write transaction, then drop the database before it commits
+	let mut tx = db.transaction(true);
+	tx.set("late", "value").unwrap();
+	drop(db);
+	// The transaction keeps the datastore alive, so its commit must still
+	// reach the AOL rather than being silently discarded
+	tx.commit().unwrap();
+	drop(tx);
+	let db = Database::new_with_persistence(DatabaseOptions::default(), persistence_opts).unwrap();
+	let mut tx = db.transaction(false);
+	assert_eq!(tx.get("late").unwrap(), Some(ByteSlice::from("value")));
+	tx.cancel().unwrap();
+}
+
+#[test]
+fn test_aol_asynchronous_drop_without_sleep_recovers_every_commit() {
+	// The number of single-key transactions committed per round
+	const COMMITS: usize = 5000;
+	// Loss on drop is timing dependent, so repeat to make it reliable
+	for round in 0..5 {
+		let temp_dir = TempDir::new().unwrap();
+		let temp_path = temp_dir.path();
+
+		// Configure asynchronous AOL persistence (no snapshots)
+		let open = || {
+			let persistence_opts = PersistenceOptions::new(temp_path)
+				.with_aol_mode(AolMode::AsynchronousAfterCommit)
+				.with_snapshot_mode(SnapshotMode::Never)
+				.with_fsync_mode(FsyncMode::Never);
+			Database::new_with_persistence(DatabaseOptions::default(), persistence_opts).unwrap()
+		};
+
+		// Commit in a tight loop, then drop at once while commits may
+		// still be queued for the background appender
+		{
+			let db = open();
+			for i in 0..COMMITS {
+				let mut tx = db.transaction(true);
+				tx.set(format!("key{i:05}"), "value").unwrap();
+				tx.commit().unwrap();
+			}
+		}
+
+		// Reopen from the same directory and check every key came back
+		let db = open();
+		let tx = db.transaction(false);
+		let keys = tx.keys(vec![0u8]..vec![255u8], None, None).unwrap();
+		assert_eq!(keys.len(), COMMITS, "round {round}: commits were lost on drop");
+		for (i, key) in keys.iter().enumerate() {
+			assert_eq!(key.as_ref(), format!("key{i:05}").as_bytes(), "round {round}: key {i}");
+		}
+	}
+}

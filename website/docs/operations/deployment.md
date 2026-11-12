@@ -18,7 +18,7 @@ the running server.
 
 | Feature | Effect |
 |---|---|
-| `embedded` | In-process SurrealDB over RocksDB |
+| `embedded` | In-process SurrealDB over SurrealKV |
 | `server-only` | External SurrealDB, no embedded engine |
 | `local-embeddings` | Candle-based local embedding |
 | `metal` / `cuda` | GPU backend (implies `local-embeddings`) |
@@ -37,9 +37,15 @@ Runs `cargo fmt --check`, `cargo clippy -- -D warnings`, and the test suite.
 :::warning Test isolation
 Run integration tests against a **dedicated** SurrealDB, not one shared with
 live services. Sharing an instance makes tests compete with production traffic
-for the same RocksDB, producing intermittent failures that look like code bugs.
+for the same datastore, producing intermittent failures that look like code bugs.
 Set `TEST_SURREAL_ENDPOINT` to a scratch server.
 :::
+
+## Embedded datastore eligibility
+
+Use a fresh SurrealKV directory or a datastore already written by SurrealDB
+4.0. Normal embedded startup and `repair-data` refuse a legacy datastore.
+Keep historical backups separate from active database paths.
 
 ## Running as a service (launchd)
 
@@ -50,7 +56,7 @@ rendered files, or the next install reverts your change.
 
 | Label | Binary | Listens |
 |---|---|---|
-| `ai.prometheus.surrealdb-native` | `~/.prometheus/bin/surreal` (SurrealDB 3.3.0) | `127.0.0.1:28000` |
+| `ai.prometheus.surrealdb-native` | `~/.prometheus/bin/surreal` (SurrealDB 4.0.0) | `127.0.0.1:28000` |
 | `ai.prometheus.surreal-memory-native` | `/usr/local/bin/surreal-memory-server` | `127.0.0.1:23001` |
 
 The renderer refuses to write a `surrealdb-native` plist for any SurrealDB
@@ -98,7 +104,7 @@ process is still shutting down; wait for it to exit and bootstrap again.
 Verify:
 
 ```bash
-curl -s 127.0.0.1:28000/version      # surrealdb-3.3.0
+curl -s 127.0.0.1:28000/version      # surrealdb-4.0.0
 curl -s 127.0.0.1:23001/health       # status ok
 curl -s 127.0.0.1:23001/ready        # every capability true
 lsof -nP -iTCP:23001 -sTCP:LISTEN    # bound to 127.0.0.1 only

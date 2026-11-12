@@ -53,12 +53,8 @@ where
         loop {
             interval.tick().await;
             step += 1.0;
-            let param = ProgressNotificationParam {
-                progress_token: token.clone(),
-                progress: step,
-                total: None,
-                message: Some(format!("{label} in progress")),
-            };
+            let param = ProgressNotificationParam::new(token.clone(), step)
+                .with_message(format!("{label} in progress"));
             if peer.notify_progress(param).await.is_err() {
                 // Client disconnected or transport closed — stop heartbeating.
                 break;

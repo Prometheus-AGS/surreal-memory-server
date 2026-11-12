@@ -185,7 +185,7 @@ echo -e "${BLUE}========================================${NC}"
 echo ""
 
 # Run with cargo run for debugging support
-# Uses server-only feature (no embedded RocksDB) + metal for GPU-accelerated local embeddings
+# Uses server-only feature (no embedded engine) + metal for GPU-accelerated local embeddings
 #
 # Requests are sent sequentially with delays to allow embedding generation
 # to complete before dependent operations (like creating relations that

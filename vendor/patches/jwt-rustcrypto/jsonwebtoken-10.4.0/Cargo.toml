@@ -1,0 +1,123 @@
+[package]
+edition = "2024"
+rust-version = "1.88.0"
+name = "jsonwebtoken"
+version = "10.4.0"
+authors = ["Vincent Prouillet <hello@vincentprouillet.com>"]
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "Create and decode JWTs in a strongly typed way."
+homepage = "https://github.com/Keats/jsonwebtoken"
+readme = "README.md"
+keywords = [
+    "jwt",
+    "api",
+    "token",
+    "jwk",
+]
+license = "MIT"
+repository = "https://github.com/Keats/jsonwebtoken"
+
+[package.metadata.docs.rs]
+features = ["rust_crypto"]
+
+[badges.maintenance]
+status = "passively-maintained"
+
+[features]
+aws_lc_rs = ["aws-lc-rs"]
+default = ["use_pem"]
+rust_crypto = [
+    "ed25519-dalek",
+    "hmac",
+    "p256",
+    "p384",
+    "rand",
+    "rsa",
+    "sha2",
+]
+use_pem = [
+    "pem",
+    "simple_asn1",
+]
+
+[lib]
+name = "jsonwebtoken"
+path = "src/lib.rs"
+
+[dependencies.aws-lc-rs]
+version = "1.15.0"
+optional = true
+
+[dependencies.base64]
+version = "0.22"
+
+[dependencies.ed25519-dalek]
+version = "3"
+features = ["pkcs8"]
+optional = true
+
+[dependencies.hmac]
+version = "0.13"
+optional = true
+
+[dependencies.p256]
+version = "0.14"
+features = ["ecdsa"]
+optional = true
+
+[dependencies.p384]
+version = "0.14"
+features = ["ecdsa"]
+optional = true
+
+[dependencies.pem]
+version = "3"
+optional = true
+
+[dependencies.rand]
+version = "0.10"
+features = ["std", "thread_rng"]
+optional = true
+default-features = false
+
+[dependencies.rsa]
+version = "0.10"
+features = ["pkcs1v15"]
+optional = true
+
+[dependencies.serde]
+version = "1.0.228"
+features = ["derive"]
+
+[dependencies.serde_json]
+version = "1.0"
+
+[dependencies.sha2]
+version = "0.11"
+features = ["oid"]
+optional = true
+
+[dependencies.signature]
+version = "3"
+features = ["alloc", "rand_core"]
+
+[dependencies.simple_asn1]
+version = "0.6"
+optional = true
+
+[dependencies.zeroize]
+version = "1.8.2"
+features = ["derive"]
+
+# rand 0.10 needs a browser RNG backend on non-WASI WebAssembly.
+[target.'cfg(all(target_arch = "wasm32", not(any(target_os = "emscripten", target_os = "wasi"))))'.dependencies.getrandom]
+version = "0.4"
+features = ["wasm_js"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.js-sys]
+version = "0.3"

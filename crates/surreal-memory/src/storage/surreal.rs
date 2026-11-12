@@ -52,13 +52,8 @@ pub struct SurrealStorage {
     connection: Arc<ArcSwap<ConnectionCell>>,
     connection_info: ConnectionInfo,
     embedding_service: Arc<dyn EmbeddingService>,
-    /// Bounded-concurrency semaphore for embedded mode. RocksDB's
-    /// PointLockManager defaults to 16 stripes per column family —
-    /// concurrent transactions on overlapping keys serialize at the
-    /// storage engine. Bounding in-flight ops at the application layer
-    /// prevents head-of-line blocking and turns "lock timeout" /
-    /// "serialization failure" into honest backpressure. `None` in
-    /// server mode (the remote SurrealDB handles its own scheduling).
+    /// Bound concurrent operations before they reach the embedded engine.
+    /// In server mode the remote database schedules its own work.
     embedded_semaphore: Option<Arc<tokio::sync::Semaphore>>,
     /// Bounded cache of query embeddings. Only `search_memories` reads or
     /// fills it; every write path embeds directly.
@@ -163,11 +158,7 @@ const OPERATION_RECONNECT_ATTEMPTS: u32 = 2;
 /// recall.
 const KNN_MIN_EF: usize = 40;
 
-/// Default in-flight concurrency cap for embedded mode. Matches RocksDB's
-/// PointLockManager default of 16 stripes per column family — beyond this,
-/// concurrent transactions on overlapping keys serialize at the storage
-/// engine and produce "lock timeout" / "serialization failure" errors.
-/// Bounding here turns that into honest backpressure. Override via
+/// Default in-flight concurrency cap for embedded mode. Override via
 /// `SURREAL_EMBEDDED_MAX_INFLIGHT`.
 const DEFAULT_EMBEDDED_MAX_INFLIGHT: usize = 16;
 
@@ -883,7 +874,13 @@ impl SurrealStorage {
     async fn connect_with_config(config: &SurrealConfig) -> Result<Surreal<Any>> {
         let sdk_config = surrealdb::opt::Config::default()
             .query_timeout(Duration::from_millis(config.retry.query_timeout_ms));
+        Self::connect_with_sdk_config(config, sdk_config).await
+    }
 
+    async fn connect_with_sdk_config(
+        config: &SurrealConfig,
+        sdk_config: surrealdb::opt::Config,
+    ) -> Result<Surreal<Any>> {
         let db = match &config.mode {
             SurrealMode::Embedded => {
                 let path = config
@@ -891,7 +888,8 @@ impl SurrealStorage {
                     .as_ref()
                     .context("Embedded path required for embedded mode")?;
                 tracing::info!("Connecting to embedded SurrealDB at: {}", path);
-                surrealdb::engine::any::connect((format!("rocksdb://{}", path), sdk_config)).await?
+                surrealdb::engine::any::connect((format!("surrealkv://{}", path), sdk_config))
+                    .await?
             }
             SurrealMode::Server => {
                 let endpoint = config
@@ -1085,8 +1083,7 @@ DEFINE INDEX IF NOT EXISTS memory_embedding_hnsw
     ///
     /// Server mode opens an independent transport so cancelling a ledger query
     /// cannot strand unrelated storage work on the same WebSocket. Embedded
-    /// mode clones the in-process SDK handle because RocksDB cannot be opened a
-    /// second time at the same path.
+    /// mode clones the in-process SDK handle to share its open datastore.
     pub async fn operation_ledger_connection(&self) -> Result<Surreal<Any>> {
         match self.connection_info.config.mode {
             SurrealMode::Embedded => self.live_db().map(|db| (*db).clone()),
@@ -3727,7 +3724,7 @@ fn chrono_node_id() -> String {
 // ── Test/Utility helpers ──────────────────────────────────────────────────────
 
 impl SurrealStorage {
-    /// Creates a `SurrealStorage` backed by an **embedded RocksDB in a unique temp directory**.
+    /// Creates a `SurrealStorage` backed by an **embedded SurrealKV in a unique temp directory**.
     /// Each call uses a nanosecond-timestamped path so parallel tests don't collide.
     /// `mem://` is unavailable because this crate does not enable surrealdb's
     /// `kv-mem` feature (connecting reports "Unsupported scheme: memory").
@@ -3752,7 +3749,13 @@ impl SurrealStorage {
             config: config.clone(),
         };
 
-        let db = Self::connect_with_config(&config).await?;
+        // Throwaway test datastore: SurrealKV's default flushes every commit to
+        // disk (a full fsync on macOS), which makes migrations and writes slow.
+        // Production embedded mode keeps the durable default.
+        let sdk_config = surrealdb::opt::Config::default()
+            .query_timeout(Duration::from_millis(config.retry.query_timeout_ms))
+            .datastore_option("datastore_sync", "never");
+        let db = Self::connect_with_sdk_config(&config, sdk_config).await?;
         run_migrations(&db).await?;
         Self::ensure_embedding_indexes(&db, embedding_service.dimensions()).await?;
 
@@ -4443,6 +4446,7 @@ mod retry_tests {
             )))),
             connection_info,
             embedding_service: Arc::new(MockEmbedding),
+            query_embed_cache: QueryEmbedCache::from_env(),
             embedded_semaphore: None,
             #[cfg(feature = "palace")]
             palace: tokio::sync::OnceCell::new(),

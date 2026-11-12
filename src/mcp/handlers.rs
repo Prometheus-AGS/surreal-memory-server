@@ -7,7 +7,7 @@ use crate::{
 };
 use rmcp::{
     ErrorData as McpError,
-    model::{CallToolResult, Content, ErrorCode},
+    model::{CallToolResult, ContentBlock, ErrorCode},
     schemars,
 };
 use serde::{Deserialize, Serialize};
@@ -386,7 +386,7 @@ impl MemoryHandler {
             .await
             .map_err(Self::internal_error)?;
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&created).unwrap_or_else(|_| "Entity created".to_string()),
         )]))
     }
@@ -403,7 +403,7 @@ impl MemoryHandler {
             .await
             .map_err(Self::internal_error)?;
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&updated)
                 .unwrap_or_else(|_| "Observations added".to_string()),
         )]))
@@ -423,7 +423,7 @@ impl MemoryHandler {
             .await
             .map_err(Self::internal_error)?;
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&created)
                 .unwrap_or_else(|_| "Relation created".to_string()),
         )]))
@@ -436,7 +436,7 @@ impl MemoryHandler {
             .get_entity(&params.name)
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&entity).unwrap_or_else(|_| "null".to_string()),
         )]))
     }
@@ -453,7 +453,7 @@ impl MemoryHandler {
             .update_entity(params.into_entity())
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&updated).unwrap_or_else(|_| "Entity updated".to_string()),
         )]))
     }
@@ -468,7 +468,7 @@ impl MemoryHandler {
             .get_relations(&params.name)
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&relations).unwrap_or_else(|_| "[]".to_string()),
         )]))
     }
@@ -483,7 +483,7 @@ impl MemoryHandler {
             .get_entity_history(&params.name)
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&history).unwrap_or_else(|_| "[]".to_string()),
         )]))
     }
@@ -495,7 +495,7 @@ impl MemoryHandler {
             .get_graph_at_time(&params.before_rfc3339)
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&graph).unwrap_or_else(|_| "{}".to_string()),
         )]))
     }
@@ -509,7 +509,7 @@ impl MemoryHandler {
             .await
             .map_err(Self::internal_error)?;
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&results).unwrap_or_else(|_| "[]".to_string()),
         )]))
     }
@@ -521,7 +521,7 @@ impl MemoryHandler {
             .await
             .map_err(Self::internal_error)?;
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&graph).unwrap_or_else(|_| "{}".to_string()),
         )]))
     }
@@ -538,7 +538,7 @@ impl MemoryHandler {
             .await
             .map_err(Self::internal_error)?;
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&results).unwrap_or_else(|_| "[]".to_string()),
         )]))
     }
@@ -578,7 +578,7 @@ impl MemoryHandler {
             .await
             .map_err(Self::internal_error)?;
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Deleted entity '{}' and removed {} relation(s)",
             name,
             relations.len()
@@ -596,7 +596,7 @@ impl MemoryHandler {
             .await
             .map_err(Self::internal_error)?;
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Deleted relation {} --[{}]--> {}",
             params.from, params.relation_type, params.to
         ))]))
@@ -626,7 +626,7 @@ impl MemoryHandler {
             .create_entities(entities)
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&created).unwrap_or_default(),
         )]))
     }
@@ -653,7 +653,7 @@ impl MemoryHandler {
             .create_relations(relations)
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&created).unwrap_or_default(),
         )]))
     }
@@ -669,7 +669,7 @@ impl MemoryHandler {
             .add_memory(params.into_memory())
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&stored).unwrap_or_default(),
         )]))
     }
@@ -680,7 +680,7 @@ impl MemoryHandler {
             .get_memory(&params.id)
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&mem).unwrap_or_else(|_| "null".to_string()),
         )]))
     }
@@ -698,7 +698,7 @@ impl MemoryHandler {
             .update_memory(&params.id, params.update.content)
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&updated).unwrap_or_default(),
         )]))
     }
@@ -708,7 +708,7 @@ impl MemoryHandler {
             .delete_memory(&params.id)
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Memory '{}' deleted",
             params.id
         ))]))
@@ -727,7 +727,7 @@ impl MemoryHandler {
             )
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Deleted {} memor{}",
             count,
             if count == 1 { "y" } else { "ies" }
@@ -747,7 +747,7 @@ impl MemoryHandler {
             )
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&memories).unwrap_or_default(),
         )]))
     }
@@ -771,7 +771,7 @@ impl MemoryHandler {
             )
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&crate::api::search::lean_memories(
                 &results,
                 params.include_embeddings,
@@ -789,7 +789,7 @@ impl MemoryHandler {
             .get_memory_history(&params.id)
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&history).unwrap_or_default(),
         )]))
     }
@@ -819,7 +819,7 @@ impl MemoryHandler {
             .create_task_stream(stream)
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&created).unwrap_or_default(),
         )]))
     }
@@ -837,7 +837,7 @@ impl MemoryHandler {
             )
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&stream).unwrap_or_else(|_| "null".to_string()),
         )]))
     }
@@ -866,7 +866,7 @@ impl MemoryHandler {
             )
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&stored).unwrap_or_default(),
         )]))
     }
@@ -886,7 +886,7 @@ impl MemoryHandler {
             )
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&ctx).unwrap_or_default(),
         )]))
     }
@@ -900,7 +900,7 @@ impl MemoryHandler {
             .list_task_streams(params.agent_id.as_deref(), params.user_id.as_deref())
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&streams).unwrap_or_default(),
         )]))
     }
@@ -918,7 +918,7 @@ impl MemoryHandler {
             )
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&archived).unwrap_or_default(),
         )]))
     }
@@ -936,7 +936,7 @@ impl MemoryHandler {
             )
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&paused).unwrap_or_default(),
         )]))
     }
@@ -970,7 +970,7 @@ impl MemoryHandler {
             )
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&added).unwrap_or_default(),
         )]))
     }
@@ -987,7 +987,7 @@ impl MemoryHandler {
             .update_task_step_status(&params.idempotency_key, status, params.result, params.error)
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&updated).unwrap_or_default(),
         )]))
     }
@@ -1005,7 +1005,7 @@ impl MemoryHandler {
             )
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&steps).unwrap_or_default(),
         )]))
     }
@@ -1023,7 +1023,7 @@ impl MemoryHandler {
             )
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&step).unwrap_or_else(|_| "null".to_string()),
         )]))
     }
@@ -1037,7 +1037,7 @@ impl MemoryHandler {
             .complete_step(&params.idempotency_key, params.result)
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&completed).unwrap_or_default(),
         )]))
     }
@@ -1273,7 +1273,7 @@ impl MemoryHandler {
             .into_mindmap()
             .map_err(|error| Self::invalid_params(error.to_string()))?;
         match self.storage.create_mindmap(mm).await {
-            Ok(created) => Ok(CallToolResult::success(vec![Content::text(
+            Ok(created) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 serde_json::to_string_pretty(&created).unwrap_or_default(),
             )])),
             Err(e) => Err(Self::internal_error(e)),
@@ -1290,10 +1290,10 @@ impl MemoryHandler {
             )
             .await
         {
-            Ok(Some(mm)) => Ok(CallToolResult::success(vec![Content::text(
+            Ok(Some(mm)) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 serde_json::to_string_pretty(&mm).unwrap_or_default(),
             )])),
-            Ok(None) => Ok(CallToolResult::success(vec![Content::text("null")])),
+            Ok(None) => Ok(CallToolResult::success(vec![ContentBlock::text("null")])),
             Err(e) => Err(Self::internal_error(e)),
         }
     }
@@ -1307,7 +1307,7 @@ impl MemoryHandler {
             .list_mindmaps(params.user_id.as_deref(), params.agent_id.as_deref())
             .await
         {
-            Ok(maps) => Ok(CallToolResult::success(vec![Content::text(
+            Ok(maps) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 serde_json::to_string_pretty(&maps).unwrap_or_default(),
             )])),
             Err(e) => Err(Self::internal_error(e)),
@@ -1339,7 +1339,7 @@ impl MemoryHandler {
             )
             .await
         {
-            Ok(mm) => Ok(CallToolResult::success(vec![Content::text(
+            Ok(mm) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 serde_json::to_string_pretty(&mm).unwrap_or_default(),
             )])),
             Err(e) => Err(Self::internal_error(e)),
@@ -1369,7 +1369,7 @@ impl MemoryHandler {
             )
             .await
         {
-            Ok(mm) => Ok(CallToolResult::success(vec![Content::text(
+            Ok(mm) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 serde_json::to_string_pretty(&mm).unwrap_or_default(),
             )])),
             Err(e) => Err(Self::internal_error(e)),
@@ -1390,7 +1390,7 @@ impl MemoryHandler {
             )
             .await
         {
-            Ok(mm) => Ok(CallToolResult::success(vec![Content::text(
+            Ok(mm) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 serde_json::to_string_pretty(&mm).unwrap_or_default(),
             )])),
             Err(e) => Err(Self::internal_error(e)),
@@ -1410,7 +1410,7 @@ impl MemoryHandler {
             )
             .await
         {
-            Ok(()) => Ok(CallToolResult::success(vec![Content::text(
+            Ok(()) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 "Mindmap deleted",
             )])),
             Err(e) => Err(Self::internal_error(e)),
@@ -1436,7 +1436,7 @@ impl MemoryHandler {
             )
             .await
         {
-            Ok(Some(mm)) => Ok(CallToolResult::success(vec![Content::text(
+            Ok(Some(mm)) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 mm.export(&fmt),
             )])),
             Ok(None) => Err(Self::invalid_params(format!(
@@ -1509,7 +1509,7 @@ impl MemoryHandler {
         }
 
         match self.storage.create_mindmap(mm).await {
-            Ok(created) => Ok(CallToolResult::success(vec![Content::text(
+            Ok(created) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 serde_json::to_string_pretty(&created).unwrap_or_default(),
             )])),
             Err(e) => Err(Self::internal_error(e)),
@@ -1537,7 +1537,7 @@ impl MemoryHandler {
             params.user_id,
         );
         match self.storage.create_mindmap(mm).await {
-            Ok(created) => Ok(CallToolResult::success(vec![Content::text(
+            Ok(created) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 serde_json::to_string_pretty(&created).unwrap_or_default(),
             )])),
             Err(e) => Err(Self::internal_error(e)),
@@ -1564,7 +1564,7 @@ impl MemoryHandler {
             )
             .await
         {
-            Ok(mems) => Ok(CallToolResult::success(vec![Content::text(
+            Ok(mems) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 serde_json::to_string_pretty(&crate::api::search::lean_memories(
                     &mems,
                     params.include_embeddings,
@@ -1589,10 +1589,10 @@ impl MemoryHandler {
             )
             .await
         {
-            Ok(Some(summary)) => Ok(CallToolResult::success(vec![Content::text(
+            Ok(Some(summary)) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 serde_json::to_string_pretty(&summary).unwrap_or_default(),
             )])),
-            Ok(None) => Ok(CallToolResult::success(vec![Content::text(
+            Ok(None) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 "No memories to compress",
             )])),
             Err(e) => Err(Self::internal_error(e)),
@@ -1617,7 +1617,7 @@ impl MemoryHandler {
             )
             .await
         {
-            Ok(mems) => Ok(CallToolResult::success(vec![Content::text(format!(
+            Ok(mems) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "Stored {} memories from conversation",
                 mems.len()
             ))])),
@@ -1641,11 +1641,11 @@ impl MemoryHandler {
             )
             .await
         {
-            Ok(Some(m)) => Ok(CallToolResult::success(vec![Content::text(format!(
+            Ok(Some(m)) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "Auto-summarized task stream '{}'. Summary: {}",
                 params.stream_name, m.content
             ))])),
-            Ok(None) => Ok(CallToolResult::success(vec![Content::text(format!(
+            Ok(None) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "Task stream '{}' does not need summarization yet.",
                 params.stream_name
             ))])),
@@ -1659,10 +1659,10 @@ impl MemoryHandler {
             .find_path(&params.from, &params.to, params.max_depth.unwrap_or(4))
             .await
         {
-            Ok(paths) if paths.is_empty() => Ok(CallToolResult::success(vec![Content::text(
+            Ok(paths) if paths.is_empty() => Ok(CallToolResult::success(vec![ContentBlock::text(
                 format!("No path found from '{}' to '{}'", params.from, params.to),
             )])),
-            Ok(paths) => Ok(CallToolResult::success(vec![Content::text(
+            Ok(paths) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 serde_json::to_string_pretty(&paths).unwrap_or_default(),
             )])),
             Err(e) => Err(Self::internal_error(e)),
@@ -1682,7 +1682,7 @@ impl MemoryHandler {
             )
             .await
         {
-            Ok(graph) => Ok(CallToolResult::success(vec![Content::text(
+            Ok(graph) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 serde_json::to_string_pretty(&graph).unwrap_or_default(),
             )])),
             Err(e) => Err(Self::internal_error(e)),
@@ -1700,7 +1700,7 @@ impl MemoryHandler {
             )
             .await
         {
-            Ok(entities) => Ok(CallToolResult::success(vec![Content::text(
+            Ok(entities) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 serde_json::to_string_pretty(&entities).unwrap_or_default(),
             )])),
             Err(e) => Err(Self::internal_error(e)),
@@ -1867,7 +1867,7 @@ impl MemoryHandler {
         } else {
             result
         };
-        Ok(CallToolResult::success(vec![Content::text(output)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(output)]))
     }
 
     pub async fn palace_recall(
@@ -1886,7 +1886,7 @@ impl MemoryHandler {
         } else {
             result
         };
-        Ok(CallToolResult::success(vec![Content::text(output)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(output)]))
     }
 
     pub async fn palace_search(
@@ -1913,7 +1913,7 @@ impl MemoryHandler {
         } else {
             result
         };
-        Ok(CallToolResult::success(vec![Content::text(output)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(output)]))
     }
 
     pub async fn palace_ingest(
@@ -1943,7 +1943,7 @@ impl MemoryHandler {
             )
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::json!({ "drawer_id": drawer_id }).to_string(),
         )]))
     }
@@ -1961,7 +1961,7 @@ impl MemoryHandler {
             .palace_delete(&params.id)
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::json!({ "deleted": true, "id": params.id }).to_string(),
         )]))
     }
@@ -1973,7 +1973,7 @@ impl MemoryHandler {
             .palace_status()
             .await
             .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&status).unwrap_or_default(),
         )]))
     }
@@ -2005,7 +2005,7 @@ impl MemoryHandler {
         } else {
             serde_json::to_string_pretty(&hits).unwrap_or_default()
         };
-        Ok(CallToolResult::success(vec![Content::text(output)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(output)]))
     }
 }
 

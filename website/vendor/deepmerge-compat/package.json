@@ -1,0 +1,12 @@
+{
+  "name": "@prometheus-ags/deepmerge-compat",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "main": "index.cjs",
+  "files": [
+    "index.cjs",
+    "LICENSE",
+    "PROVENANCE.md"
+  ]
+}

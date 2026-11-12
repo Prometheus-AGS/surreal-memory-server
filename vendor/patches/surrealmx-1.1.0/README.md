@@ -1,0 +1,666 @@
+<br>
+
+<p align="center">
+    <a href="https://surrealdb.com#gh-dark-mode-only" target="_blank">
+        <img width="200" src="/img/white/logo.svg" alt="SurrealMX Logo">
+    </a>
+    <a href="https://surrealdb.com#gh-light-mode-only" target="_blank">
+        <img width="200" src="/img/black/logo.svg" alt="SurrealMX Logo">
+    </a>
+</p>
+
+<p align="center">An embedded, in-memory, lock-free, transaction-based, key-value database engine.</p>
+
+<br>
+
+<p align="center">
+	<a href="https://github.com/surrealdb/surrealmx"><img src="https://img.shields.io/badge/status-stable-ff00bb.svg?style=flat-square"></a>
+	&nbsp;
+	<a href="https://docs.rs/surrealmx/"><img src="https://img.shields.io/docsrs/surrealmx?style=flat-square"></a>
+	&nbsp;
+	<a href="https://crates.io/crates/surrealmx"><img src="https://img.shields.io/crates/v/surrealmx?style=flat-square"></a>
+	&nbsp;
+	<a href="https://github.com/surrealdb/surrealmx"><img src="https://img.shields.io/badge/license-Apache_License_2.0-00bfff.svg?style=flat-square"></a>
+</p>
+
+SurrealMX is an ultra-high-throughput, in-memory, lock-free key-value database engine built on multi-version concurrency control (MVCC) over a concurrent adaptive radix tree, with a circular commit ring buffer.
+
+It is designed as an independent, standalone embedded storage engine and caching layer suitable for microsecond-latency workloads, high-concurrency server applications, and browser WebAssembly environments.
+
+---
+
+## Performance
+
+Benchmarked on bare metal (**AMD Ryzen Threadripper 9970X 32-Core / 64-Thread Processor @ 5.48 GHz, 128 GB DDR5 RAM**, 15,000,000 keys across 48 concurrent worker threads with 128 clients, and 5,000,000 iterations of each range scan, via [`crud-bench`](https://github.com/surrealdb/crud-bench); each figure is the best of three runs of that benchmark):
+
+| Engine | Point&nbsp;Read&nbsp;(OPS) | Create&nbsp;(OPS) | Update&nbsp;(OPS) | Delete&nbsp;(OPS) | Scan&nbsp;(OPS) |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**21,506,711** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**1,887,149** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**1,595,009** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**1,814,037** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**18,031,692** |
+| LMDB<br><sup>(In-Memory)</sup> | 1,226,897 | 232,805 | 241,431 | 177,198 | 1,188,365 |
+| RocksDB<br><sup>(In-Memory)</sup> | 759,060 | 616,649 | 572,246 | 705,773 | 836,666 |
+
+- **Point Reads**: **21.51M OPS** sustained using zero-copy borrowed slice inspection (`db.with_value`): **17.5× faster** than LMDB and **28.3× faster** than RocksDB.
+- **Writes & Creates**: **1.89M OPS** via the concurrent ART index and lock-free circular commit ring buffer: **8.11× faster** than LMDB and **3.06× faster** than RocksDB.
+- **Updates**: **1.60M OPS**: **6.61× faster** than LMDB and **2.79× faster** than RocksDB.
+- **Deletes**: **1.81M OPS** via optimized inline tombstone collapse and pointer-identity unlinking: **10.2× faster** than LMDB and **2.57× faster** than RocksDB.
+- **Range Scans**: **18.03M OPS** on `select(*) limit(100)` scans using lock-free version reads and zero-allocation cursor traversal (`scan_with` / `keys_for_each`): **15.2× faster** than LMDB and **21.6× faster** than RocksDB. See [Scan Profile](#scan-profile) for other kinds of range scan.
+
+### Scan Profile
+
+Range scans over the same dataset, as scans per second: limit and skip scans, and counts over the full key range.
+
+| Engine | &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Limit&nbsp;(OPS) | Keys,&nbsp;Limit&nbsp;(OPS) | Skip&nbsp;+&nbsp;Limit&nbsp;(OPS) | Keys,&nbsp;Skip&nbsp;+&nbsp;Limit&nbsp;(OPS) | Full&nbsp;Count&nbsp;(OPS) |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**18,031,692** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**15,524,603** | 232,121 | 253,039 | 17.3 |
+| LMDB<br><sup>(In-Memory)</sup> | 1,188,365 | 1,192,034 | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**552,885** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**554,451** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**24.2** |
+| RocksDB<br><sup>(In-Memory)</sup> | 836,666 | 837,377 | 47,671 | 47,816 | 5 |
+
+- **Limit**: `select(*) limit(100)` returns the first 100 key-value pairs of the range. **Keys, Limit** (`select(id) limit(100)`) returns only the keys.
+- **Skip + Limit**: `select(*) start(5000) limit(100)` walks and discards 5,000 entries before returning 100. **Keys, Skip + Limit** returns only the keys.
+- **Full Count**: `count()` visits every key in the range.
+
+### Memory Profile
+
+Resting and peak memory are the lowest and highest process memory sampled across the whole benchmark run.
+
+| Engine | Resting&nbsp;Memory | Peak&nbsp;Memory |
+| :--- | ---: | ---: |
+| **SurrealMX** | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**15.9 GiB** | 32.0 GiB |
+| LMDB<br><sup>(In-Memory)</sup> | 19.8 GiB | <img width="16" align="absmiddle" src="/img/rocket.png" alt="🚀">&nbsp;**20.1 GiB** |
+| RocksDB<br><sup>(In-Memory)</sup> | 26.3 GiB | 96.1 GiB |
+
+- **In-Memory Dataset**: True in-memory database holding all 15,000,000 documents resident at **15.9 GiB** resting memory (~1.1KB per full multi-version document).
+- **Concurrent Scaling**: Peak memory rises under high-throughput 48-worker updates, each of which adds a version to a key's chain.
+
+---
+
+## Features
+
+- In-memory database with optional durability
+- Multi-version concurrency control (MVCC)
+- Lock-free reads, point lookups, and active reader registry eliminating atomic cache-line contention across multi-core CPUs
+- Fine-grained per-key version locks for concurrent commit merges with a circular commit ring buffer
+- Rich transaction support with rollbacks and stackable savepoints
+- Direct auto-committing point operations (`db.get`, `db.set`, `db.del`, `db.put`, `db.exists`)
+- True zero-allocation range scanning (`scan_with`, `scan_into`, `keys_for_each`, `keys_into`)
+- Multiple concurrent readers and writers without global table locks
+- Strict serializability for update transactions and Snapshot Isolation for read-only transactions
+- Atomicity, Consistency, Isolation, and optional Durability (ACID)
+- Deterministic Simulation Tested (DST) against an in-memory linearizable model oracle across 25,000,000 operations with zero divergences
+- Optional persistence with configurable modes (defaults to in-memory only):
+  - High-throughput Group Commit flusher for synchronous append-only logging
+  - Asynchronous background logging with queue depth/memory backpressure and periodic point-in-time snapshots
+  - Configurable fsync modes and fast LZ4 snapshot file compression
+
+## Quick Start
+
+```rust
+use surrealmx::{Database, DatabaseOptions};
+
+fn main() {
+    // Create a database with custom settings
+    let opts = DatabaseOptions { pool_size: 128, ..Default::default() };
+    let db = Database::new_with_options(opts);
+
+    // Start a write transaction
+    let mut tx = db.transaction(true);
+    tx.put("key", "value").unwrap();
+    tx.commit().unwrap();
+
+    // Read the value back
+    let mut tx = db.transaction(false);
+    assert_eq!(tx.get("key").unwrap(), Some("value".into()));
+    tx.cancel().unwrap();
+}
+```
+
+## Direct Database Operations
+
+For single-key reads, writes, and scans, `Database` exposes direct methods. Point reads (`get`, `exists`, `with_value`) bypass transaction pool checkout and reader slot registration entirely, and are linearizable: each returns the latest committed value. Writes commit as single-key auto-committed transactions with full snapshot isolation, retrying write-write conflicts internally since they read nothing. Scans read a consistent snapshot pinned by a pooled read transaction:
+
+```rust
+use surrealmx::Database;
+
+fn main() {
+    let db = Database::new();
+
+    // Direct auto-committed writes
+    db.set("user:01", "alice").unwrap();
+    db.put("user:02", "bob").unwrap(); // Fails if key already exists
+
+    // Direct point reads
+    assert!(db.exists("user:01").unwrap());
+    assert_eq!(db.get("user:01").unwrap(), Some("alice".into()));
+
+    // Zero-copy value inspection via closure without cloning
+    db.with_value("user:01", |bytes| {
+        assert_eq!(bytes, b"alice");
+    }).unwrap();
+
+    // Direct deletion
+    db.del("user:02").unwrap();
+    assert!(!db.exists("user:02").unwrap());
+}
+```
+
+## Manual Cleanup and Garbage Collection
+
+Background worker threads perform cleanup and garbage collection at regular
+intervals. These workers can be disabled through `DatabaseOptions` by setting
+`enable_cleanup` or `enable_gc` to `false`. When disabled, trigger the tasks
+manually: `run_cleanup` trims the transaction commit queue, `run_gc_tracked`
+sweeps just the keys tracked as holding reclaimable version garbage (cheap,
+its cost scales with the amount of pinned garbage, not the dataset size), and
+`run_gc` performs a full datastore scan, useful as an occasional deep sweep.
+
+```rust
+use surrealmx::{Database, DatabaseOptions};
+
+fn main() {
+    // Create a database with custom settings
+    let opts = DatabaseOptions { enable_gc: false, enable_cleanup: false, ..Default::default() };
+    let db = Database::new_with_options(opts);
+
+    // Start a write transaction
+    let mut tx = db.transaction(true);
+    tx.put("key", "value1").unwrap();
+    tx.commit().unwrap();
+
+	// Start a write transaction
+    let mut tx = db.transaction(true);
+    tx.put("key", "value2").unwrap();
+    tx.commit().unwrap();
+
+	// Manually trim the transaction commit queue
+    db.run_cleanup();
+	
+	// Manually sweep the tracked garbage-candidate keys
+    db.run_gc_tracked();
+	
+	// Occasionally, perform a full-scan sweep of the datastore
+    db.run_gc();
+}
+```
+
+## Persistence Modes
+
+SurrealMX defaults to a purely in-memory engine (`AolMode::Never`, `SnapshotMode::Never`). Optional durability is enabled by providing [`PersistenceOptions`] to [`Database::new_with_persistence`].
+
+### Full persistence (AOL + Snapshots)
+
+Provides durability by logging every change to an append-only log (AOL) and taking periodic point-in-time snapshots.
+
+```rust
+use surrealmx::{Database, DatabaseOptions, PersistenceOptions, AolMode, SnapshotMode};
+use std::time::Duration;
+
+fn main() -> std::io::Result<()> {
+    let db_opts = DatabaseOptions::default();
+    let persistence_opts = PersistenceOptions::new("./data")
+        .with_aol_mode(AolMode::SynchronousOnCommit)
+        .with_snapshot_mode(SnapshotMode::Interval(Duration::from_secs(60)));
+    
+    let db = Database::new_with_persistence(db_opts, persistence_opts)?;
+    
+    let mut tx = db.transaction(true);
+    tx.put("key", "value")?;
+    tx.commit()?; // Changes immediately written to AOL
+    
+    Ok(())
+}
+```
+
+### Snapshot-only persistence
+
+Provides good performance with periodic durability by taking snapshots without logging individual changes.
+
+```rust
+use surrealmx::{Database, DatabaseOptions, PersistenceOptions, AolMode, SnapshotMode};
+use std::time::Duration;
+
+fn main() -> std::io::Result<()> {
+    let db_opts = DatabaseOptions::default();
+    let persistence_opts = PersistenceOptions::new("./snapshot_data")
+        .with_aol_mode(AolMode::Never) // Disable AOL, use only snapshots
+        .with_snapshot_mode(SnapshotMode::Interval(Duration::from_secs(30)));
+    
+    let db = Database::new_with_persistence(db_opts, persistence_opts)?;
+    
+    let mut tx = db.transaction(true);
+    tx.put("key", "value")?;
+    tx.commit()?; // Changes only persisted during snapshots
+    
+    Ok(())
+}
+```
+
+### Configuration Options
+
+#### AOL Modes
+- **`AolMode::Never`**: Disables append-only logging entirely (default)
+- **`AolMode::SynchronousOnCommit`**: Writes changes to AOL immediately on every commit (maximum durability)
+- **`AolMode::AsynchronousAfterCommit`**: Writes changes to AOL asynchronously after every commit (better performance)
+
+#### Snapshot Modes
+- **`SnapshotMode::Never`**: Disables snapshots entirely (default)
+- **`SnapshotMode::Interval(Duration)`**: Takes snapshots at the specified interval
+
+#### Fsync Modes
+- **`FsyncMode::Never`**: Never calls fsync - fastest but least durable (default)
+- **`FsyncMode::EveryAppend`**: Calls fsync after every AOL append - slowest but most durable
+- **`FsyncMode::Interval(Duration)`**: Calls fsync at most once per interval - balanced approach
+
+#### Compression Support
+- **`CompressionMode::None`**: No compression applied to snapshots (default)
+- **`CompressionMode::Lz4`**: Fast LZ4 compression for snapshots (reduces storage size)
+
+### Advanced Configuration Example
+
+```rust
+use surrealmx::{Database, DatabaseOptions, PersistenceOptions, AolMode, SnapshotMode, FsyncMode, CompressionMode};
+use std::time::Duration;
+
+fn main() -> std::io::Result<()> {
+    let db_opts = DatabaseOptions::default();
+    let persistence_opts = PersistenceOptions::new("./advanced_data")
+        .with_aol_mode(AolMode::AsynchronousAfterCommit) // Async AOL writes
+        .with_snapshot_mode(SnapshotMode::Interval(Duration::from_secs(300))) // Snapshot every 5 minutes
+        .with_fsync_mode(FsyncMode::Interval(Duration::from_secs(1))) // Fsync every second
+        .with_compression(CompressionMode::Lz4); // Enable LZ4 compression
+    
+    let db = Database::new_with_persistence(db_opts, persistence_opts)?;
+    
+    let mut tx = db.transaction(true);
+    tx.put("key", "value")?;
+    tx.commit()?; // Changes written asynchronously to AOL, fsync'd every second
+    
+    Ok(())
+}
+```
+
+**Trade-offs:**
+- **AOL + Snapshots**: Maximum durability, slower writes, larger storage
+- **Snapshot-only**: Better performance, risk of data loss between snapshots, smaller storage
+- **Synchronous AOL**: Immediate durability, slower commit times
+- **Asynchronous AOL**: Better performance, small risk of data loss on system crash
+- **Frequent fsync**: Higher durability, reduced performance
+- **LZ4 Compression**: Smaller storage footprint, slight CPU overhead
+
+See the [Durability guarantees](#durability-guarantees) section for detailed information about ACID durability levels.
+
+## Durability Guarantees
+
+SurrealMX provides different levels of durability (the "D" in ACID) depending on the persistence configuration:
+
+### In-memory only mode (No persistence)
+
+When persistence is disabled (the default), SurrealMX provides **no durability guarantees**. All data is lost when the process terminates, crashes, or the system shuts down. This mode is ideal for:
+- Caching and temporary data storage
+- Development and testing
+- Scenarios where data can be reconstructed from other sources
+
+### Maximum durability (AOL with fsync)
+
+For maximum durability that survives system crashes and power failures, use synchronous AOL with fsync on every append:
+
+```rust
+use surrealmx::{Database, DatabaseOptions, PersistenceOptions, AolMode, FsyncMode};
+
+fn main() -> std::io::Result<()> {
+    let db_opts = DatabaseOptions::default();
+    let persistence_opts = PersistenceOptions::new("./data")
+        .with_aol_mode(AolMode::SynchronousOnCommit)
+        .with_fsync_mode(FsyncMode::EveryAppend);
+    
+    let db = Database::new_with_persistence(db_opts, persistence_opts)?;
+    
+    let mut tx = db.transaction(true);
+    tx.put("key", "value")?;
+    tx.commit()?; // Guaranteed to be durable after this returns
+    
+    Ok(())
+}
+```
+
+With this configuration:
+- Changes are written to the AOL immediately on commit
+- `fsync()` is called to ensure data reaches physical storage
+- Transactions are fully durable once `commit()` returns successfully
+- Data survives process crashes, system crashes, and power failures
+
+### Configurable durability levels
+
+Different persistence configurations provide different durability guarantees:
+
+**AOL Modes:**
+- **`AolMode::SynchronousOnCommit`**: Changes written to AOL immediately on commit. Durable after commit returns (if combined with appropriate fsync mode).
+- **`AolMode::AsynchronousAfterCommit`**: Changes written to AOL asynchronously. Small window where recent commits may be lost on sudden system crash.
+- **`AolMode::Never`**: No AOL logging. Changes only persisted via snapshots.
+
+**Fsync Modes:**
+- **`FsyncMode::EveryAppend`**: Calls `fsync()` after every AOL write. Maximum durability but slowest performance.
+- **`FsyncMode::Interval(Duration)`**: Calls `fsync()` periodically. Durability guaranteed after the interval passes.
+- **`FsyncMode::Never`**: Never calls `fsync()`. Relies on OS to flush data. Risk of data loss if OS crashes before flush.
+
+**Snapshot Modes:**
+- **`SnapshotMode::Interval(Duration)`**: Takes periodic snapshots. Without AOL, only data from the last snapshot is durable.
+- **`SnapshotMode::Never`**: No snapshots. Must use AOL for any durability.
+
+**Durability guarantees summary:**
+
+| Configuration | Survives Process Crash | Survives System Crash | Performance |
+|--------------|----------------------|---------------------|-------------|
+| No persistence | ❌ | ❌ | Fastest |
+| Snapshot-only | ⚠️ (last snapshot) | ⚠️ (last snapshot) | Fastest |
+| Async AOL + No fsync | ⚠️ (mostly) | ⚠️ (mostly + OS buffers) | Very fast |
+| Async AOL + Interval fsync | ⚠️ (mostly) | ⚠️ (mostly + since last fsync) | Very fast |
+| Async AOL + Every fsync | ⚠️ (mostly) | ⚠️ (mostly) | Very fast |
+| Sync AOL + No fsync | ✅ | ⚠️ (OS buffers) | Fast |
+| Sync AOL + Interval fsync | ✅ | ⚠️ (since last fsync) | Fast |
+| Sync AOL + Every fsync | ✅ | ✅ | Slow |
+
+### Crash recovery
+
+Each committed transaction is written to the AOL as a single checksummed frame, so a crash part-way through a write never leaves a transaction half-applied: after a restart a transaction is either fully present or absent.
+
+When a database is opened, an incomplete frame at the end of the AOL is discarded and cut from the file before any new commit is appended, so commits made after a recovery are not lost behind the damage. Damage which is followed by intact data is not treated as a torn tail: opening fails with a `Corrupted` persistence error instead of silently dropping the commits that came after it.
+
+When a database using `AolMode::AsynchronousAfterCommit` is dropped, commits still queued for the AOL are written before it shuts down.
+
+AOL files written by earlier releases are still read. The first time this release opens one, it marks the end of the old records, and everything it appends from then on is framed. Earlier releases refuse to open an AOL which holds framed transactions.
+
+Choose the configuration that best balances your durability requirements against performance needs.
+
+## Isolation Levels
+
+SurrealMX provides two complementary isolation guarantees based on transaction intent:
+- **Update Transactions (`db.transaction(true)`)**: Execute with **Strict Serializable** guarantees. All reads (via `get`, `getm`, `scan`, etc.) and writes are tracked. At commit time, the transaction is conflict-checked against all concurrent commits occurring during its lifetime, preventing write-write conflicts (`KeyWriteConflict`), read-write anti-dependencies (`KeyReadConflict`), and write skew.
+- **Read-Only Transactions (`db.transaction(false)`)**: Execute with **Snapshot Isolation**. They observe a completely consistent, linearizable point-in-time cut of the database pinned at transaction creation without taking read locks.
+
+### Read-Only Transactions (Snapshot Isolation)
+
+Read-only transactions see a consistent snapshot of the database as it existed when the transaction began, with zero locking overhead.
+
+- **Read consistency**: All reads within a transaction see the same consistent view
+- **No dirty reads**: Never observe uncommitted changes from other transactions
+- **No non-repeatable reads**: Reading the same key multiple times returns the exact same value
+- **Wait-free lookups**: Lock-free reads via sharded reader registration slots
+
+```rust
+use surrealmx::Database;
+
+fn main() {
+    let db = Database::new();
+    
+    // Start an update transaction and a read-only transaction
+    let mut tx1 = db.transaction(true);
+    let mut tx2 = db.transaction(false); // Start tx2 before tx1 commits
+    
+    tx1.put("counter", "1").unwrap();
+    tx1.commit().unwrap();
+    
+    // tx2 started before tx1 committed, so it doesn't see the change
+    assert_eq!(tx2.get("counter").unwrap(), None);
+    tx2.cancel().unwrap();
+}
+```
+
+### Update Transactions (Strict Serializability)
+
+Update transactions provide strict serializability by detecting read-write conflicts and aborting transactions that would violate serializability.
+
+- **All Snapshot Isolation guarantees**: Plus full read-write conflict detection
+- **Anti-dependency conflict detection**: Prevents phantom reads, dirty writes, and write skew
+- **Serializable execution**: Equivalent to a strictly serial ordering of committing transactions
+- **Safe retries**: Aborted transactions return [`Error::KeyReadConflict`] or [`Error::KeyWriteConflict`] and can be safely retried
+
+```rust
+use surrealmx::{Database, Error};
+
+fn main() {
+    let db = Database::new();
+    
+    // Initialize data
+    let mut tx = db.transaction(true);
+    tx.put("x", "0").unwrap();
+    tx.put("y", "0").unwrap();
+    tx.commit().unwrap();
+    
+    // Two concurrent transactions that would cause write skew
+    let mut tx1 = db.transaction(true); // Uses SerializableSnapshotIsolation internally
+    let mut tx2 = db.transaction(true);
+    
+    // tx1 reads x and writes to y
+    tx1.get("x").unwrap();
+    tx1.set("y", "modified_by_tx1").unwrap();
+    
+    // tx2 reads y and writes to x  
+    tx2.get("y").unwrap();
+    tx2.set("x", "modified_by_tx2").unwrap();
+    
+    // First transaction commits successfully
+    tx1.commit().unwrap();
+    
+    // Second transaction detects conflict and aborts
+    match tx2.commit() {
+        Err(Error::KeyReadConflict) => {
+            // Transaction must be retried
+            println!("Transaction aborted due to read conflict, retrying...");
+        }
+        _ => panic!("Expected read conflict"),
+    }
+}
+```
+
+**When to use each isolation level:**
+- **Snapshot Isolation**: Most applications, high-performance scenarios, read-heavy workloads
+- **Serializable Snapshot Isolation**: Financial applications, inventory management, any scenario requiring strict serializability
+
+### Conflict diagnostics
+
+When a transaction is aborted due to a conflict (`KeyReadConflict` or `KeyWriteConflict`), SurrealMX can log the conflicting key for debugging purposes. These logs are emitted at the `DEBUG` level using the [`tracing`](https://docs.rs/tracing) crate, and are only included in debug builds (`#[cfg(debug_assertions)]`).
+
+All conflict logs are emitted under a dedicated tracing target, exposed as the public constant [`LOG_TARGET_CONFLICTS`]:
+
+```rust
+use surrealmx::LOG_TARGET_CONFLICTS;
+// Value: "surrealmx::conflicts"
+```
+
+This allows you to selectively enable conflict diagnostics with a [`tracing_subscriber`](https://docs.rs/tracing-subscriber) filter, without enabling all `DEBUG` output from the crate:
+
+```rust
+use tracing_subscriber::EnvFilter;
+
+tracing_subscriber::fmt()
+    .with_env_filter(
+        EnvFilter::builder()
+            .parse("info,surrealmx::conflicts=debug")
+            .unwrap(),
+    )
+    .init();
+```
+
+Or via the `RUST_LOG` environment variable:
+
+```sh
+RUST_LOG="info,surrealmx::conflicts=debug" cargo run
+```
+
+## Savepoints
+
+Savepoints mark a point inside a transaction that later writes can be undone back to, without discarding the whole transaction. They are stackable, so scopes can nest.
+
+```rust
+let db = Database::new();
+let mut tx = db.transaction(true);
+
+tx.set("user:1", "alice").unwrap();
+
+// Mark a point, then make some changes
+tx.set_savepoint().unwrap();
+tx.set("user:1", "bob").unwrap();
+tx.set("user:2", "carol").unwrap();
+
+// Undo everything back to the savepoint
+tx.rollback_to_savepoint().unwrap();
+
+assert_eq!(tx.get("user:1").unwrap(), Some("alice".into()));
+assert_eq!(tx.get("user:2").unwrap(), None);
+
+tx.commit().unwrap();
+```
+
+Every `set_savepoint` should be paired with exactly one of:
+
+- `rollback_to_savepoint`: undo every write made since the savepoint, and discard it.
+- `release_savepoint`: keep every write made since the savepoint, and discard it.
+
+Releasing is what a nested scope does when it succeeds. Its writes join the enclosing scope, so a later rollback of that enclosing scope still undoes them:
+
+```rust
+tx.set_savepoint().unwrap();          // outer scope
+tx.set("a", "1").unwrap();
+
+tx.set_savepoint().unwrap();          // inner scope
+tx.set("b", "2").unwrap();
+tx.release_savepoint().unwrap();      // inner scope succeeded, so keep "b"
+
+assert_eq!(tx.get("b").unwrap(), Some("2".into()));
+
+// Unwinding the outer scope still undoes the released scope's write
+tx.rollback_to_savepoint().unwrap();
+assert_eq!(tx.get("a").unwrap(), None);
+assert_eq!(tx.get("b").unwrap(), None);
+```
+
+Both methods return `Error::NoSavepoint` when no savepoint is set, and `Error::TxNotWritable` on a read-only transaction. Savepoints are anonymous, so releasing more savepoints than were set cannot be detected once the stack is non-empty again: a later rollback will silently unwind further than intended.
+
+Note that a rollback rewinds writes only. Keys read and ranges scanned inside a rolled back scope stay tracked for conflict detection, because a write that survives the rollback may have been derived from a value that scope read. This keeps serializable transactions conservative: it can produce a retryable conflict error, never a missed one.
+
+## Range Operations
+
+SurrealMX provides powerful range-based operations for scanning, counting, and iterating over keys. All range operations support:
+
+- **Forward and reverse iteration**
+- **Skip and limit parameters** for pagination  
+- **Efficient range scans** over the ordered adaptive radix tree that holds the datastore
+- **Zero-allocation closure scans** (`scan_with`, `keys_for_each`) inspecting borrowed slices directly without vector allocations or value clones
+- **Buffer-reusing scans** (`scan_into`, `keys_into`) avoiding repeated vector reallocations across query loops
+
+### Basic range scanning
+
+```rust
+use surrealmx::Database;
+
+fn main() {
+    let db = Database::new();
+    
+    // Insert test data
+    let mut tx = db.transaction(true);
+    for i in 1..=10 {
+        tx.put(&format!("key:{:02}", i), &format!("value:{}", i)).unwrap();
+    }
+    tx.commit().unwrap();
+    
+    let mut tx = db.transaction(false);
+    
+    // Get all keys in range
+    let keys = tx.keys("key:03".."key:08", None, None).unwrap();
+    assert_eq!(keys.len(), 5);
+    assert_eq!(keys[0].as_ref(), b"key:03");
+    assert_eq!(keys[4].as_ref(), b"key:07");
+    
+    // Get key-value pairs in range
+    let pairs = tx.scan("key:03".."key:06", None, None).unwrap();
+    assert_eq!(pairs.len(), 3);
+    assert_eq!(pairs[0].0.as_ref(), b"key:03");
+    assert_eq!(pairs[0].1.as_ref(), b"value:3");
+    
+    // Count keys in range
+    let count = tx.total("key:00".."key:99", None, None).unwrap();
+    assert_eq!(count, 10);
+    
+    tx.cancel().unwrap();
+}
+```
+
+### Pagination and reverse iteration
+
+```rust
+use surrealmx::Database;
+
+fn main() {
+    let db = Database::new();
+    
+    // Insert test data
+    let mut tx = db.transaction(true);
+    for i in 1..=100 {
+        tx.put(format!("item:{:03}", i), format!("value_{}", i)).unwrap();
+    }
+    tx.commit().unwrap();
+    
+    let mut tx = db.transaction(false);
+    
+    // Paginated forward scan: skip 10, take 5
+    let page1 = tx.scan("item:000".."item:999", Some(10), Some(5)).unwrap();
+    assert_eq!(page1.len(), 5);
+    assert_eq!(page1[0].0.as_ref(), b"item:011");
+    assert_eq!(page1[4].0.as_ref(), b"item:015");
+    
+    // Reverse iteration: get last 3 items
+    let last_items = tx.scan_reverse("item:000".."item:999", None, Some(3)).unwrap();
+    assert_eq!(last_items.len(), 3);
+    assert_eq!(last_items[0].0.as_ref(), b"item:100"); // First item is the highest key
+    assert_eq!(last_items[2].0.as_ref(), b"item:098"); // Last item is lower
+    
+    tx.cancel().unwrap();
+}
+```
+
+### Zero-allocation range scanning
+
+```rust
+use surrealmx::Database;
+
+fn main() {
+    let db = Database::new();
+
+    for i in 0..100 {
+        db.set(format!("doc:{i:04}"), format!("val_{i}")).unwrap();
+    }
+
+    // Inspect borrowed key (&ByteSlice) and value (&[u8]) directly with zero allocations
+    db.scan_with("doc:0000".."doc:9999", None, Some(10), |key, val| {
+        println!("{key:?} => {:?}", std::str::from_utf8(val).unwrap());
+        true // Return false to stop iteration early
+    }).unwrap();
+
+    // Scan keys with zero allocation
+    db.keys_for_each("doc:0000".."doc:9999", None, Some(10), |key| {
+        println!("Key: {key:?}");
+        true
+    }).unwrap();
+
+    // Reuse a pre-allocated vector buffer across repeated scans
+    let mut buffer = Vec::new();
+    db.scan_into("doc:0000".."doc:0050", None, None, &mut buffer).unwrap();
+    assert_eq!(buffer.len(), 50);
+}
+```
+
+**Available range operation methods:**
+
+- `scan_with(range, skip, limit, closure)`: Zero-allocation closure inspection over borrowed `(&ByteSlice, &[u8])`
+- `keys_for_each(range, skip, limit, closure)`: Zero-allocation closure iteration over borrowed `&ByteSlice` keys
+- `scan_into(range, skip, limit, &mut buffer)`: Reuses pre-allocated buffer for key-value pairs
+- `keys_into(range, skip, limit, &mut buffer)`: Reuses pre-allocated buffer for keys
+- `keys(range, skip, limit)` / `keys_reverse(...)`: Get keys in range as `Vec<ByteSlice>`
+- `scan(range, skip, limit)` / `scan_reverse(...)`: Get key-value pairs in range as `Vec<(ByteSlice, ByteSlice)>`
+- `total(range, skip, limit)`: Count keys in range
+
+---
+
+## License
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
