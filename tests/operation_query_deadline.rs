@@ -9,6 +9,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode, header},
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use surreal_memory::{
@@ -16,6 +17,7 @@ use surreal_memory::{
     storage::surreal::SurrealMode,
 };
 use surreal_memory_server::api;
+use surrealdb_types::{RecordId, RecordIdKey};
 use tower::ServiceExt;
 
 struct NoOpEmbedder;
@@ -571,6 +573,17 @@ async fn persistence_json(
     serde_json::from_slice(&bytes).expect("decode fixture response")
 }
 
+fn created_memory_id(response: &Value) -> RecordId {
+    let id = response.get("id").expect("created memory contains an id");
+    let id = RecordId::deserialize(id).expect("created memory id is a record ID");
+    assert_eq!(id.table.as_str(), "memory", "created memory ID table");
+    assert!(
+        matches!(&id.key, RecordIdKey::String(key) if !key.is_empty()),
+        "created memory ID has a nonempty string key: {id:?}"
+    );
+    id
+}
+
 async fn assert_scoped_memory(router: &axum::Router, owner: &str, expected: &Value) {
     let matches = persistence_json(
         router,
@@ -644,8 +657,11 @@ async fn ledger_survives_a_database_restart_without_losing_its_namespace() {
         StatusCode::CREATED,
     )
     .await;
-    assert!(first["id"].as_str().is_some() && second["id"].as_str().is_some());
-    assert_ne!(first["id"], second["id"]);
+    assert_ne!(
+        created_memory_id(&first),
+        created_memory_id(&second),
+        "different owners receive distinct memory IDs"
+    );
     assert_scoped_memory(&router, "first-owner", &first).await;
     assert_scoped_memory(&router, "second-owner", &second).await;
     submit_until_committed(&router, "before-restart").await;
