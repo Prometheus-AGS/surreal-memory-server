@@ -60,3 +60,5 @@ website/.docusaurus/
 .kbd-orchestrator/phases/surrealdb-connection-architecture/children/surrealdb-3x-connection-model/progress.json
 # surreal sql CLI REPL history
 history.txt
+# pk prompt snapshots are conversation-derived runtime state; keep out of the public repo
+.prometheus/knowledge/.prompt-snapshots/
