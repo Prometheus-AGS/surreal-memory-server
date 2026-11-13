@@ -55,10 +55,10 @@
       "deepmerge": "$deepmerge"
     },
     "body-parser@1": "1.20.9",
-    "brace-expansion@1": "1.1.20",
+    "brace-expansion@1": "1.1.21",
     "compression": "1.8.2",
     "dompurify": "3.4.17",
-    "fast-uri": "3.1.7",
+    "fast-uri": "3.1.9",
     "follow-redirects": "1.16.2",
     "image-size": "2.0.3",
     "joi@17": "17.13.9",
