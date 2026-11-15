@@ -24,10 +24,10 @@ use handlers::{
     CreateMindmapParams, CreateRelationParams, CreateRelationsParams, CreateTaskStreamParams,
     DeleteEntityParams, DeleteMindmapNodeParams, DeleteRelationParams, EntityNameParams,
     ExpandNeighborsParams, ExportMindmapParams, FindPathParams, GenerateIdeationMindmapParams,
-    GeneratePersonaMindmapParams, GetContextParams, GetRelatedParams, HybridSearchParams,
-    ListMindmapsParams, MemoryHandler, MemoryIdParams, MindmapNameParams, ScopeFilterParams,
-    SearchMemoriesParams, SearchParams, SemanticSearchParams, TaskStreamNameParams, TimeParams,
-    UpdateMemoryParams, UpdateTaskStepStatusParams,
+    GeneratePersonaMindmapParams, GetAllMemoriesParams, GetContextParams, GetRelatedParams,
+    HybridSearchParams, ListMindmapsParams, MemoryHandler, MemoryIdParams, MindmapNameParams,
+    ScopeFilterParams, SearchMemoriesParams, SearchParams, SemanticSearchParams,
+    TaskStreamNameParams, TimeParams, UpdateMemoryParams, UpdateTaskStepStatusParams,
 };
 
 use handlers::{
@@ -240,7 +240,9 @@ impl MemoryMcpServer {
         self.handler.delete_memory(params).await
     }
 
-    #[tool(description = "Delete all memories matching the given user/agent/session scope.")]
+    #[tool(
+        description = "Delete all memories matching the given user/agent/session scope, including expired and archived ones. Works through bounded batches of record IDs; returns the number deleted. It stops at the first memory it cannot delete and the error states how many were deleted; once the cause is resolved, rerunning deletes the rest."
+    )]
     async fn delete_all_memories(
         &self,
         Parameters(params): Parameters<ScopeFilterParams>,
@@ -248,10 +250,12 @@ impl MemoryMcpServer {
         self.handler.delete_all_memories(params).await
     }
 
-    #[tool(description = "List all memories for a given user/agent/session scope.")]
+    #[tool(
+        description = "List one page of live memories for a user/agent/session scope. Returns {memories, next_cursor, has_more}; pass next_cursor back as cursor until it is null. limit: default 50, max 200 (default and max 25 with include_embeddings); out-of-range values are rejected. Embeddings are omitted unless include_embeddings is true. Pages are ordered by record ID and are not a snapshot: memories added during iteration may be missed, deleted ones do not reappear."
+    )]
     async fn get_all_memories(
         &self,
-        Parameters(params): Parameters<ScopeFilterParams>,
+        Parameters(params): Parameters<GetAllMemoriesParams>,
     ) -> Result<CallToolResult, McpError> {
         self.handler.get_all_memories(params).await
     }
@@ -651,6 +655,8 @@ impl ServerHandler for MemoryMcpServer {
                 Scoped memory (mem0-compatible): add_memory, get_memory, update_memory, delete_memory, \
                 delete_all_memories, get_all_memories, search_memories, get_memory_history, \
                 hybrid_search_memories, compress_memories, add_memories_from_conversation. \
+                get_all_memories returns one page {memories, next_cursor, has_more}: follow next_cursor \
+                (limit default 50, max 200; embeddings only with include_embeddings, max 25 per page). \
                 TaskStreams: create_task_stream, get_task_stream, add_to_task_stream, \
                 get_context_for_task, list_task_streams, archive_task_stream, auto_summarize_task_stream, \
                 pause_task_stream. \

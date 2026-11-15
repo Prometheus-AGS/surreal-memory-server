@@ -75,6 +75,10 @@ an invalid request rather than treated as the start of the listing.
 - **WHEN** the caller later lists again with that page's cursor
 - **THEN** the listing continues from the next memory with none repeated
 
+#### Scenario: A cursor that cannot advance is an error
+- **WHEN** a page would resume at the same cursor it was requested with
+- **THEN** the listing fails with an error instead of repeating the page
+
 #### Scenario: Malformed cursor is rejected
 - **WHEN** a caller lists memories with a cursor that is not a valid cursor
 - **THEN** the request fails as an invalid request
@@ -120,16 +124,23 @@ page size than a listing without embeddings.
 
 ### Requirement: A page SHALL stay within an encoded-size budget
 
-The encoded size of one page SHALL stay within a documented byte budget. A
-page SHALL be shortened to fit and its cursor SHALL point at the first memory
-left out. A single memory larger than the budget SHALL still be returned
-alone so enumeration always makes progress.
+The encoded size of one page SHALL stay within a documented byte budget, both
+as read from the database and as returned to the caller. A page SHALL be
+shortened to fit and its cursor SHALL resume at the first memory left out. A
+single memory larger than the budget SHALL still be returned alone so
+enumeration always makes progress.
 
 #### Scenario: Large memories shorten the page
 - **GIVEN** memories whose content makes a full page exceed the byte budget
 - **WHEN** a caller lists memories
 - **THEN** the page holds fewer memories than the limit and fits the budget
 - **AND** the page reports that more memories remain
+
+#### Scenario: Maximum page size over large memories stays bounded at the database
+- **GIVEN** a scope whose memories at the maximum page size total far more than the byte budget
+- **WHEN** a caller lists memories with the maximum limit
+- **THEN** the listing succeeds with a shortened page
+- **AND** the database is not asked for more content than the budget plus one memory
 
 #### Scenario: One oversized memory still makes progress
 - **GIVEN** a single memory larger than the byte budget
@@ -210,10 +221,11 @@ error for it. It SHALL NOT fall back to an unbounded or unscoped listing.
 
 ### Requirement: Bulk deletion SHALL not materialize memory content
 
-Deleting every memory in a scope SHALL read record identifiers only, in
-bounded batches, and never memory content or embeddings. It SHALL keep its
-existing semantics: it removes archived and expired memories too, touches
-only the given scope, and returns the number deleted.
+Deleting every memory in a scope SHALL select record identifiers only, in
+bounded batches, and SHALL NOT load the collection. Deleting one memory MAY
+read that single memory to write its history. Existing semantics stay: it
+removes archived and expired memories too, touches only the given scope, and
+returns the number deleted.
 
 #### Scenario: Scope larger than one batch is fully deleted
 - **GIVEN** a scope holding more memories than one deletion batch
@@ -234,8 +246,8 @@ only the given scope, and returns the number deleted.
 ### Requirement: Interrupted bulk deletion SHALL report resumable progress
 
 When bulk deletion fails partway, the error SHALL state how many memories
-were deleted before the failure. Running the same deletion again SHALL remove
-the remainder.
+were deleted before the failure. Once the cause of the failure is resolved,
+running the same deletion again SHALL remove the remainder.
 
 #### Scenario: Failure reports progress and a rerun finishes
 - **GIVEN** a bulk deletion that fails after deleting some memories

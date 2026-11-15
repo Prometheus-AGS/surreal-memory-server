@@ -6,7 +6,13 @@ use std::any::Any;
 
 pub mod auth;
 pub mod migrations;
+pub mod page;
 pub mod surreal;
+
+pub use page::{
+    DEFAULT_MEMORY_PAGE_SIZE, MAX_MEMORY_PAGE_SIZE, MAX_MEMORY_PAGE_SIZE_WITH_EMBEDDINGS,
+    MEMORY_PAGE_BYTE_BUDGET, MemoryPage, MemoryPageRequest,
+};
 
 use crate::entity::{Entity, KnowledgeGraph, Relation, SemanticSearchResult};
 use crate::memory::{Memory, MemoryHistory};
@@ -130,12 +136,25 @@ pub trait MemoryStorage: Send + Sync {
         agent_id: Option<&str>,
         session_id: Option<&str>,
     ) -> Result<u64>;
+    /// Legacy complete listing: every live memory in the scope, embeddings
+    /// included, or an error (never a partial list). Memory use grows with the
+    /// scope; new callers should use
+    /// [`list_memories_page`](Self::list_memories_page) instead.
     async fn get_all_memories(
         &self,
         user_id: Option<&str>,
         agent_id: Option<&str>,
         session_id: Option<&str>,
     ) -> Result<Vec<Memory>>;
+    /// One bounded page of live memories matching the request's owner filters.
+    /// See [`MemoryPageRequest`] for the limits and consistency rules.
+    ///
+    /// The default fails closed: a backend that has not implemented paging
+    /// returns an error rather than falling back to an unbounded listing.
+    async fn list_memories_page(&self, request: MemoryPageRequest) -> Result<MemoryPage> {
+        let _ = request;
+        anyhow::bail!("memory pagination is not supported by this storage backend")
+    }
     async fn search_memories(
         &self,
         query: &str,

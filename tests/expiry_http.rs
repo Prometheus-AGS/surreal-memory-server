@@ -107,7 +107,7 @@ async fn rest_and_mcp_hide_expired_memories_without_a_sweep() {
     // REST: list.
     let (status, body) = get(&router, "/api/v1/memory?user_id=u1").await;
     assert_eq!(status, StatusCode::OK);
-    let mut contents: Vec<&str> = body
+    let mut contents: Vec<&str> = body["memories"]
         .as_array()
         .expect("a list")
         .iter()

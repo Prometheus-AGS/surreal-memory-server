@@ -166,6 +166,7 @@ impl QueryEmbedCache {
 use std::time::Duration;
 
 mod derivation;
+mod enumeration;
 mod expiry;
 mod owned;
 
@@ -2292,17 +2293,8 @@ impl MemoryStorage for SurrealStorage {
         agent_id: Option<&str>,
         session_id: Option<&str>,
     ) -> Result<u64> {
-        // Erasure covers expired rows too, so it lists physically.
-        let memories = self
-            .list_memories_scoped(user_id, agent_id, session_id, false)
-            .await?;
-        let count = memories.len() as u64;
-        for mem in memories {
-            if let Some(id) = &mem.id {
-                self.delete_memory(&Self::record_id_to_string(id)).await?;
-            }
-        }
-        Ok(count)
+        // Erasure covers expired rows too, so it selects physically.
+        self.delete_all_paged(user_id, agent_id, session_id).await
     }
 
     async fn get_all_memories(
@@ -2311,7 +2303,14 @@ impl MemoryStorage for SurrealStorage {
         agent_id: Option<&str>,
         session_id: Option<&str>,
     ) -> Result<Vec<Memory>> {
-        self.list_memories_scoped(user_id, agent_id, session_id, true)
+        self.all_memories_paged(user_id, agent_id, session_id).await
+    }
+
+    async fn list_memories_page(
+        &self,
+        request: crate::storage::MemoryPageRequest,
+    ) -> Result<crate::storage::MemoryPage> {
+        self.memory_page("list_memories_page", &request, self.cutoff())
             .await
     }
 

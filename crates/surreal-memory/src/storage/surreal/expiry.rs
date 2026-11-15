@@ -59,52 +59,6 @@ impl SurrealStorage {
             .transpose()
     }
 
-    /// Memories matching the owner filters. `live` applies the live view
-    /// (active and unexpired); otherwise every physical row matches, which is
-    /// what erasure needs.
-    pub(crate) async fn list_memories_scoped(
-        &self,
-        user_id: Option<&str>,
-        agent_id: Option<&str>,
-        session_id: Option<&str>,
-        live: bool,
-    ) -> Result<Vec<Memory>> {
-        let mut parts: Vec<&str> = Vec::new();
-        if user_id.is_some() {
-            parts.push("user_id = $user_id");
-        }
-        if agent_id.is_some() {
-            parts.push("agent_id = $agent_id");
-        }
-        if session_id.is_some() {
-            parts.push("session_id = $session_id");
-        }
-        if live {
-            parts.push(LIVE_MEMORY_SQL);
-        }
-        if parts.is_empty() {
-            parts.push("true");
-        }
-        let sql = format!("SELECT * FROM memory WHERE {}", parts.join(" AND "));
-
-        let db = self.live_db()?;
-        let mut q = db.query(sql);
-        if live {
-            q = q.bind(("now", self.cutoff()));
-        }
-        if let Some(v) = user_id {
-            q = q.bind(("user_id", v.to_string()));
-        }
-        if let Some(v) = agent_id {
-            q = q.bind(("agent_id", v.to_string()));
-        }
-        if let Some(v) = session_id {
-            q = q.bind(("session_id", v.to_string()));
-        }
-        let rows: Vec<DbMemory> = q.await?.take(0)?;
-        Self::decode_memories(rows)
-    }
-
     /// One TTL pass: physically select expired rows, delete each one in its own
     /// guarded transaction, and report what actually happened.
     ///

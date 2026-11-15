@@ -9,7 +9,7 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use serde::Deserialize;
-use surreal_memory::Memory;
+use surreal_memory::{Memory, MemoryPage, MemoryPageRequest};
 
 use crate::contracts::{AddMemoryRequest, UpdateMemoryRequest};
 
@@ -31,6 +31,18 @@ struct ScopeQuery {
     user_id: Option<String>,
     agent_id: Option<String>,
     session_id: Option<String>,
+}
+
+/// Query of `GET /api/v1/memory`: the owner filters plus one page's bounds.
+#[derive(Deserialize)]
+struct ListQuery {
+    user_id: Option<String>,
+    agent_id: Option<String>,
+    session_id: Option<String>,
+    limit: Option<usize>,
+    cursor: Option<String>,
+    #[serde(default)]
+    include_embeddings: bool,
 }
 
 fn out_of_scope(_: ScopeError) -> ApiFailure {
@@ -69,21 +81,24 @@ async fn add_memory(
 async fn get_all_memories(
     Tenant(state): Tenant,
     Caller(principal): Caller,
-    Query(q): Query<ScopeQuery>,
-) -> Result<Json<Vec<Memory>>, ApiFailure> {
+    Query(q): Query<ListQuery>,
+) -> Result<Json<MemoryPage>, ApiFailure> {
     let user_id = principal
         .effective_user(q.user_id.as_deref())
         .map_err(out_of_scope)?;
-    let mems = state
+    let page = state
         .storage
-        .get_all_memories(
-            user_id.as_deref(),
-            q.agent_id.as_deref(),
-            q.session_id.as_deref(),
-        )
+        .list_memories_page(MemoryPageRequest {
+            user_id,
+            agent_id: q.agent_id,
+            session_id: q.session_id,
+            limit: q.limit,
+            cursor: q.cursor,
+            include_embeddings: q.include_embeddings,
+        })
         .await
         .map_err(api_error)?;
-    Ok(Json(mems))
+    Ok(Json(page))
 }
 
 async fn get_memory(

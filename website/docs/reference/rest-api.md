@@ -39,7 +39,7 @@ Base path `/api/v1/memory`.
 | Method and path | Purpose |
 |---|---|
 | `POST /` | add a memory |
-| `GET /` | list; filter with `?user_id=&agent_id=&session_id=` |
+| `GET /` | list one page; filter with `?user_id=&agent_id=&session_id=`, page with `limit`, `cursor`, `include_embeddings` |
 | `DELETE /` | delete every memory matching the same filters |
 | `GET /{id}` | fetch one |
 | `PUT /{id}` | replace its content (re-embeds, bumps `version`) |
@@ -52,8 +52,9 @@ curl -s -X POST http://127.0.0.1:3001/api/v1/memory -H 'content-type: applicatio
   -d '{"content":"Alice prefers dark mode","user_id":"alice","agent_id":"claude-code",
        "session_id":"s-42","categories":["preference"]}'
 
-# List one user's memories
-curl -s 'http://127.0.0.1:3001/api/v1/memory?user_id=alice'
+# List one user's memories, one page at a time
+curl -s 'http://127.0.0.1:3001/api/v1/memory?user_id=alice&limit=5'
+curl -s 'http://127.0.0.1:3001/api/v1/memory?user_id=alice&limit=5&cursor=memory:0b6c4d1e-1f2a-4c3b-9d8e-7f6a5b4c3d2e'
 
 # Update, then read the history
 curl -s -X PUT http://127.0.0.1:3001/api/v1/memory/memory:949ae93e-62b2-467a-8937-51739d240d9a \
@@ -68,6 +69,47 @@ creating another. A missing scope field widens the check to every value of it, s
 set `user_id` and `agent_id` when you want the check to stay narrow.
 
 `DELETE /` with no filters deletes every memory in the tenant. Always pass a scope.
+It deletes in bounded batches of record IDs, expired and archived memories
+included, and returns `{"deleted": n}`. It stops at the first memory it cannot
+delete, and the error states how many were deleted before it. Sending the same
+request again deletes the rest only once the cause is resolved (for example a
+transient database error, or a row that cannot be read); until then a rerun stops
+at the same memory.
+
+### Listing is paged
+
+**Breaking change (issue #62):** `GET /` returns one page object, not a bare
+array of every memory:
+
+```json
+{ "memories": [ { "id": "memory:…", "content": "…", "embedding": null, "…": "…" } ],
+  "next_cursor": "memory:0b6c4d1e-1f2a-4c3b-9d8e-7f6a5b4c3d2e",
+  "has_more": true }
+```
+
+Pass `next_cursor` back as `cursor` until it is `null` (`has_more` is then
+`false`). Treat a cursor as opaque. A cursor that is not of the form
+`memory:<key>` is a `400`; any `memory:<key>` is accepted as a starting
+position, and the owner filters and the caller's scope still decide what is
+returned.
+
+| Parameter | Default | Limit |
+|---|---|---|
+| `limit` | 50 (25 with `include_embeddings`) | 200; 25 with `include_embeddings` |
+| `cursor` | first page | a previous page's `next_cursor` |
+| `include_embeddings` | `false` | — |
+
+A `limit` of 0 or above the maximum is a `400`, never silently reduced. Each page
+is also capped at 1 MiB of encoded memories: a page may hold fewer than `limit`
+memories while `has_more` is `true`, and a single memory larger than that is
+returned alone. Embeddings are omitted (`null`) unless requested.
+
+Pages are ordered by record ID and are **not a snapshot**. A memory that exists
+for the whole iteration is returned exactly once; a memory added during it may
+be missed; a memory deleted or expired during it does not appear afterwards. The
+owner filters and the caller's verified scope apply to every page, so a cursor
+cannot reveal another scope's memories. Expired and archived memories never
+appear.
 
 ## Search
 

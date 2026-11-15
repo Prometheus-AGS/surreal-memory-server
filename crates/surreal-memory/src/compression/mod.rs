@@ -37,6 +37,8 @@ pub enum FaultPoint {
     Activation,
     /// One expired memory's deletion during a TTL sweep.
     SweepDelete,
+    /// One memory's deletion during `delete_all_memories`.
+    BulkDelete,
 }
 
 /// Everything a storage needs to run the pipeline. The default is the

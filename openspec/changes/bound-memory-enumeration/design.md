@@ -116,14 +116,23 @@ for 1000 and received 200 has no signal that the request was changed.
 They are not environment variables. Nothing yet shows an operator needs to
 tune them.
 
-### 5. Byte budget is applied when the page is assembled
+### 5. Byte budget is applied before content leaves the database
 
-After the rows are decoded, memories are added to the page until the next one
-would exceed the budget, measured as serialized JSON length. The cursor is the
-last memory kept. A page always keeps at least one memory.
+A page is read in two queries. The first selects, for up to `limit + 1` rows
+in key order, only the record ID and the stored sizes (content length, and
+embedding length when embeddings are requested). Rows are accepted until the
+estimated encoded size would exceed the budget, always accepting at least one.
+The second query fetches exactly the accepted ID range with the same filters.
 
-The database response itself is bounded by row count (`limit + 1`), not by
-bytes. See Risks.
+A single query with `LIMIT limit + 1` was the first implementation and review
+found it insufficient: 200 rows of 400 KiB is about 80 MiB in one response,
+which is the failure this change exists to remove.
+
+The assembled page is still measured as serialized JSON and trimmed, because
+the estimate ignores metadata and a row can grow between the two queries. A
+page always keeps at least one memory. A page whose next cursor equals the
+cursor it was requested with is an error, so a record key that does not
+round-trip cannot repeat a page forever.
 
 ### 6. One new trait method, legacy method kept complete
 
@@ -156,7 +165,9 @@ place with no honest thing to return.
 `delete_all_memories` selects `id` only, physical view, ordered by ID, in
 batches, and advances an ID cursor so a row that cannot be deleted is not
 selected again in the same run. Each row is deleted through the existing
-`delete_memory`, so history and derivation handling are unchanged. On failure
+`delete_memory`, which reads that one row to write its history, so history
+and derivation handling are unchanged. A row that cannot be deleted stops the
+run; reruns stop at it again until it is repaired. On failure
 the error is wrapped with the count deleted so far. The return type stays
 `Result<u64>`.
 
@@ -183,10 +194,13 @@ included.
 - [Two breaking transport responses] → Called out in the proposal, the docs
   and the PR. Clients fail on shape rather than reading a truncated list as
   complete.
-- [One row can still be large] → A page query returns at most `limit + 1`
-  rows, but a single memory's content has no size cap in storage. The byte
-  budget bounds what is returned to the client, not what the database sends.
-  Capping content size is a separate change.
+- [One row can still be large] → The size pre-pass bounds a page's database
+  response to the budget plus one memory, but a single memory's content has no
+  size cap in storage. Capping content size is a separate change.
+- [Each page re-reads the index entries before its cursor] → The cursor is a
+  filter, not a range seek, so a full enumeration of a very large scope costs
+  quadratic index reads. Responses stay bounded; late pages get slower. A
+  record-range query for the unfiltered case is a follow-up.
 - [Keyset query may not use an index with owner filters] → Checked with
   `EXPLAIN` in the first task group; fallback is a composite index migration.
 - [`get_all_memories` still builds the whole set in memory] → Accepted to keep

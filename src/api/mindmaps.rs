@@ -209,12 +209,8 @@ async fn generate_persona_mindmap(
     Tenant(state): Tenant,
     Json(body): Json<GeneratePersonaMindmapBody>,
 ) -> Result<(StatusCode, Json<MindMap>), ApiFailure> {
-    use std::collections::HashMap;
-
-    // Fetch all memories for this user and cluster by category
-    let memories = state
-        .storage
-        .get_all_memories(Some(&body.user_id), None, None)
+    // Read the user's memories page by page, clustered by category.
+    let clusters = crate::persona::collect_persona(state.storage.as_ref(), &body.user_id)
         .await
         .map_err(api_error)?;
 
@@ -222,42 +218,26 @@ async fn generate_persona_mindmap(
         body.name.clone(),
         MapType::Radial,
         format!("Persona: {}", body.user_id),
-        Some(format!("Auto-generated from {} memories", memories.len())),
+        Some(format!("Auto-generated from {} memories", clusters.total)),
         None,
         Some(body.user_id.clone()),
     );
 
-    // Cluster memories by first category tag, default to "general"
-    let mut clusters: HashMap<String, Vec<String>> = HashMap::new();
-    for mem in &memories {
-        let cat = mem
-            .categories
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "general".to_string());
-        clusters.entry(cat).or_default().push(mem.content.clone());
-    }
-
-    for (cat, items) in &clusters {
-        let branch_id = cat.replace(' ', "_");
+    for category in &clusters.categories {
+        let branch_id = category.name.replace(' ', "_");
         mm.nodes.push(MindMapNode {
             id: branch_id.clone(),
-            label: cat.clone(),
+            label: category.name.clone(),
             parent_id: Some("root".to_string()),
             node_type: Some("branch".to_string()),
             color: None,
             metadata: None,
         });
-        for (i, item) in items.iter().take(5).enumerate() {
+        for (i, label) in category.leaves.iter().enumerate() {
             let leaf_id = format!("{}_leaf_{}", branch_id, i);
-            let short = if item.len() > 80 {
-                format!("{}…", &item[..80])
-            } else {
-                item.clone()
-            };
             mm.nodes.push(MindMapNode {
                 id: leaf_id,
-                label: short,
+                label: label.clone(),
                 parent_id: Some(branch_id.clone()),
                 node_type: Some("leaf".to_string()),
                 color: None,
