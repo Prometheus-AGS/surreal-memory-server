@@ -10,5 +10,6 @@ pub mod executor;
 pub mod hook;
 pub mod mcp;
 pub mod operations;
+pub mod persona;
 pub mod storage;
 pub mod workers;

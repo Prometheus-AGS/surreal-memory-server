@@ -623,7 +623,7 @@ async fn one_tenant_cannot_read_change_or_enumerate_another() {
         let list = get(&world.router, &format!("/api/v1/memory{scope}"), &a).await;
         assert_eq!(
             list.body,
-            json!([]),
+            json!({"memories": [], "next_cursor": null, "has_more": false}),
             "scope {scope:?} must show nothing of B"
         );
     }
@@ -909,8 +909,20 @@ async fn a_user_restricted_credential_sees_and_changes_only_its_own_memories() {
 
     // Omitted scope defaults to its own user; naming another (or empty) is refused.
     let own = get(&world.router, "/api/v1/memory", &u1).await;
-    assert_eq!(own.body.as_array().unwrap().len(), 1);
-    assert_eq!(own.body[0]["content"], json!("u1 own note"));
+    assert_eq!(own.body["memories"].as_array().unwrap().len(), 1);
+    assert_eq!(own.body["memories"][0]["content"], json!("u1 own note"));
+    assert_eq!(own.body["has_more"], json!(false));
+    // A cursor taken from another user's listing only positions within u1's.
+    let crossed = get(
+        &world.router,
+        &format!("/api/v1/memory?limit=1&cursor={u2_id}"),
+        &u1,
+    )
+    .await;
+    assert_eq!(crossed.status, StatusCode::OK, "{:?}", crossed.body);
+    for memory in crossed.body["memories"].as_array().unwrap() {
+        assert_eq!(memory["user_id"], json!("u1"), "never u2's memory");
+    }
     for scope in ["?user_id=u2", "?user_id="] {
         let list = get(&world.router, &format!("/api/v1/memory{scope}"), &u1).await;
         assert_eq!(list.status, StatusCode::FORBIDDEN, "scope {scope:?}");

@@ -56,6 +56,27 @@ pub struct ScopeFilterParams {
     pub session_id: Option<String>,
 }
 
+/// One page of `get_all_memories`. Follow `next_cursor` until it is absent.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct GetAllMemoriesParams {
+    #[schemars(description = "Filter by user ID")]
+    pub user_id: Option<String>,
+    #[schemars(description = "Filter by agent ID")]
+    pub agent_id: Option<String>,
+    #[schemars(description = "Filter by session ID")]
+    pub session_id: Option<String>,
+    #[schemars(
+        description = "Page size (default 50, max 200; default and max 25 with include_embeddings). Out-of-range values are rejected."
+    )]
+    #[serde(default, deserialize_with = "crate::coerce::opt_number")]
+    pub limit: Option<usize>,
+    #[schemars(description = "The next_cursor of the previous page; omit for the first page")]
+    pub cursor: Option<String>,
+    #[schemars(description = "Include embedding vectors (default false)")]
+    #[serde(default, deserialize_with = "crate::coerce::opt_bool")]
+    pub include_embeddings: Option<bool>,
+}
+
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MemoryIdParams {
     #[schemars(description = "The full record ID of the memory (e.g. 'memory:abc123')")]
@@ -736,20 +757,31 @@ impl MemoryHandler {
 
     pub async fn get_all_memories(
         &self,
-        params: ScopeFilterParams,
+        params: GetAllMemoriesParams,
     ) -> Result<CallToolResult, McpError> {
-        let memories = self
+        let page = self
             .storage
-            .get_all_memories(
-                params.user_id.as_deref(),
-                params.agent_id.as_deref(),
-                params.session_id.as_deref(),
-            )
+            .list_memories_page(surreal_memory::MemoryPageRequest {
+                user_id: params.user_id,
+                agent_id: params.agent_id,
+                session_id: params.session_id,
+                limit: params.limit,
+                cursor: params.cursor,
+                include_embeddings: params.include_embeddings.unwrap_or(false),
+            })
             .await
-            .map_err(Self::internal_error)?;
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&memories).unwrap_or_default(),
-        )]))
+            .map_err(|error| {
+                // Out-of-range limits and malformed cursors are the caller's.
+                if error.to_string().starts_with("invalid") {
+                    Self::invalid_params(error.to_string())
+                } else {
+                    Self::internal_error(error)
+                }
+            })?;
+        // Compact, so the text stays within the page byte budget.
+        let text = serde_json::to_string(&page)
+            .map_err(|error| Self::internal_error(anyhow::Error::new(error)))?;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     pub async fn search_memories(
@@ -1452,10 +1484,8 @@ impl MemoryHandler {
         params: GeneratePersonaMindmapParams,
     ) -> Result<CallToolResult, McpError> {
         use surreal_memory::{MapType, MindMap, MindMapNode};
-        // Fetch all memories for this user and cluster by category
-        let memories = self
-            .storage
-            .get_all_memories(Some(&params.user_id), None, None)
+        // Read the user's memories page by page, clustered by category.
+        let clusters = crate::persona::collect_persona(self.storage.as_ref(), &params.user_id)
             .await
             .map_err(Self::internal_error)?;
 
@@ -1463,43 +1493,26 @@ impl MemoryHandler {
             params.name.clone(),
             MapType::Radial,
             format!("Persona: {}", params.user_id),
-            Some(format!("Auto-generated from {} memories", memories.len())),
+            Some(format!("Auto-generated from {} memories", clusters.total)),
             None,
             Some(params.user_id.clone()),
         );
 
-        // Cluster memories by first category tag, default to "general"
-        use std::collections::HashMap;
-        let mut clusters: HashMap<String, Vec<String>> = HashMap::new();
-        for mem in &memories {
-            let cat = mem
-                .categories
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "general".to_string());
-            clusters.entry(cat).or_default().push(mem.content.clone());
-        }
-
-        for (cat, items) in &clusters {
-            let branch_id = cat.replace(' ', "_");
+        for category in &clusters.categories {
+            let branch_id = category.name.replace(' ', "_");
             mm.nodes.push(MindMapNode {
                 id: branch_id.clone(),
-                label: cat.clone(),
+                label: category.name.clone(),
                 parent_id: Some("root".to_string()),
                 node_type: Some("branch".to_string()),
                 color: None,
                 metadata: None,
             });
-            for (i, item) in items.iter().take(5).enumerate() {
+            for (i, label) in category.leaves.iter().enumerate() {
                 let leaf_id = format!("{}_leaf_{}", branch_id, i);
-                let short = if item.len() > 80 {
-                    format!("{}…", &item[..80])
-                } else {
-                    item.clone()
-                };
                 mm.nodes.push(MindMapNode {
                     id: leaf_id,
-                    label: short,
+                    label: label.clone(),
                     parent_id: Some(branch_id.clone()),
                     node_type: Some("leaf".to_string()),
                     color: None,
